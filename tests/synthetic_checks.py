@@ -126,23 +126,54 @@ dtm_diamond = embankment([])
 on_diamond = np.abs(np.abs(xx - 301) + np.abs(yy - 261) - 80) < 1e-6
 dtm_diamond[on_diamond] += 2.5
 proc, areas = run("diagonal", write_dtm(dtm_diamond, "diamond"), write_lines([diamond], "levees_diamond"))
-added = [line for line in (proc.stdout + proc.stderr).splitlines() if "added for 4-connectivity" in line]
-print(added[0].split("INFO ")[-1] if added else "no barrier log line")
-results.append(("no diagonal leakage through a staircase levee", areas is not None and len(areas) == 1))
+barrier = gdal.Open(str(workdir / "diagonal" / "barrier.tif")).ReadAsArray() == 1
+diagonal_only = (barrier[:-1, :-1] & barrier[1:, 1:] & ~barrier[:-1, 1:] & ~barrier[1:, :-1]) | \
+                (barrier[:-1, 1:] & barrier[1:, :-1] & ~barrier[:-1, :-1] & ~barrier[1:, 1:])
+results.append(("staircase levee: barrier is 4-connected and does not leak",
+                areas is not None and len(areas) == 1 and not diagonal_only.any()))
+
+# One line around the ring with a 10 m gap of its own.
+open_ring = LineString([(220, 265), (220, 340), (380, 340), (380, 180), (220, 180), (220, 255)])
+proc, areas = run("self_gap", write_dtm(embankment([inward(open_ring)]), "self_gap"),
+                  write_lines([open_ring], "levees_self_gap"))
+results.append(("gap within a single line is closed", areas is not None and len(areas) == 1))
 
 proc, areas = run("ring_coarse", dtm_ring, str(workdir / "levees_ring.gpkg"), ["--resolution", "4"])
 results.append(("closed ring at 4 m working resolution", areas is not None and len(areas) == 1))
 
+# Narrow extent cutting the ring: without buffer the compartment is flagged at the edge, with buffer it is complete.
 extent_file = workdir / "extent.gpkg"
-gpd.GeoDataFrame(geometry=[to_world(box(100, 0, 500, 400))], crs=EPSG).to_file(extent_file, driver="GPKG")
-proc, areas = run("ring_extent", dtm_ring, str(workdir / "levees_ring.gpkg"), ["--extent", str(extent_file)])
-results.append(("closed ring with pilot extent", areas is not None and len(areas) == 1))
+gpd.GeoDataFrame(geometry=[to_world(box(250, 0, 350, 400))], crs=EPSG).to_file(extent_file, driver="GPKG")
+proc, areas = run("extent_no_buffer", dtm_ring, str(workdir / "levees_ring.gpkg"),
+                  ["--extent", str(extent_file), "--buffer-m", "0"])
+results.append(("extent without buffer flags the cut compartment", areas is not None and len(areas) == 1
+                and bool(areas["edge"].iloc[0])))
+proc, areas = run("extent_buffer", dtm_ring, str(workdir / "levees_ring.gpkg"), ["--extent", str(extent_file)])
+results.append(("extent with buffer keeps the whole compartment", areas is not None and len(areas) == 1
+                and not bool(areas["edge"].iloc[0]) and areas["area_m2"].iloc[0] > 20000))
 
-rivers_inside = write_lines([LineString([(600, river_y), (0, river_y)]), LineString([(260, 300), (340, 220)])],
+# Lidar-like nodata over the river channel.
+dtm_hole = embankment([inward(ring_line)])
+dtm_hole[(np.abs(yy - river_y) <= 4) & (xx > 100) & (xx < 500)] = -9999
+proc, areas = run("nodata_hole", write_dtm(dtm_hole, "nodata_hole"), str(workdir / "levees_ring.gpkg"))
+results.append(("nodata hole over the river is filled", areas is not None and len(areas) == 1
+                and "interior nodata" in proc.stderr))
+
+# Tributary crossing the ring levee: river wins by default, protected with gated crossings.
+rivers_inside = write_lines([LineString([(600, river_y), (0, river_y)]), LineString([(300, 300), (300, river_y)])],
                             "river_inside")
-proc, areas = run("river_inside", dtm_ring, str(workdir / "levees_ring.gpkg"), rivers=rivers_inside)
-warned = "inside a levee-enclosed area" in proc.stderr
-results.append(("stream inside the ring: unprotected and warned", areas is not None and len(areas) == 0 and warned))
+dtm_tributary = embankment([inward(ring_line)]) - 1.0 * ((np.abs(xx - 300) <= 3) & (yy > river_y) & (yy < 300))
+dtm_tributary = write_dtm(dtm_tributary, "tributary")
+proc, areas = run("river_inside", dtm_tributary, str(workdir / "levees_ring.gpkg"), rivers=rivers_inside)
+enclosed = gpd.read_file(workdir / "river_inside" / "enclosed_streams.gpkg")
+results.append(("tributary through the levee: unprotected and reported", areas is not None and len(areas) == 0
+                and len(enclosed) == 1))
+# Stream enclosed by the ring (drained by a gate or pump): protected only with gated crossings.
+rivers_enclosed = write_lines([LineString([(600, river_y), (0, river_y)]), LineString([(260, 300), (340, 220)])],
+                              "river_enclosed")
+proc, areas = run("river_enclosed_gated", dtm_ring, str(workdir / "levees_ring.gpkg"), ["--gated-crossings"],
+                  rivers=rivers_enclosed)
+results.append(("enclosed stream with gated crossings: protected", areas is not None and len(areas) == 1))
 
 wrong_crs = write_dtm(base, "wrong_crs", epsg=32634)
 proc, _ = run("crs_mismatch", [dtm_ring[0], wrong_crs[1]], str(workdir / "levees_ring.gpkg"))

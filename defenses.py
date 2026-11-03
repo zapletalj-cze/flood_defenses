@@ -62,6 +62,33 @@ def array_to_ds(array, geotransform, wkt, path="", driver="MEM", nodata=NODATA):
     return ds
 
 
+def fill_nodata(array, to_fill, geotransform, wkt, max_search_cells):
+    # Interpolates the to_fill cells with gdal.FillNodata; other nodata cells stay NaN.
+    fill_ds = array_to_ds(np.where(to_fill, np.nan, array), geotransform, wkt)
+    mask_ds = array_to_ds((~to_fill & ~np.isnan(array)).astype(np.int32), geotransform, wkt, nodata=-1)
+    gdal.FillNodata(fill_ds.GetRasterBand(1), mask_ds.GetRasterBand(1), maxSearchDist=int(max_search_cells) + 10,
+                    smoothingIterations=0)
+    filled = fill_ds.ReadAsArray().astype(np.float64)
+    result = array.copy()
+    done = to_fill & (filled != NODATA)
+    result[done] = filled[done]
+    if (to_fill & ~done).any():
+        log.warning("%d cells could not be filled, keeping their original values.", (to_fill & ~done).sum())
+    return result
+
+
+def polygonize(labels, geotransform, wkt, crs):
+    vector_ds = gdal.GetDriverByName("MEM").Create("", 0, 0, 0, gdal.GDT_Unknown)
+    layer = vector_ds.CreateLayer("polygons", osr.SpatialReference(wkt=wkt), ogr.wkbPolygon)
+    layer.CreateField(ogr.FieldDefn("id", ogr.OFTInteger))
+    label_ds = array_to_ds(labels.astype(np.int32), geotransform, wkt, nodata=0)
+    mask_ds = array_to_ds((labels > 0).astype(np.int32), geotransform, wkt, nodata=-1)
+    gdal.Polygonize(label_ds.GetRasterBand(1), mask_ds.GetRasterBand(1), layer, 0)
+    features = [(f.GetField("id"), shapely.from_wkb(bytes(f.GetGeometryRef().ExportToWkb()))) for f in layer]
+    gdf = gpd.GeoDataFrame({"id": [f[0] for f in features]}, geometry=[f[1] for f in features], crs=crs)
+    return gdf.dissolve(by="id").reset_index()
+
+
 def rasterize(geometries, values, shape, geotransform, wkt, all_touched):
     vector_ds = gdal.GetDriverByName("MEM").Create("", 0, 0, 0, gdal.GDT_Unknown)
     srs = osr.SpatialReference(wkt=wkt)
@@ -199,6 +226,11 @@ parser.add_argument("--min-margin-m", type=float, default=0.3)
 parser.add_argument("--max-level-m", type=float, default=20.0)
 parser.add_argument("--min-area-m2", type=float, default=10000.0)
 parser.add_argument("--resolution", type=float, help="Working resolution in DTM units (default: native).")
+parser.add_argument("--buffer-m", type=float, default=1000.0,
+                    help="Context buffer around the extent; compartments are kept if they intersect the extent.")
+parser.add_argument("--gated-crossings", action="store_true",
+                    help="Treat river-levee crossings as closed (flap gates): rivers enclosed by levees "
+                         "do not flood their compartment from the main river.")
 parser.add_argument("--keep-intermediate", action="store_true", help="Write intermediate rasters as GeoTIFF.")
 args = parser.parse_args()
 args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -217,8 +249,10 @@ crs = reference_srs.ExportToWkt()
 gt_vrt = vrt.GetGeoTransform()
 native_res = abs(gt_vrt[1])
 
+extent = None
 if args.extent:
-    xmin, ymin, xmax, ymax = read_vectors(args.extent, crs).total_bounds
+    extent = read_vectors(args.extent, crs).union_all()
+    xmin, ymin, xmax, ymax = extent.buffer(args.buffer_m).bounds
     col0 = max(int(np.floor((xmin - gt_vrt[0]) / gt_vrt[1])), 0)
     col1 = min(int(np.ceil((xmax - gt_vrt[0]) / gt_vrt[1])), vrt.RasterXSize)
     row0 = max(int(np.floor((ymax - gt_vrt[3]) / gt_vrt[5])), 0)
@@ -234,6 +268,16 @@ dtm_native = band.ReadAsArray().astype(np.float64)
 if band.GetNoDataValue() is not None:
     dtm_native[dtm_native == band.GetNoDataValue()] = np.nan
 log.info("Native DTM grid: %d x %d cells, %.3f m.", dtm_native.shape[1], dtm_native.shape[0], native_res)
+
+# Interior nodata holes (typically water surfaces in lidar DTMs) would act as walls; nodata touching the grid
+# edge is treated as missing coverage and left as is.
+holes, n_holes = ndimage.label(np.isnan(dtm_native))
+edge_holes = np.unique(np.concatenate([holes[0], holes[-1], holes[:, 0], holes[:, -1]]))
+interior = (holes > 0) & ~np.isin(holes, edge_holes)
+if interior.any():
+    hole_size = max(max(s.stop - s.start for s in obj) for obj in ndimage.find_objects(holes) if obj is not None)
+    dtm_native = fill_nodata(dtm_native, interior, gt_native, wkt, hole_size)
+    log.info("Filled %d interior nodata cells.", interior.sum())
 
 coarse = args.resolution is not None and args.resolution > native_res * (1 + 1e-9)
 if args.resolution is not None and args.resolution < native_res * (1 - 1e-9):
@@ -263,7 +307,13 @@ log.info("Levee lines in the processing extent: %d.", len(levees))
 
 bridges = {}
 for line_idx, line in enumerate(levees.geometry):
-    for endpoint in (Point(line.coords[0]), Point(line.coords[-1])):
+    start, end = Point(line.coords[0]), Point(line.coords[-1])
+    # A nearly closed ring digitised as one line; the length condition keeps short lines from closing on themselves.
+    if TOUCH_TOLERANCE_M < start.distance(end) <= args.gap_tolerance_m and line.length > 3 * args.gap_tolerance_m:
+        key = tuple(sorted([(round(start.x, 3), round(start.y, 3)), (round(end.x, 3), round(end.y, 3))]))
+        bridges[key] = (levees.at[line_idx, "source"], LineString([start, end]))
+        continue
+    for endpoint in (start, end):
         candidates = [c for c in levees.sindex.query(endpoint, predicate="dwithin", distance=args.gap_tolerance_m)
                       if c != line_idx]
         if not candidates:
@@ -356,22 +406,41 @@ if not stream.any():
     raise SystemExit("No river cells inside the processing extent.")
 crossings = barrier & stream
 barrier_full = barrier.copy()
-barrier &= ~stream
 log.info("Stream cells: %d, river-barrier crossing cells: %d.", stream.sum(), crossings.sum())
+
+# Zones separated by barriers (crossings counted as barrier). Streams entering the grid edge belong to the
+# main network; streams in other zones are enclosed by levees (e.g. tributaries with flap gates).
+zones, _ = ndimage.label(~barrier_full & valid)
+stream_edge = np.zeros(shape, bool)
+stream_edge[[0, -1], :] = stream[[0, -1], :]
+stream_edge[:, [0, -1]] |= stream[:, [0, -1]]
+outer_zones = np.setdiff1d(np.unique(zones[stream_edge]), [0])
+stream_zones = np.setdiff1d(np.unique(zones[stream]), [0])
+if not len(outer_zones):
+    outer_zones = stream_zones[[np.argmax([(zones[stream] == z).sum() for z in stream_zones])]]
+inner_zones = np.setdiff1d(stream_zones, outer_zones)
+if args.gated_crossings:
+    seeds = stream & np.isin(zones, outer_zones)
+else:
+    barrier &= ~stream
+    seeds = stream
+inner_labels = np.zeros(shape, np.int32)
+for k, zone in enumerate(inner_zones, start=1):
+    inner_labels[zones == zone] = k
+    log.warning("Stream cells inside a levee-enclosed area: %d cells, area %.0f m2; treated as %s.",
+                (stream & (zones == zone)).sum(), (zones == zone).sum() * cell_area,
+                "gated (not a water source)" if args.gated_crossings else "unprotected (river wins)")
+enclosed_streams = polygonize(inner_labels, gt, wkt, crs)
+enclosed_streams["area_m2"] = ndimage.sum(np.ones(shape), inner_labels, enclosed_streams["id"]) * cell_area
+enclosed_streams["stream_cells"] = ndimage.sum(stream, inner_labels, enclosed_streams["id"]).astype(int)
+enclosed_streams["gated"] = args.gated_crossings
+enclosed_streams.to_file(args.output_dir / "enclosed_streams.gpkg", driver="GPKG")
 
 # --- Undefended DTM ---
 dtm_undef = dtm.copy()
 if barrier_full.any():
     removal = (ndimage.distance_transform_edt(~barrier_full, sampling=res) <= args.barrier_removal_width_m) & valid
-    fill_ds = array_to_ds(np.where(removal, np.nan, dtm), gt, wkt)
-    mask_ds = array_to_ds((~removal & valid).astype(np.int32), gt, wkt, nodata=-1)
-    max_search = int(np.ceil(4 * args.barrier_removal_width_m / res)) + 10
-    gdal.FillNodata(fill_ds.GetRasterBand(1), mask_ds.GetRasterBand(1), maxSearchDist=max_search, smoothingIterations=0)
-    filled = fill_ds.ReadAsArray().astype(np.float64)
-    unfilled = removal & (filled == NODATA)
-    if unfilled.any():
-        log.warning("%d removal cells could not be filled, keeping the original DTM there.", unfilled.sum())
-    dtm_undef[removal & ~unfilled] = filled[removal & ~unfilled]
+    dtm_undef = fill_nodata(dtm, removal, gt, wkt, np.ceil(4 * args.barrier_removal_width_m / res))
 
 # --- HAND on the undefended DTM ---
 reached = downstream_stream_cell(dtm_undef, stream)
@@ -386,21 +455,11 @@ hand_undef = dtm_undef - river_ref
 # --- Spill levels ---
 surface_def = hand_undef.copy()
 surface_def[barrier] = np.maximum(crest[barrier] - river_ref[barrier], hand_undef[barrier])
-spill_undef = priority_flood(hand_undef, stream)
-spill_def = priority_flood(surface_def, stream)
+spill_undef = priority_flood(hand_undef, seeds)
+spill_def = priority_flood(surface_def, seeds)
 spill_undef[~np.isfinite(spill_undef)] = np.nan
 spill_def[~np.isfinite(spill_def)] = np.nan
 margin = spill_def - spill_undef
-
-# Stream cells in areas fully enclosed by barriers make those areas unprotected.
-enclosed, _ = ndimage.label(~barrier_full & valid)
-edge_labels = np.unique(np.concatenate([enclosed[0], enclosed[-1], enclosed[:, 0], enclosed[:, -1]]))
-for label in np.setdiff1d(np.unique(enclosed[stream]), np.append(edge_labels, 0)):
-    region = enclosed == label
-    log.warning("Stream cells inside a levee-enclosed area: %d stream cells, area %.0f m2, centre %.1f %.1f; "
-                "this area is treated as unprotected.", (region & stream).sum(), region.sum() * cell_area,
-                gt[0] + (np.nonzero(region)[1].mean() + 0.5) * gt[1],
-                gt[3] + (np.nonzero(region)[0].mean() + 0.5) * gt[5])
 
 # --- Protected compartments ---
 protected = (margin >= args.min_margin_m) & (spill_undef <= args.max_level_m) & ~barrier
@@ -414,15 +473,8 @@ labels = relabel[labels]
 ids = np.arange(1, len(keep) + 1)
 log.info("Protected compartments: %d of %d candidates kept (min area %.0f m2).", len(ids), n_labels, args.min_area_m2)
 
-polygons = gdal.GetDriverByName("MEM").Create("", 0, 0, 0, gdal.GDT_Unknown)
-layer = polygons.CreateLayer("compartments", osr.SpatialReference(wkt=wkt), ogr.wkbPolygon)
-layer.CreateField(ogr.FieldDefn("id", ogr.OFTInteger))
-label_ds = array_to_ds(labels, gt, wkt, nodata=0)
-mask_ds = array_to_ds((labels > 0).astype(np.int32), gt, wkt, nodata=-1)
-gdal.Polygonize(label_ds.GetRasterBand(1), mask_ds.GetRasterBand(1), layer, 0)
-features = [(f.GetField("id"), shapely.from_wkb(bytes(f.GetGeometryRef().ExportToWkb()))) for f in layer]
-compartments = gpd.GeoDataFrame({"id": [f[0] for f in features]}, geometry=[f[1] for f in features], crs=crs)
-compartments = compartments.dissolve(by="id").reset_index()
+compartments = polygonize(labels, gt, wkt, crs)
+border = np.unique(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]]))
 stats = pd.DataFrame({
     "id": ids,
     "area_m2": counts[keep] * cell_area,
@@ -430,11 +482,19 @@ stats = pd.DataFrame({
     "margin_median_m": ndimage.median(margin, labels, ids) if len(ids) else [],
     "margin_max_m": ndimage.maximum(margin, labels, ids) if len(ids) else [],
     "river_ref_median_m": ndimage.median(river_ref, labels, ids) if len(ids) else [],
+    # Touching the processing boundary: the compartment may continue outside the processed DTM.
+    "edge": np.isin(ids, border),
 })
 compartments = compartments.merge(stats, on="id", how="right")
+if extent is not None:
+    compartments = compartments[compartments.intersects(extent)].reset_index(drop=True)
+    compartments["id"] = np.arange(1, len(compartments) + 1)
 compartments["rp"] = pd.Series([None] * len(compartments), dtype="Float64")
 compartments = compartments[["id", "area_m2", "protection_level_m", "margin_median_m", "margin_max_m",
-                             "river_ref_median_m", "rp", "geometry"]]
+                             "river_ref_median_m", "edge", "rp", "geometry"]]
+if compartments["edge"].any():
+    log.warning("%d compartments touch the processing boundary; increase --buffer-m or the DTM coverage.",
+                compartments["edge"].sum())
 compartments.to_file(args.output_dir / "protected_areas.gpkg", driver="GPKG")
 
 # --- Barrier lines with crest attributes ---
@@ -460,6 +520,7 @@ barrier_lines.to_file(args.output_dir / "barriers.gpkg", driver="GPKG")
 
 if args.keep_intermediate:
     for name, array in [("dtm_undefended", dtm_undef), ("hand_undef", hand_undef), ("river_ref", river_ref),
-                        ("spill_undef", spill_undef), ("spill_def", spill_def), ("margin", margin)]:
+                        ("spill_undef", spill_undef), ("spill_def", spill_def), ("margin", margin),
+                        ("barrier", barrier.astype(np.int32)), ("crest", np.where(barrier, crest, np.nan))]:
         array_to_ds(array, gt, wkt, path=args.output_dir / f"{name}.tif", driver="GTiff")
 log.info("Done. Outputs written to %s.", args.output_dir)
