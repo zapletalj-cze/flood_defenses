@@ -1,0 +1,14 @@
+[workspace]
+name = "flood_defenses"
+authors = ["Jakub Zapletal <jakub.zapletal00@gmail.com>"]
+channels = ["conda-forge"]
+platforms = ["win-64"]
+
+[dependencies]
+python = ">=3.11"
+gdal = ">=3.11"
+numpy = "*"
+scipy = "*"
+numba = "*"
+geopandas = ">=1.0"
+shapely = ">=2.0"
