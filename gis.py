@@ -1925,6 +1925,45 @@ class Vector:
         )
         return np.bincount(idx_zone, weights=lengths, minlength=len(polygons))
 
+    @staticmethod
+    def layer_names(path):
+        """
+        :param path: vector file
+        :return: list of layer names (stops with a message if the file cannot be opened)
+        """
+        ds = ogr.Open(str(path))
+        if ds is None:
+            raise SystemExit(f"Cannot open vector file: {path}")
+        return [ds.GetLayer(i).GetName() for i in range(ds.GetLayerCount())]
+
+    @staticmethod
+    def single_layer_copy(path, layer, out_path):
+        """
+        Copies one layer of a multi-layer vector source into its own single-layer
+        GeoPackage with gdal.VectorTranslate, so that the copy can be read without
+        selecting a layer
+        :param path: multi-layer vector file
+        :param layer: name of the layer to copy
+        :param out_path: output .gpkg (replaced)
+        :return: out_path as string
+        """
+        if layer not in Vector.layer_names(path):
+            raise SystemExit(
+                f"{path} has no layer {layer!r}; layers: {Vector.layer_names(path)}"
+            )
+        os.makedirs(os.path.dirname(str(out_path)) or ".", exist_ok=True)
+        if exists(str(out_path)):
+            os.remove(str(out_path))
+        copied = gdal.VectorTranslate(
+            str(out_path),
+            str(path),
+            options=gdal.VectorTranslateOptions(format="GPKG", layers=[layer]),
+        )
+        if copied is None:
+            raise SystemExit(f"Layer {layer!r} of {path} could not be copied.")
+        copied = None
+        return str(out_path)
+
 
 class Geometry:
     # from StackOverflow to be tested
@@ -3026,6 +3065,20 @@ class Config:
         "evidence.hint_dry_share": "float",
         "evidence.hint_min_scenes": "int",
         "evidence.hint_exclusion_m": "float",
+        "country.lulc.enabled": "bool",
+        "country.lulc.worldcover": "opt_paths",
+        "country.lulc.urban_atlas": "opt_paths",
+        "country.lulc.urban_atlas_layer": "str",
+        "country.lulc.urban_atlas_class_field": "str",
+        "country.lulc.worldcover_categories": "table",
+        "country.lulc.urban_atlas_categories": "table",
+        "country.lulc.max_damage_csv": "opt_path",
+        "country.lulc.depth_damage_csv": "opt_path",
+        "sources.worldcover_url_template": "str",
+        "sources.worldcover_grid_url": "str",
+        "sources.worldcover_tile_field": "str",
+        "sources.worldcover_version": "str",
+        "sources.worldcover_year": "int",
     }
     ALLOWED = {
         "country.dtm_conversion": {"A", "B"},
@@ -3254,6 +3307,30 @@ class Config:
             and cfg["sources"]["gfm_screen_resolution_m"] <= 0
         ):
             errors.append("sources.gfm_screen_resolution_m must be positive")
+        lulc = c.get("lulc", {})
+        for table in ["worldcover_categories", "urban_atlas_categories"]:
+            if f"country.lulc.{table}" not in keys:
+                continue
+            for code, category in lulc[table].items():
+                if table == "worldcover_categories" and not (
+                    str(code).isdigit() and 0 < int(code) < 256
+                ):
+                    errors.append(
+                        f"lulc.worldcover_categories: class {code!r} is not a raster value 1-255"
+                    )
+                if not (
+                    isinstance(category, str)
+                    and category.replace("_", "").isalnum()
+                    and category.isascii()
+                ):
+                    errors.append(
+                        f"lulc.{table}: category {category!r} must be a name of letters, digits and _"
+                    )
+        if {"country.lulc.urban_atlas", "country.lulc.urban_atlas_class_field"} <= keys:
+            if lulc["urban_atlas"] and not lulc["urban_atlas_class_field"]:
+                errors.append(
+                    "lulc.urban_atlas is set but lulc.urban_atlas_class_field is empty"
+                )
         for date_key in ["sources.gfm_date_from", "sources.gfm_date_to"]:
             value = cfg.get("sources", {}).get(date_key.split(".")[1], "")
             if date_key in keys and value:

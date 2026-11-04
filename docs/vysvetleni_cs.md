@@ -495,6 +495,49 @@ rozdělení tříd ochrany.
 - **Ruční zásahy (overrides).** Bod se známou RP uvnitř kompartmentu má vždy přednost:
   `rp = rp_low = rp_high`. Pozorování ho nikdy nemění.
 
+### 9.6 Doplňková expozice z land cover (modul HAND_YZ)
+
+**Proč.** GHSL měří budovy. Hodnota mimo budovy proto v 9.2 chybí:
+- plodiny;
+- silnice, železnice a přístavy;
+- venkovní zařízení průmyslových areálů.
+
+Modul `HAND_YZ.py` ji doplní z dat o využití a krytu území. Hodnotu z GHSL tedy
+**doplňuje**, nenahrazuje.
+
+1. **Data.**
+   - **ESA WorldCover 10 m** (2021, v200) všude. `download_worldcover.py` stáhne dlaždice
+     oficiální mřížky 3° × 3°, které zasahují do koridoru, a sestaví `worldcover.vrt`.
+   - **Urban Atlas** tam, kde ho dodáte (ruční stažení). Má přednost všude, kde leží jeho
+     polygony, i s třídami bez hodnoty, protože je podrobnější a rozlišuje využití
+     území.
+   - **Vícevrstvý soubor** se převede na jednovrstvou kopii přes `gdal.VectorTranslate`.
+2. **Kategorie.** Třídy WorldCover a Urban Atlasu se přiřadí kategoriím expozice
+   (např. `agriculture`, `built_up`, `transport`). Každá kategorie má:
+   - hodnotu na m² pozemku (`lulc.max_damage_csv`);
+   - vlastní křivku hloubka–škoda (`lulc.depth_damage_csv`).
+3. **Škoda.** Hloubka je stejná jako v 9.3: `max(0, úroveň ochrany − HAND)`.
+   Hodnota buňky = plocha × hodnota na m² její kategorie; škoda = hodnota × podíl škody
+   z křivky kategorie. Součty za kompartment a kategorii se zapíší do
+   `exposure_lulc.csv`.
+4. **Spojení.** S `lulc.enabled = true` počítá `rp_index.py`
+   `value_exposed = value_ghsl + value_lulc`. Skóre pak vychází ze součtu a obě části
+   zůstanou ve výstupu.
+5. **Pozor na dvojí započtení.** Hodnoty na m² smějí pokrýt jen to, co nejsou budovy z
+   GHSL.
+   - **Třída „built-up“ WorldCoveru** obsahuje i budovy, proto má mít hodnotu jen za
+     komunikace, sítě a venkovní majetek.
+   - **Nejisté hodnoty** nastavte na 0.
+6. **Kontrolní body.** Každá jednotka si uloží otisk (hash) vstupů: hodnot, křivek,
+   převodníků tříd a dat souborů. Opakovaný běh přepočítá právě jednotky, kterým se
+   vstupy změnily (testováno).
+
+**Co je ověřené.**
+- **WorldCover:** vzor URL a mřížka z oficiálního stahovacího skriptu ESA, skutečný
+  požadavek na dlaždici, kódy tříd a licence CC BY 4.0 přímo z metadat dlaždice.
+- **Urban Atlas:** název pole a seznam kódů ověřit nešlo (hostitelé EEA byli v této
+  session blokovaní), proto jsou v konfiguraci prázdné.
+
 ---
 
 ## 10. Pozorování I: satelitní záplavy GFM
@@ -750,6 +793,7 @@ Všechny sady prošly při běhu od nuly.
 | `test_kernels` | 16 | uzavřený okruh, mezera, diagonální hráz, vnořené okruhy v obou pořadích výšek, šíření výchozích buněk a pořadí, prolomení a nodata, chyba B1 reprodukovaná bez zahloubení a opravená s ním |
 | `test_pipeline` | 40 | celý řetězec fáze A na syntetických zemích: šev mezi jádry (okruh právě jednou), přemostěná a široká mezera, schodovitá hráz, kompartment delší než okno, pravidlo rozporu, opravy B2–B4, řeka celá jako nodata, prázdné hráze |
 | `test_stage_b` | 20 | OSM: stavidlo na křížení a čerpací stanice na dolním konci určeném z DTM, takže okruhy jsou chráněné až po kroku OSM; GHSL včetně hledání nejnovější epochy; součty převzorkování v toleranci 1 %; strop, interval, ruční zásah; kvantilové mapování |
+| `test_hand_yz` | 7 | výběr dlaždic WorldCover z mřížky; hodnota z land cover shodná s nezávislým výpočtem; přednost Urban Atlasu z dvouvrstvého souboru; otisk vstupů (beze změny se nic nepřepočítá, změna hodnot se pozná); `value_exposed = value_ghsl + value_lulc` |
 | `test_stage_c` | 26 | mock STAC (token, stránkování GET i POST); vyřazení skoro suché scény; nodata GFM z konfigurace; výsledky held/flooded/no_test; datumový filtr; upozornění u neznámé suché kapsy a nutnost `hint_exclusion_m`; GloFAS z NetCDF i GRIB se shodným výsledkem; Gumbel; přiřazení podle poměru ploch; všechny případy spojení intervalů; opakovatelnost; validace proti nezávislému výpočtu |
 
 ---
@@ -795,6 +839,8 @@ Všechny sady prošly při běhu od nuly.
 6. **Nový klíč `hint_exclusion_m`** (výchozí 40 m).
 7. **Zástupné prahy** `f_*`, rozsah poměru ploch, rozdělení tříd a strop.
 8. **Povodeň pro kontrolu v QGIS.** Prosím o určení události.
+9. **HAND_YZ.** Převodník tříd na kategorie, hodnoty a křivky kategorií a ověření pole a
+   kódů Urban Atlasu; přepínač `lulc.enabled` je ve výchozím stavu vypnutý.
 
 ---
 
@@ -821,3 +867,4 @@ Všechny sady prošly při běhu od nuly.
 | „vydržel“, „zaplaven“, „neprůkazné“, „bez testu“ | `held`, `flooded`, `inconclusive`, `no_test` |
 | upozornění na chybějící bariéru | missing-barrier hint |
 | dolní a horní mez | lower and upper bound, `obs_rp_low`, `obs_rp_high` |
+| využití a kryt území | land use / land cover (LULC), `value_lulc` |

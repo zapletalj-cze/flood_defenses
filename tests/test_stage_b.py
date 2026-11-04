@@ -284,6 +284,9 @@ max_damage_csv = "{data / 'max_damage.csv'}"
 depth_damage_csv = "{data / 'depth_damage.csv'}"
 value_total_tolerance = 0.01
 
+[countries.T4.lulc]
+enabled = false
+
 [sources]
 request_pause_s = 0.1
 max_retries = 1

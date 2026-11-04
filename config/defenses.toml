@@ -26,6 +26,7 @@ placeholders = [
     "sources.gfm_reference_water_values",
     "sources.gfm_nodata_values",
     "sources.glofas_valid_time_ends_day",
+    "country.lulc.worldcover_categories",
 ]
 
 [general]
@@ -105,6 +106,23 @@ max_damage_csv = ""                          # user provided (JRC global depth-d
 depth_damage_csv = ""                        # user provided
 value_total_tolerance = 0.01                 # allowed relative difference of value totals after warping
 
+# HAND_YZ: land use / land cover exposure that supplements the GHSL building value (processing/HAND_YZ.py).
+# Category values must cover only assets that GHSL buildings do not hold (crops, roads, rails, open-air equipment),
+# otherwise buildings are counted twice.
+[countries.XX.lulc]
+enabled = false                 # rp_index.py adds the land cover value to the GHSL value when true
+worldcover = []                 # local ESA WorldCover map tiles; empty = tiles of download_worldcover.py
+urban_atlas = []                # optional Urban Atlas files (manual download); they take precedence where present
+urban_atlas_layer = ""          # layer copied from multi-layer files with gdal.VectorTranslate
+urban_atlas_class_field = ""    # NOT VERIFIED: field with the class code (a catalogue search shows code_2018)
+# WorldCover class value -> exposure category. Class values are verified in the product legend (10 tree cover,
+# 20 shrubland, 30 grassland, 40 cropland, 50 built-up, 60 bare/sparse vegetation, 70 snow and ice, 80 permanent
+# water, 90 herbaceous wetland, 95 mangroves, 100 moss and lichen); the mapping itself is a placeholder.
+worldcover_categories = { "40" = "agriculture", "50" = "built_up" }
+urban_atlas_categories = {}     # NOT VERIFIED codes: Urban Atlas class code -> category; fill after checking the nomenclature
+max_damage_csv = ""             # user provided: columns country + one per category, value per m2 of land
+depth_damage_csv = ""           # user provided: depth_m + one damage fraction column per category
+
 [sources]
 request_pause_s = 1.0           # pause between requests; retry k waits request_pause_s * 2**k
 max_retries = 4
@@ -156,6 +174,13 @@ glofas_upstream_area_to_km2 = 1e-6   # m2 -> km2; check the units attribute of y
 glofas_min_upstream_area_km2 = 0   # placeholder
 glofas_min_days_per_year = 330  # annual maxima only from years with at least this many days
 glofas_valid_time_ends_day = true   # placeholder: a 24 h value stamped at 00 UTC belongs to the previous day
+# ESA WorldCover 10 m (CC BY 4.0). Verified: URL pattern and grid from the official ESA-WorldCover download script,
+# a tile request (HTTP 200) and the legend in the tile metadata.
+worldcover_url_template = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/{version}/{year}/map/ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif"
+worldcover_grid_url = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v100/2020/esa_worldcover_2020_grid.geojson"
+worldcover_tile_field = "ll_tile"   # tile name field of the grid (lower-left corner, e.g. N48E015)
+worldcover_version = "v200"
+worldcover_year = 2021
 osm_tags_hydraulic = { waterway = ["sluice_gate", "lock_gate", "weir", "dam"], man_made = ["pumping_station"] }
 osm_tags_drains = { waterway = ["drain", "ditch", "canal"] }
 osm_tags_closing = { waterway = ["sluice_gate", "lock_gate"] }   # structures that close a river at a levee crossing

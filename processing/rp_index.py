@@ -1,7 +1,8 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
 # Estimates a return period of protection per compartment from exposure (GHSL building volume valued with JRC-based
-# maximum damages and depth-damage curves) per metre of levee and from the river size (upstream area).
+# maximum damages and depth-damage curves, plus the land cover value of HAND_YZ.py when enabled) per metre of levee
+# and from the river size (upstream area).
 
 import json
 import logging
@@ -48,6 +49,7 @@ KEYS = [
     "country.rp.max_damage_csv",
     "country.rp.depth_damage_csv",
     "country.rp.value_total_tolerance",
+    "country.lulc.enabled",
     "sources.ghsl_nodata_as_zero",
 ]
 OBSERVATION_COLUMNS = {  # filled by rp_bounds.py (Stage C)
@@ -321,6 +323,33 @@ if __name__ == "__main__":
         log.warning(
             "%d compartments have no exposure value (units not processed).",
             int(result["value_exposed"].isna().sum()),
+        )
+    # Land cover exposure (HAND_YZ.py) supplements the building value.
+    result["value_ghsl"] = result["value_exposed"]
+    result["value_lulc"] = 0.0
+    if country["lulc"]["enabled"]:
+        lulc_path = out_dir / "exposure_lulc.csv"
+        if not lulc_path.exists():
+            raise SystemExit(
+                "lulc.enabled is true but exposure_lulc.csv is missing; run HAND_YZ.py first."
+            )
+        lulc = pd.read_csv(lulc_path).drop(columns=["unit_id", "unit_label"])
+        result = result.drop(columns="value_lulc").merge(
+            lulc, on="compartment_id", how="left"
+        )
+        if result["value_lulc"].isna().any():
+            log.warning(
+                "%d compartments have no land cover value (HAND_YZ.py not run for their units); 0 is used.",
+                int(result["value_lulc"].isna().sum()),
+            )
+        lulc_columns = [c for c in lulc.columns if c != "compartment_id"]
+        result[lulc_columns] = result[lulc_columns].fillna(0.0)
+        result["value_exposed"] = result["value_ghsl"] + result["value_lulc"]
+        log.info(
+            "Land cover value added: %.4g on top of %.4g from buildings (%.1f %%).",
+            result["value_lulc"].sum(),
+            result["value_ghsl"].sum(),
+            100 * result["value_lulc"].sum() / max(result["value_ghsl"].sum(), 1e-9),
         )
 
     # --- Levee length, upstream area ---

@@ -20,7 +20,8 @@ explicitly.
 | A | `gis.py` additions, `prepare_dtm.py`, `build_units.py`, `compartments.py` | done, tested, benchmarked |
 | A+ | faster kernels; fixes B1–B4; gap filling for water surfaces | done, tested, benchmarked |
 | B | `download_osm.py`, `osm_hydraulics.py`, `download_ghsl.py`, `rp_index.py` | done, tested on synthetic data; download URLs not verified |
-| C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (25 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
+| C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
+| HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 
 ---
 
@@ -75,7 +76,8 @@ pixi run prepare-dtm        pixi run download-osm       pixi run download-gfm   
 pixi run build-units        pixi run osm-hydraulics     pixi run gfm-evidence       pixi run test-pipeline
 pixi run compartments       pixi run download-ghsl      pixi run download-glofas    pixi run test-stage-b
                             pixi run rp-index           pixi run rp-bounds          pixi run test-stage-c
-                                                        pixi run validate
+pixi run download-worldcover                            pixi run validate           pixi run test-hand-yz
+pixi run hand-yz
 ```
 
 `pixi run python -m processing.compartments` works the same way. Running a script by its
@@ -109,12 +111,14 @@ download/
   download_ghsl.py         GHSL building volume tiles -> VRT mosaics
   download_gfm.py          GFM scene search (STAC), screening, clipped layers per unit
   download_glofas.py       GloFAS daily discharge and upstream area -> compact cell series
+  download_worldcover.py   ESA WorldCover tiles over the corridor -> worldcover.vrt
 processing/
   prepare_dtm.py           DTM inspection, footprint, benchmark, estimates, optional conversion
   build_units.py           river corridor, processing units, memory estimate
   osm_hydraulics.py        water sources (closed streams), pumping stations
   compartments.py          per-unit compartments in parallel, checkpoints, merging
   rp_index.py              exposure, score, RP per compartment
+  HAND_YZ.py               land cover exposure (WorldCover, Urban Atlas) supplementing GHSL
   gfm_evidence.py          held / flooded tests per compartment and scene; missing-barrier hints
   rp_bounds.py             event return periods, observed bounds, combination with the model
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
@@ -122,7 +126,8 @@ tests/
   test_kernels.py          numba kernels on small grids (16 checks)
   test_pipeline.py         end-to-end synthetic countries for Stage A (40 checks)
   test_stage_b.py          end-to-end synthetic country for Stage B (20 checks)
-  test_stage_c.py          end-to-end Stage C on the Stage B country (25 checks)
+  test_stage_c.py          end-to-end Stage C on the Stage B country (26 checks)
+  test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -140,6 +145,7 @@ function was modified. The only change to existing lines is the import block.
 | `Raster` | `array_to_mem`, `write_array`, `best_compression` | Array ↔ GDAL; tiled compressed GeoTIFF; ZSTD → DEFLATE fallback |
 | `Raster` | `rasterize_geometries`, `polygonize_labels`, `fill_nodata_cells`, `footprint` | Burn geometries; label raster → polygons; `gdal.FillNodata` on selected cells; valid-data footprint |
 | `Vector` | `check_single_layer`, `read_merged`, `write_gpkg`, `length_near_boundary` | Single-layer inputs; merged reads with `source`; single-layer GeoPackage output; levee length near compartment boundaries |
+| `Vector` | `layer_names`, `single_layer_copy(path, layer, out_path)` | Layers of a vector source; one layer of a multi-layer source copied to its own GeoPackage with `gdal.VectorTranslate` |
 | `Hydro` | `breach_to_streams(dem, stream, burn, burn_buffer_cells)` | River cell reached downstream (numba) |
 | `Hydro` | `priority_flood(surface, seeds)` | Spill level, seed index and reach order per cell (numba) |
 | `Hydro` | `distance_cells(mask, limit)` | Chamfer distance in cells (numba) |
@@ -206,6 +212,8 @@ Keys beyond the original schema, with the reason for each:
 | `sources.glofas_min_days_per_year` | A year enters the annual maxima only if it is nearly complete |
 | `sources.glofas_valid_time_ends_day` | Day attribution of daily values stamped at the end of their period (§11.1) |
 | `evidence.river_level_percentile`, `hint_margin_m`, `hint_dry_share`, `hint_min_scenes`, `hint_exclusion_m` | Missing-barrier hints (§10.3); the specification fixed 90 % and "most scenes" in words |
+| `country.lulc.*` (table) | Land cover exposure of `HAND_YZ.py` (§9.3): switch, WorldCover and Urban Atlas inputs, class-to-category mappings, values and curves per category |
+| `sources.worldcover_url_template`, `worldcover_grid_url`, `worldcover_tile_field`, `worldcover_version`, `worldcover_year` | ESA WorldCover tiles (§9.3); verified |
 
 ## 4. Run order and outputs
 
@@ -218,7 +226,9 @@ Keys beyond the original schema, with the reason for each:
 | 5 | `osm_hydraulics.py` | `rivers_sources.gpkg`, `osm_pumping.gpkg` |
 | 6 | `compartments.py` (first two units, then all) | per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `compartments.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `compartments.gpkg`, `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
 | 7 | `download_ghsl.py` | `ghsl_total.vrt`, `ghsl_non_residential.vrt`, `ghsl_sources.json` |
-| 8 | `rp_index.py` | per unit `rp_index.csv`, `rp_index.json`; merged `compartments_rp.gpkg` |
+| 7a (optional) | `download_worldcover.py` | `worldcover.vrt`, `worldcover_sources.json`; tiles in `work/<c>/worldcover/` |
+| 7b (optional) | `HAND_YZ.py` | per unit `hand_yz.csv`, `hand_yz.json`; merged `exposure_lulc.csv` |
+| 8 | `rp_index.py` | per unit `rp_index.csv`, `rp_index.json`; merged `compartments_rp.gpkg` (with `value_ghsl`, `value_lulc`) |
 | 9 | `download_gfm.py` | `work/<c>/gfm/screening.csv` (checkpoint), clipped layers in `work/<c>/gfm/<unit>/`, `gfm_index.csv` |
 | 10 | `gfm_evidence.py` | per unit `gfm_evidence.csv` (and `missing_barrier_hints.gpkg`); merged `gfm_evidence.csv`, `gfm_evidence.gpkg`, `missing_barrier_hints.gpkg` |
 | 11 | `download_glofas.py` | `glofas_discharge.npz`; yearly downloads in `work/<c>/glofas/` |
@@ -632,6 +642,62 @@ should be split at confluences.
 9. **Stage C columns.** `obs_rp_low`, `obs_rp_high`, `n_held`, `n_flooded`,
    `obs_conflict` and `model_obs_conflict` are present and empty; `rp_bounds.py` fills
    them (§11). `value_exposed` is an added column.
+
+### 9.3 Land cover exposure (`HAND_YZ.py`)
+
+GHSL measures buildings. Assets outside buildings carry no value in §9.1:
+- crops;
+- roads, railways and port areas;
+- open-air equipment of industrial sites.
+
+`HAND_YZ.py` adds them from land use and land cover data. The resulting value is added to
+the building value: it **supplements** GHSL and never replaces it.
+
+1. **Data.**
+   - **ESA WorldCover 10 m** (2021, v200) everywhere. `download_worldcover.py` downloads
+     the tiles of the official 3° tile grid that touch the corridor and builds
+     `worldcover.vrt`. Local tiles can be listed in `lulc.worldcover` instead.
+   - **Urban Atlas** where you provide it (manual download). It takes precedence wherever
+     its polygons lie, also with classes that carry no value, because it is finer and
+     distinguishes land use.
+   - **Multi-layer files.** The configured layer (`urban_atlas_layer`) of a multi-layer
+     file is copied to its own GeoPackage with `gdal.VectorTranslate`.
+2. **Categories.** `worldcover_categories` and `urban_atlas_categories` map class codes
+   to exposure categories such as `agriculture`, `built_up` and `transport`. Each category
+   has two inputs:
+   - a value per m² of land (`lulc.max_damage_csv`, columns `country` + categories);
+   - a depth-damage curve (`lulc.depth_damage_csv`, `depth_m` + categories).
+3. **Damage.** Depth per cell is `max(0, protection_level_m − hand_undef)`, as in §9.1.
+   Value = cell area × value per m² of the cell's category; damage = value × the
+   category's damage fraction at that depth. Sums per compartment and per category go to
+   `exposure_lulc.csv`: `value_lulc`, `lulc_exposed_area_m2`, `lulc_<category>`.
+4. **Grid.** WorldCover classes are read with nearest neighbour onto the working grid.
+   Its pixels (about 6–9 m in Europe) are as large as or larger than the working cells
+   (2–5 m). Urban Atlas polygons are rasterized by cell centre.
+5. **Combination in `rp_index.py`.** With `lulc.enabled = true`:
+   `value_exposed = value_ghsl + value_lulc`. The score then uses this sum, and both
+   parts stay in `compartments_rp.gpkg`.
+6. **No double counting.** The values per m² must cover only what GHSL does not hold.
+   - **WorldCover `built_up` class:** it contains buildings, so its value should cover
+     roads, utilities and open-air assets only.
+   - **Unknown values:** set the value to 0 if unsure.
+7. **Checkpoints.** Each unit stores a hash of its inputs in `hand_yz.json`: values,
+   curves, mappings, file dates of the WorldCover tiles and Urban Atlas files. A rerun
+   recomputes exactly the units whose inputs changed (tested).
+
+**Verified and unverified sources.**
+- **WorldCover, verified:**
+  - URL pattern and tile grid from the official ESA-WorldCover download script;
+  - a request to a real tile (HTTP 200);
+  - class codes and licence (CC BY 4.0) from the tile's own metadata: 10 tree cover,
+    20 shrubland, 30 grassland, 40 cropland, 50 built-up, 60 bare/sparse vegetation,
+    70 snow and ice, 80 permanent water, 90 herbaceous wetland, 95 mangroves, 100 moss
+    and lichen.
+- **Urban Atlas, not verified:** the class field and code list could not be checked,
+  because the EEA hosts were blocked in this session. A catalogue search shows the field
+  `code_2018` and codes such as 11100 (continuous urban fabric), 12100 (industrial,
+  commercial, public, military and private units) and 12210 (fast transit roads). The
+  configuration entries are therefore empty.
 
 ## 10. Observational evidence: Copernicus GFM
 
@@ -1062,6 +1128,16 @@ compartments take seconds.
   - **RP:** exposure inside and outside a town; cap, `min` rule and class values;
     interval; override; `v_rel`.
   - **Quantile mapping:** shares within 1/N; ties.
+- **`pixi run test-hand-yz`, 7 checks,** on the Stage B country:
+  - **`download_worldcover`:** tiles chosen from the grid (the corridor crosses 15° E,
+    so two tiles), VRT, licence;
+  - **land cover value** per compartment equal to an independent computation from the
+    unit rasters;
+  - **Urban Atlas:** from a two-layer file; takes precedence (tree cover valued as
+    transport, an unvalued class over half of ring 2);
+  - **checkpoint hash:** an unchanged rerun skips every unit, doubled values recompute
+    them;
+  - **`rp_index`:** `value_exposed = value_ghsl + value_lulc`.
 - **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
@@ -1195,6 +1271,9 @@ from outside.**
   If the peak arrived *after* the overpass, that mean exceeds the flow the levee had faced
   so far, and the lower bound is too high. The specification accepts this convention.
 - **L13. Day attribution of GloFAS values** is configurable but unverified (§11.1).
+- **L14. Land cover classes are coarse proxies for asset value.** A WorldCover
+  "built-up" pixel can be a road, a yard or a building. Category values are national
+  averages per m² and need your calibration (§9.3).
 
 ### 15.4 Open decisions (assumptions taken, please confirm)
 
@@ -1237,6 +1316,11 @@ from outside.**
     3. open `gfm_evidence.gpkg` in QGIS.
 12. **Evidence thresholds.** `f_wet_comparison` 0.5, `f_dry_inside` 0.05, `f_wet_inside`
     0.3 and the upstream ratio range 0.7–1.3 are placeholders, as in the specification.
+13. **Land cover (HAND_YZ):**
+    - the class-to-category mapping and the values and curves per category are yours
+      to set;
+    - the Urban Atlas class field and codes need checking;
+    - the switch `lulc.enabled` is off by default.
 
 ### 15.5 Issues in the existing `gis.py` (reported, not changed)
 
@@ -1260,6 +1344,8 @@ from outside.**
 | JRC global depth-damage functions | Maximum damage and damage curves | provided by the user as CSV | per the JRC publication |
 | Copernicus Emergency Management Service, Global Flood Monitoring (GFM) | held / flooded tests, missing-barrier hints | STAC API, endpoint to be confirmed (§15.4) | Copernicus data policy (free and open); confirm the attribution text on the product page |
 | GloFAS historical river discharge, `cems-glofas-historical` | event return periods | CEMS Early Warning Data Store (dataset page checked) | licence shown on the EWDS dataset page, accepted with the download |
+| ESA WorldCover 10 m 2021 v200 | land cover exposure (§9.3) | public bucket `esa-worldcover` (eu-central-1), verified | CC BY 4.0; attribution from the file: "ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium" |
+| Copernicus Land Monitoring Service, Urban Atlas | land cover exposure where available (§9.3) | manual download from the CLMS portal | Copernicus data policy; confirm the attribution text with the download |
 
 For GHSL, record the release, epoch and the citation of the GHSL Data Package 2023 with
 the outputs: `ghsl_sources.json` lists the epoch, tiles and URLs used.
