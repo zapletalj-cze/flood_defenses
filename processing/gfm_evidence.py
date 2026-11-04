@@ -105,7 +105,7 @@ def evidence_unit(task):
     # Comparison zone per compartment: outside all compartments, within the comparison distance, not higher than
     # the median HAND inside the compartment and not above max_level_m.
     zones = {}
-    for label, compartment_id in kept.items():
+    for label, comp_id in kept.items():
         inside = labels == label
         if not inside.any():
             continue
@@ -127,14 +127,14 @@ def evidence_unit(task):
             & (hand[part] <= level)
             & (hand[part] <= p["max_level_m"])
         )
-        zones[label] = (compartment_id, part, inside[part], zone)
+        zones[label] = (comp_id, part, inside[part], zone)
 
     if task["hints"]:
-        rivers = gpd.read_file(task["rivers_used"], bbox=bounds)
+        gdf_rn = gpd.read_file(task["rivers_used"], bbox=bounds)
         stream = (
             gis.Raster.rasterize_geometries(
-                rivers.geometry,
-                np.ones(len(rivers)),
+                gdf_rn.geometry,
+                np.ones(len(gdf_rn)),
                 labels.shape,
                 gt,
                 wkt,
@@ -145,11 +145,11 @@ def evidence_unit(task):
         )
         # Levee bodies, their toes and the mixed GFM pixels along them stay dry whenever a levee holds: cells
         # close to a barrier line or a compartment are not tested.
-        barriers = gpd.read_file(task["barrier_lines"], bbox=bounds)
+        gdf_bl = gpd.read_file(task["barrier_lines"], bbox=bounds)
         near = (labels > 0) | (
             gis.Raster.rasterize_geometries(
-                barriers.geometry,
-                np.ones(len(barriers)),
+                gdf_bl.geometry,
+                np.ones(len(gdf_bl)),
                 labels.shape,
                 gt,
                 wkt,
@@ -165,7 +165,7 @@ def evidence_unit(task):
         test_count = np.zeros(labels.shape, np.uint16)
 
     nodata = p["nodata_values"][0] if p["nodata_values"] else None
-    rows = []
+    list_rows = []
     for scene in task["scenes"]:
         layers = {}
         for role in ["flood", "exclusion", "reference_water"]:
@@ -187,7 +187,7 @@ def evidence_unit(task):
             & np.isfinite(hand)
         )
         wet = valid & np.isin(flood, p["flood_values"])
-        for label, (compartment_id, part, inside, zone) in zones.items():
+        for label, (comp_id, part, inside, zone) in zones.items():
             inside_valid = int((inside & valid[part]).sum())
             inside_wet = int((inside & wet[part]).sum())
             comp_valid = int((zone & valid[part]).sum())
@@ -207,9 +207,9 @@ def evidence_unit(task):
                 outcome = "flooded"
             else:
                 outcome = "inconclusive"
-            rows.append(
+            list_rows.append(
                 [
-                    compartment_id,
+                    comp_id,
                     task["unit_id"],
                     scene["item_id"],
                     scene["datetime"],
@@ -239,7 +239,7 @@ def evidence_unit(task):
                 )
                 test_count += tested
                 dry_count += tested & ~wet
-    pd.DataFrame(rows, columns=COLUMNS).to_csv(
+    pd.DataFrame(list_rows, columns=COLUMNS).to_csv(
         unit_dir / "gfm_evidence.csv", index=False
     )
 
@@ -253,14 +253,14 @@ def evidence_unit(task):
         relabel = np.zeros(n + 1, np.int32)
         relabel[keep] = np.arange(1, len(keep) + 1)
         clusters = relabel[clusters]
-        hints = gis.Raster.polygonize_labels(clusters, gt, wkt)
-        if len(hints):
-            ids = hints["label"].to_numpy()
-            hints["area_m2"] = np.bincount(clusters.ravel())[ids] * res * res
-            hints["scenes_tested_mean"] = ndimage.mean(test_count, clusters, ids)
-            hints["dry_share_mean"] = ndimage.mean(share, clusters, ids)
-        hints["unit_id"] = task["unit_id"]
-        gis.Vector.write_gpkg(hints, unit_dir / "missing_barrier_hints.gpkg")
+        gdf_hint = gis.Raster.polygonize_labels(clusters, gt, wkt)
+        if len(gdf_hint):
+            ids = gdf_hint["label"].to_numpy()
+            gdf_hint["area_m2"] = np.bincount(clusters.ravel())[ids] * res * res
+            gdf_hint["scenes_tested_mean"] = ndimage.mean(test_count, clusters, ids)
+            gdf_hint["dry_share_mean"] = ndimage.mean(share, clusters, ids)
+        gdf_hint["unit_id"] = task["unit_id"]
+        gis.Vector.write_gpkg(gdf_hint, unit_dir / "missing_barrier_hints.gpkg")
     seconds = time.perf_counter() - start
     summary = f"unit {task['unit_id']}: {len(task['scenes'])} scenes x {len(kept)} compartments tested in {seconds:.1f} s"
     logging.getLogger("gfm_evidence").info(summary)
@@ -292,18 +292,18 @@ if __name__ == "__main__":
         raise SystemExit(
             "gfm_index.csv or compartments.gpkg is missing; run compartments.py and download_gfm.py."
         )
-    index = pd.read_csv(out_dir / "gfm_index.csv", dtype={"unit_id": str}).fillna("")
-    if len(index):
-        dates = pd.to_datetime(index["datetime"], utc=True, format="ISO8601").dt.date
+    df_idx = pd.read_csv(out_dir / "gfm_index.csv", dtype={"unit_id": str}).fillna("")
+    if len(df_idx):
+        dates = pd.to_datetime(df_idx["datetime"], utc=True, format="ISO8601").dt.date
         for bound, compare in [
             (run["DATE_FROM"], dates.__ge__),
             (run["DATE_TO"], dates.__le__),
         ]:
             if bound:
-                index = index[compare(datetime.date.fromisoformat(bound)).to_numpy()]
+                df_idx = df_idx[compare(datetime.date.fromisoformat(bound)).to_numpy()]
     if run["UNITS"]:
-        index = index[index["unit_id"].isin(run["UNITS"])]
-    compartments = gpd.read_file(out_dir / "compartments.gpkg")
+        df_idx = df_idx[df_idx["unit_id"].isin(run["UNITS"])]
+    gdf_comp = gpd.read_file(out_dir / "compartments.gpkg")
     params = {
         **{
             k: evidence[k]
@@ -327,19 +327,19 @@ if __name__ == "__main__":
         "reference_water_values": sources["gfm_reference_water_values"],
         "nodata_values": sources["gfm_nodata_values"],
     }
-    tasks = []
-    for unit_id, scenes in index.groupby("unit_id"):
-        members = compartments[compartments["unit_id"] == unit_id]
-        if members.empty and not run["HINTS"]:
+    list_task = []
+    for unit_id, df_scn in df_idx.groupby("unit_id"):
+        gdf_mem = gdf_comp[gdf_comp["unit_id"] == unit_id]
+        if gdf_mem.empty and not run["HINTS"]:
             continue
-        tasks.append(
+        list_task.append(
             {
                 "unit_id": unit_id,
                 "unit_dir": str(work_dir / "units" / unit_id),
                 "compartments": list(
-                    zip(members["unit_label"].astype(int), members["compartment_id"])
+                    zip(gdf_mem["unit_label"].astype(int), gdf_mem["compartment_id"])
                 ),
-                "scenes": scenes.to_dict("records"),
+                "scenes": df_scn.to_dict("records"),
                 "hints": run["HINTS"],
                 "rivers_used": str(work_dir / "rivers_used.gpkg"),
                 "barrier_lines": str(work_dir / "barrier_lines.gpkg"),
@@ -349,74 +349,74 @@ if __name__ == "__main__":
         )
     log.info(
         "Evidence: %d scene windows in %d units with compartments%s.",
-        len(index),
-        len(tasks),
+        len(df_idx),
+        len(list_task),
         (
             f" (dates {run['DATE_FROM'] or '...'} to {run['DATE_TO'] or '...'})"
             if run["DATE_FROM"] or run["DATE_TO"]
             else ""
         ),
     )
-    results, failed = gis.Run.run_units(
+    list_res, list_fail = gis.Run.run_units(
         evidence_unit,
-        tasks,
+        list_task,
         general["n_workers"],
         general["gdal_cachemax_mb"],
         general["gdal_threads_per_worker"],
-        [len(t["scenes"]) for t in tasks],
+        [len(t["scenes"]) for t in list_task],
         log,
     )
-    if failed:
-        raise SystemExit(f"Units failed: {failed}; rerun to retry them.")
+    if list_fail:
+        raise SystemExit(f"Units failed: {list_fail}; rerun to retry them.")
 
-    tables = [pd.read_csv(Path(t["unit_dir"]) / "gfm_evidence.csv") for t in tasks]
-    table = (
-        pd.concat(tables, ignore_index=True)
-        if tables
+    list_ev = [pd.read_csv(Path(t["unit_dir"]) / "gfm_evidence.csv") for t in list_task]
+    df_ev = (
+        pd.concat(list_ev, ignore_index=True)
+        if list_ev
         else pd.DataFrame(columns=COLUMNS)
     )
-    table.to_csv(out_dir / "gfm_evidence.csv", index=False)
+    df_ev.to_csv(out_dir / "gfm_evidence.csv", index=False)
     # One feature per compartment and scene, for visual checks in QGIS.
-    layer = compartments[["compartment_id", "geometry"]].merge(
-        table, on="compartment_id", how="inner"
+    gdf_ev = gdf_comp[["compartment_id", "geometry"]].merge(
+        df_ev, on="compartment_id", how="inner"
     )
     gis.Vector.write_gpkg(
-        gpd.GeoDataFrame(layer, geometry="geometry", crs=compartments.crs),
+        gpd.GeoDataFrame(gdf_ev, geometry="geometry", crs=gdf_comp.crs),
         out_dir / "gfm_evidence.gpkg",
     )
-    counts = table["outcome"].value_counts()
+    counts = df_ev["outcome"].value_counts()
     log.info(
         "gfm_evidence.csv: %d tests (%s) for %d compartments.",
-        len(table),
+        len(df_ev),
         ", ".join(f"{k} {v}" for k, v in counts.items()),
-        table["compartment_id"].nunique() if len(table) else 0,
+        df_ev["compartment_id"].nunique() if len(df_ev) else 0,
     )
 
     if run["HINTS"]:
-        cores = gpd.read_file(out_dir / "units_core.gpkg").set_index("unit_id")
-        frames = [
+        gdf_core = gpd.read_file(out_dir / "units_core.gpkg").set_index("unit_id")
+        list_hint = [
             gpd.read_file(Path(t["unit_dir"]) / "missing_barrier_hints.gpkg")
-            for t in tasks
+            for t in list_task
         ]
-        frames = [f for f in frames if len(f)]
-        if frames:
-            hints = gpd.GeoDataFrame(
-                pd.concat(frames, ignore_index=True),
+        list_hint = [f for f in list_hint if len(f)]
+        if list_hint:
+            gdf_hint = gpd.GeoDataFrame(
+                pd.concat(list_hint, ignore_index=True),
                 geometry="geometry",
-                crs=frames[0].crs,
+                crs=list_hint[0].crs,
             )
             inside = shapely.covers(
-                cores.geometry.reindex(hints["unit_id"]).values,
-                shapely.point_on_surface(hints.geometry.values),
+                gdf_core.geometry.reindex(gdf_hint["unit_id"]).values,
+                shapely.point_on_surface(gdf_hint.geometry.values),
             )
-            hints = hints[inside].reset_index(drop=True)
+            gdf_hint = gdf_hint[inside].reset_index(drop=True)
         else:
-            hints = gpd.GeoDataFrame(
+            gdf_hint = gpd.GeoDataFrame(
                 {"unit_id": pd.Series(dtype=str)},
-                geometry=gpd.GeoSeries([], crs=compartments.crs),
+                geometry=gpd.GeoSeries([], crs=gdf_comp.crs),
             )
-        gis.Vector.write_gpkg(hints, out_dir / "missing_barrier_hints.gpkg")
+        gis.Vector.write_gpkg(gdf_hint, out_dir / "missing_barrier_hints.gpkg")
         log.info(
             "missing_barrier_hints.gpkg: %d areas that stay dry below the scene water level.",
-            len(hints),
+            len(gdf_hint),
         )

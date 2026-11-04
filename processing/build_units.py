@@ -42,8 +42,8 @@ if __name__ == "__main__":
     gis.Config.warn_placeholders(cfg)
 
     vrt_path = work_dir / "dtm" / "dtm.vrt"
-    footprint_path = out_dir / "dtm_footprint.gpkg"
-    if not vrt_path.exists() or not footprint_path.exists():
+    fp_path = out_dir / "dtm_footprint.gpkg"
+    if not vrt_path.exists() or not fp_path.exists():
         raise SystemExit(
             "dtm.vrt or dtm_footprint.gpkg is missing; run prepare_dtm.py first."
         )
@@ -61,11 +61,11 @@ if __name__ == "__main__":
         )
 
     # --- Corridor ---
-    footprint = gpd.read_file(footprint_path).to_crs(wkt).union_all()
-    rivers = gis.Vector.read_merged(country["rivers"], wkt)
+    footprint = gpd.read_file(fp_path).to_crs(wkt).union_all()
+    gdf_rn = gis.Vector.read_merged(country["rivers"], wkt)
     corridor = shapely.make_valid(
         shapely.union_all(
-            shapely.buffer(rivers.geometry.values, country["corridor_buffer_m"])
+            shapely.buffer(gdf_rn.geometry.values, country["corridor_buffer_m"])
         )
     ).intersection(footprint)
     raster_km2 = ds.RasterXSize * ds.RasterYSize * native_res * abs(gt[5]) / 1e6
@@ -93,14 +93,14 @@ if __name__ == "__main__":
             "Core size rounded to %.1f m (whole working cells).",
             core_cells * resolution,
         )
-    records = []
+    list_rec = []
     for ci in range(math.ceil(n_cols / core_cells)):
         for ri in range(math.ceil(n_rows / core_cells)):
             c0, c1 = ci * core_cells, min((ci + 1) * core_cells, n_cols)
             r0, r1 = ri * core_cells, min((ri + 1) * core_cells, n_rows)
             wc0, wc1 = max(c0 - halo_cells, 0), min(c1 + halo_cells, n_cols)
             wr0, wr1 = max(r0 - halo_cells, 0), min(r1 + halo_cells, n_rows)
-            records.append(
+            list_rec.append(
                 {
                     "unit_id": f"{ci:03d}_{ri:03d}",
                     "core_xmin": gt[0] + c0 * resolution,
@@ -121,20 +121,20 @@ if __name__ == "__main__":
                     "native_nrows": int(round((wr1 - wr0) * resolution / native_res)),
                 }
             )
-    units = pd.DataFrame(records)
+    df_units = pd.DataFrame(list_rec)
     core_geoms = shapely.box(
-        units.core_xmin, units.core_ymin, units.core_xmax, units.core_ymax
+        df_units.core_xmin, df_units.core_ymin, df_units.core_xmax, df_units.core_ymax
     )
     shapely.prepare(corridor)
     keep = shapely.intersects(corridor, core_geoms)
-    units, core_geoms = units[keep].reset_index(drop=True), core_geoms[keep]
+    df_units, core_geoms = df_units[keep].reset_index(drop=True), core_geoms[keep]
     window_geoms = shapely.box(
-        units.win_xmin, units.win_ymin, units.win_xmax, units.win_ymax
+        df_units.win_xmin, df_units.win_ymin, df_units.win_xmax, df_units.win_ymax
     )
     log.info(
         "Units: %d of %d cores intersect the corridor (core %.0f m, halo %.0f m, working cell %.1f m).",
-        len(units),
-        len(records),
+        len(df_units),
+        len(list_rec),
         core_cells * resolution,
         halo_cells * resolution,
         resolution,
@@ -143,71 +143,73 @@ if __name__ == "__main__":
     # Processing domain: corridor widened by the halo, clipped to each window; cells outside stay nodata.
     domain = shapely.buffer(corridor, country["unit_halo_m"])
     domain_geoms = shapely.intersection(window_geoms, domain)
-    units["est_window_cells"] = units.win_ncols * units.win_nrows
-    units["est_domain_cells"] = np.round(
+    df_units["est_window_cells"] = df_units.win_ncols * df_units.win_nrows
+    df_units["est_domain_cells"] = np.round(
         shapely.area(domain_geoms) / resolution**2
     ).astype(np.int64)
-    units["est_ram_gb"] = units.est_window_cells * country["bytes_per_cell"] / 1e9
-    units = units.sort_values("est_domain_cells", ascending=False).reset_index(
+    df_units["est_ram_gb"] = df_units.est_window_cells * country["bytes_per_cell"] / 1e9
+    df_units = df_units.sort_values("est_domain_cells", ascending=False).reset_index(
         drop=True
     )
     no_river = ~shapely.intersects(
-        shapely.union_all(rivers.geometry.values),
-        shapely.box(units.win_xmin, units.win_ymin, units.win_xmax, units.win_ymax),
+        shapely.union_all(gdf_rn.geometry.values),
+        shapely.box(
+            df_units.win_xmin, df_units.win_ymin, df_units.win_xmax, df_units.win_ymax
+        ),
     )
     if no_river.any():
         log.warning(
             "%d unit windows contain no river; they cannot produce compartments: %s",
             int(no_river.sum()),
-            ", ".join(units.unit_id[no_river]),
+            ", ".join(df_units.unit_id[no_river]),
         )
 
     max_cells = general["max_ram_gb_per_worker"] * 1e9 / country["bytes_per_cell"]
-    if units.est_window_cells.max() > max_cells:
+    if df_units.est_window_cells.max() > max_cells:
         side = math.floor(math.sqrt(max_cells)) - 2 * halo_cells
         raise SystemExit(
-            f"The largest unit window needs {units.est_ram_gb.max():.1f} GB at {country['bytes_per_cell']:.0f} "
+            f"The largest unit window needs {df_units.est_ram_gb.max():.1f} GB at {country['bytes_per_cell']:.0f} "
             f"bytes per cell, more than max_ram_gb_per_worker = {general['max_ram_gb_per_worker']} GB. "
             f"Use unit_core_size_m <= {max(side, 2) * resolution:.0f} m."
         )
     log.info(
         "Largest window %d x %d cells needs about %.1f GB (bytes_per_cell %.0f); %d workers need about %.1f GB "
         "of RAM in total. Domain cells to process: %.1f million.",
-        units.win_ncols.max(),
-        units.win_nrows.max(),
-        units.est_ram_gb.max(),
+        df_units.win_ncols.max(),
+        df_units.win_nrows.max(),
+        df_units.est_ram_gb.max(),
         country["bytes_per_cell"],
         general["n_workers"],
-        general["n_workers"] * units.est_ram_gb.max(),
-        units.est_domain_cells.sum() / 1e6,
+        general["n_workers"] * df_units.est_ram_gb.max(),
+        df_units.est_domain_cells.sum() / 1e6,
     )
 
-    attributes = units[
+    df_attr = df_units[
         ["unit_id", "est_window_cells", "est_domain_cells", "est_ram_gb"]
     ]
-    sorted_cores = shapely.box(
-        units.core_xmin, units.core_ymin, units.core_xmax, units.core_ymax
+    core_box = shapely.box(
+        df_units.core_xmin, df_units.core_ymin, df_units.core_xmax, df_units.core_ymax
     )
-    sorted_windows = shapely.box(
-        units.win_xmin, units.win_ymin, units.win_xmax, units.win_ymax
+    win_box = shapely.box(
+        df_units.win_xmin, df_units.win_ymin, df_units.win_xmax, df_units.win_ymax
     )
     gis.Vector.write_gpkg(
-        gpd.GeoDataFrame(attributes, geometry=sorted_cores, crs=wkt),
+        gpd.GeoDataFrame(df_attr, geometry=core_box, crs=wkt),
         out_dir / "units_core.gpkg",
     )
     gis.Vector.write_gpkg(
-        gpd.GeoDataFrame(attributes, geometry=sorted_windows, crs=wkt),
+        gpd.GeoDataFrame(df_attr, geometry=win_box, crs=wkt),
         out_dir / "units_window.gpkg",
     )
     gis.Vector.write_gpkg(
         gpd.GeoDataFrame(
-            units[["unit_id"]],
-            geometry=shapely.intersection(sorted_windows, domain),
+            df_units[["unit_id"]],
+            geometry=shapely.intersection(win_box, domain),
             crs=wkt,
         ),
         work_dir / "units_domain.gpkg",
     )
-    units.to_csv(out_dir / "units.csv", index=False)
+    df_units.to_csv(out_dir / "units.csv", index=False)
     log.info(
         "Written corridor.gpkg, units_core.gpkg, units_window.gpkg and units.csv to %s.",
         out_dir,

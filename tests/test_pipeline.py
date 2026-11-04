@@ -121,13 +121,13 @@ dtm[xx >= 2960] = -9999.0
 
 srs = osr.SpatialReference()
 srs.ImportFromEPSG(EPSG)
-dtm_files, dtm_files_dry = [], []
+list_dtm, list_dtm_dry = [], []
 # T3: the whole river channel without DTM data (lidar water surface along the entire river).
 dtm_dry = dtm.copy()
 dtm_dry[np.abs(yy - RIVER_Y) <= 4] = -9999.0
-for name, array, files in [
-    ("dtm_block", dtm, dtm_files),
-    ("dtm_water", dtm_dry, dtm_files_dry),
+for name, array, list_file in [
+    ("dtm_block", dtm, list_dtm),
+    ("dtm_water", dtm_dry, list_dtm_dry),
 ]:
     for k, (c0, c1) in enumerate([(0, cols // 2), (cols // 2, cols)]):
         path = data / f"{name}_{k}.tif"
@@ -144,16 +144,16 @@ for name, array, files in [
         ds.GetRasterBand(1).SetNoDataValue(-9999.0)
         ds.GetRasterBand(1).WriteArray(array[:, c0:c1])
         ds = None
-        files.append(str(path))
+        list_file.append(str(path))
 
-levee_names = list(levees)
-half = len(levee_names) // 2
-for file_name, names in [
-    ("levees_ml.gpkg", levee_names[:half]),
-    ("levees_osm.gpkg", levee_names[half:]),
+list_lv = list(levees)
+half = len(list_lv) // 2
+for file_name, list_name in [
+    ("levees_ml.gpkg", list_lv[:half]),
+    ("levees_osm.gpkg", list_lv[half:]),
 ]:
     gpd.GeoDataFrame(
-        {"name": names}, geometry=[world(levees[n][0]) for n in names], crs=EPSG
+        {"name": list_name}, geometry=[world(levees[n][0]) for n in list_name], crs=EPSG
     ).to_file(data / file_name, driver="GPKG")
 gpd.GeoDataFrame({"name": []}, geometry=gpd.GeoSeries([], crs=EPSG)).to_file(
     data / "levees_empty.gpkg", driver="GPKG"
@@ -176,7 +176,7 @@ def country_table(
     river_files = river_files or [str(data / "rivers.gpkg")]
     return f"""
 [countries.{code}]
-dtm = {json.dumps(dtm_list or dtm_files)}
+dtm = {json.dumps(dtm_list or list_dtm)}
 dsm = []
 levees = {json.dumps(levee_files)}
 rivers = {json.dumps(river_files)}
@@ -256,7 +256,7 @@ seed = 1
         [str(data / "levees_ml.gpkg"), str(data / "levees_osm.gpkg")],
         False,
         "A",
-        dtm_list=dtm_files_dry,
+        dtm_list=list_dtm_dry,
     )
     (root / "test.toml").write_text(text)
 
@@ -281,29 +281,29 @@ def run(script, country, **variables):
     return proc
 
 
-results = []
+list_res = []
 write_config(convert=False)
 for country in ["T1", "T0", "T2", "T3"]:
     proc = run("prepare_dtm", country)
-    results.append(
+    list_res.append(
         (
             f"{country}: prepare_dtm (inspection, footprint, benchmark)",
             proc.returncode == 0,
         )
     )
     proc = run("build_units", country)
-    results.append((f"{country}: build_units", proc.returncode == 0))
+    list_res.append((f"{country}: build_units", proc.returncode == 0))
 write_config(convert=True)
 for country, option in [("T1", "B"), ("T0", "A")]:
     proc = run("prepare_dtm", country, RUN_BENCHMARK="0")
-    converted = list((root / "work" / country / "dtm").glob(f"*_{option}.tif"))
-    info = gdal.Info(str(converted[0]), format="json") if converted else {}
+    list_conv = list((root / "work" / country / "dtm").glob(f"*_{option}.tif"))
+    info = gdal.Info(str(list_conv[0]), format="json") if list_conv else {}
     band = info.get("bands", [{}])[0]
-    results.append(
+    list_res.append(
         (
             f"{country}: conversion option {option} gives tiled files with 5 overviews",
             proc.returncode == 0
-            and len(converted) == 2
+            and len(list_conv) == 2
             and band.get("block") == [512, 512]
             and len(band.get("overviews", [])) == 5,
         )
@@ -315,46 +315,48 @@ print(
 )
 
 # Compartments: first two units only, then the rest (checkpoints), then a rerun that must skip everything.
-units = sorted(gpd.read_file(root / "output" / "T1" / "units_core.gpkg").unit_id)
-proc = run("compartments", "T1", UNITS=",".join(units[:2]))
-results.append(("T1: compartments on two selected units", proc.returncode == 0))
+list_unit = sorted(gpd.read_file(root / "output" / "T1" / "units_core.gpkg").unit_id)
+proc = run("compartments", "T1", UNITS=",".join(list_unit[:2]))
+list_res.append(("T1: compartments on two selected units", proc.returncode == 0))
 proc = run("compartments", "T1")
-results.append(
+list_res.append(
     (
         "T1: remaining units processed, finished units skipped",
         proc.returncode == 0
-        and f"{len(units) - 2} to process, 2 already finished" in proc.stderr,
+        and f"{len(list_unit) - 2} to process, 2 already finished" in proc.stderr,
     )
 )
 proc = run("compartments", "T1")
-results.append(
+list_res.append(
     (
         "T1: rerun skips every unit",
         proc.returncode == 0 and "0 to process" in proc.stderr,
     )
 )
 
-final = gpd.read_file(root / "output" / "T1" / "compartments.gpkg")
+gdf_final = gpd.read_file(root / "output" / "T1" / "compartments.gpkg")
 for label, ((px, py), expected) in probes.items():
-    hits = int(final.covers(world(Point(px, py))).sum())
-    results.append(
+    hits = int(gdf_final.covers(world(Point(px, py))).sum())
+    list_res.append(
         (
             f"{label}: {expected} compartment(s) at the probe, found {hits}",
             hits == expected,
         )
     )
-results.append((f"T1: total compartments 9, found {len(final)}", len(final) == 9))
-u_open = final[final.covers(world(Point(2830, 700)))]
-results.append(
+list_res.append(
+    (f"T1: total compartments 9, found {len(gdf_final)}", len(gdf_final) == 9)
+)
+gdf_uopen = gdf_final[gdf_final.covers(world(Point(2830, 700)))]
+list_res.append(
     (
         "B3: compartment closed by missing DTM coverage kept and flagged touches_dtm_edge",
-        len(u_open) == 1
-        and bool(u_open.touches_dtm_edge.iloc[0])
-        and not bool(u_open.truncated.iloc[0]),
+        len(gdf_uopen) == 1
+        and bool(gdf_uopen.touches_dtm_edge.iloc[0])
+        and not bool(gdf_uopen.truncated.iloc[0]),
     )
 )
-others_flagged = int(final.touches_dtm_edge.astype(bool).sum()) - len(u_open)
-results.append(
+others_flagged = int(gdf_final.touches_dtm_edge.astype(bool).sum()) - len(gdf_uopen)
+list_res.append(
     ("B3: no other compartment flagged touches_dtm_edge", others_flagged == 0)
 )
 
@@ -382,7 +384,7 @@ cell_y = (
 along_h = (cell_x > 150) & (cell_x < 450)
 river_mask = unit_stream & along_h[None, :]
 between = (np.abs(cell_y - 1004) < 1.5)[:, None] & along_h[None, :]
-results.append(
+list_res.append(
     (
         "B2: river cells next to a levee keep their elevation; cells beside them are interpolated",
         river_mask.any()
@@ -418,68 +420,73 @@ bed = 100.0 + 0.001 * hxx - 2.0
 deviation = (
     float(np.abs(hole_dtm[in_hole] - bed[in_hole]).max()) if in_hole.any() else 99.0
 )
-results.append(
+list_res.append(
     (
         f"L1: river cells in the gap follow the river profile ({along} cells, max deviation "
         f"from the bed {deviation:.2f} m)",
         along > 0 and deviation < 0.1,
     )
 )
-long = final[final.covers(world(Point(1500, 1440)))]
-results.append(
+gdf_long = gdf_final[gdf_final.covers(world(Point(1500, 1440)))]
+list_res.append(
     (
         "G_long: truncated pieces merged into one compartment spanning the valley",
-        len(long) == 1
-        and bool(long.truncated.iloc[0])
-        and long.geometry.iloc[0].length > 5000,
+        len(gdf_long) == 1
+        and bool(gdf_long.truncated.iloc[0])
+        and gdf_long.geometry.iloc[0].length > 5000,
     )
 )
-results.append(("compartment ids are unique", final.compartment_id.is_unique))
+list_res.append(("compartment ids are unique", gdf_final.compartment_id.is_unique))
 river_world = world(river)
 source_ok = (
-    shapely.distance(shapely.points(final.source_x, final.source_y), river_world) <= 4.0
-)
-entry_ok = (
     shapely.distance(
-        shapely.points(final.entry_x, final.entry_y), final.geometry.values
+        shapely.points(gdf_final.source_x, gdf_final.source_y), river_world
     )
     <= 4.0
 )
-results.append(
+entry_ok = (
+    shapely.distance(
+        shapely.points(gdf_final.entry_x, gdf_final.entry_y), gdf_final.geometry.values
+    )
+    <= 4.0
+)
+list_res.append(
     (
         "source cells lie on the river, entry cells on their compartment",
         source_ok.all() and entry_ok.all(),
     )
 )
 
-barriers = gpd.read_file(root / "output" / "T1" / "barriers.gpkg")
+gdf_bar = gpd.read_file(root / "output" / "T1" / "barriers.gpkg")
 crest_hand = {
-    name: barriers[
-        barriers.intersects(world(levees[name][0]).buffer(0.5))
-        & ~barriers.bridged.astype(bool)
+    name: gdf_bar[
+        gdf_bar.intersects(world(levees[name][0]).buffer(0.5))
+        & ~gdf_bar.bridged.astype(bool)
     ].crest_hand_min_m.min()
     for name in ["E_outer", "E_inner", "F_outer", "F_inner"]
 }
 for pair in ["E", "F"]:
-    inner = final[final.covers(world(Point(*probes[f"{pair}_inner"][0])))]
+    gdf_inner = gdf_final[gdf_final.covers(world(Point(*probes[f"{pair}_inner"][0])))]
     expected = max(crest_hand[f"{pair}_outer"], crest_hand[f"{pair}_inner"])
-    level = float(inner.protection_level_m.iloc[0]) if len(inner) else float("nan")
-    results.append(
+    level = (
+        float(gdf_inner.protection_level_m.iloc[0]) if len(gdf_inner) else float("nan")
+    )
+    list_res.append(
         (
             f"nested rings {pair}: inner protection {level:.2f} m = higher ring crest {expected:.2f} m",
             abs(level - expected) <= 0.05,
         )
     )
-results.append(
+list_res.append(
     (
         "bridged gaps recorded in barriers.gpkg",
-        int(barriers.bridged.astype(bool).sum()) >= 2,
+        int(gdf_bar.bridged.astype(bool).sum()) >= 2,
     )
 )
 
-unit_dirs = sorted((root / "work" / "T1" / "units").iterdir())
+list_udir = sorted((root / "work" / "T1" / "units").iterdir())
 diagonal = 0
-for unit_dir in unit_dirs:
+for unit_dir in list_udir:
     barrier = gdal.Open(str(unit_dir / "barrier.tif")).ReadAsArray() == 1
     diagonal += int(
         (
@@ -497,7 +504,7 @@ for unit_dir in unit_dirs:
             )
         ).sum()
     )
-results.append(
+list_res.append(
     (
         f"barrier rasters are 4-connected (diagonal-only contacts: {diagonal})",
         diagonal == 0,
@@ -505,22 +512,22 @@ results.append(
 )
 filled = sum(
     json.loads((d / "done.json").read_text()).get("filled_gap_cells", 0)
-    for d in unit_dirs
+    for d in list_udir
 )
-results.append(
+list_res.append(
     (f"nodata hole over the river interpolated ({filled} cells)", filled > 0)
 )
 
 # B4: in gated mode a tributary entering from missing DTM coverage is a water source.
 proc = run("compartments", "T2")
-gated_final = gpd.read_file(root / "output" / "T2" / "compartments.gpkg")
-u_gated = int(gated_final.covers(world(Point(2830, 700))).sum())
+gdf_gated = gpd.read_file(root / "output" / "T2" / "compartments.gpkg")
+u_gated = int(gdf_gated.covers(world(Point(2830, 700))).sum())
 others_same = all(
-    int(gated_final.covers(world(Point(*xy))).sum()) == expected
+    int(gdf_gated.covers(world(Point(*xy))).sum()) == expected
     for label, (xy, expected) in probes.items()
     if label != "U_open"
 )
-results.append(
+list_res.append(
     (
         f"B4: tributary from missing coverage floods the U in gated mode ({u_gated} compartments "
         f"at the U, other probes unchanged: {others_same})",
@@ -530,38 +537,38 @@ results.append(
 
 # T3: the whole river is nodata; gaps are filled and the river cells capped at the waterline.
 proc = run("compartments", "T3")
-water_final = gpd.read_file(root / "output" / "T3" / "compartments.gpkg")
+gdf_water = gpd.read_file(root / "output" / "T3" / "compartments.gpkg")
 water_hits = {
-    label: int(water_final.covers(world(Point(*xy))).sum())
+    label: int(gdf_water.covers(world(Point(*xy))).sum())
     for label, (xy, expected) in probes.items()
 }
 water_ok = all(
     water_hits[label] == expected for label, (xy, expected) in probes.items()
 )
-results.append(
+list_res.append(
     (
-        f"T3 river entirely nodata: same compartments as T1 ({len(water_final)}; probes "
+        f"T3 river entirely nodata: same compartments as T1 ({len(gdf_water)}; probes "
         f"{'ok' if water_ok else water_hits})",
-        proc.returncode == 0 and water_ok and len(water_final) == 9,
+        proc.returncode == 0 and water_ok and len(gdf_water) == 9,
     )
 )
 
 proc = run("compartments", "T0")
-margins = [
+list_margin = [
     gdal.Open(str(d / "margin.tif")).ReadAsArray()
     for d in (root / "work" / "T0" / "units").iterdir()
 ]
 max_margin = max(
-    float(np.nanmax(np.abs(m))) if np.isfinite(m).any() else 0.0 for m in margins
+    float(np.nanmax(np.abs(m))) if np.isfinite(m).any() else 0.0 for m in list_margin
 )
-empty_final = gpd.read_file(root / "output" / "T0" / "compartments.gpkg")
-results.append(
+gdf_empty = gpd.read_file(root / "output" / "T0" / "compartments.gpkg")
+list_res.append(
     (
         f"T0 empty levees: margin zero everywhere (max |margin| {max_margin}), no compartments",
-        proc.returncode == 0 and max_margin == 0.0 and len(empty_final) == 0,
+        proc.returncode == 0 and max_margin == 0.0 and len(gdf_empty) == 0,
     )
 )
 
-for label, ok in results:
+for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")
-sys.exit(0 if all(ok for _, ok in results) else 1)
+sys.exit(0 if all(ok for _, ok in list_res) else 1)

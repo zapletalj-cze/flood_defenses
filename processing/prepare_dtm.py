@@ -72,11 +72,11 @@ if __name__ == "__main__":
         )
 
     # --- 1. Inspection ---
-    infos = [gis.Raster.inspect(path) for path in country["dtm"]]
+    list_info = [gis.Raster.inspect(path) for path in country["dtm"]]
     gis.Raster.build_vrt(
         country["dtm"], work_dir / "dtm" / "dtm_source.vrt"
     )  # stops on CRS mismatch
-    for info in infos:
+    for info in list_info:
         log.info(
             "DTM %s: %d x %d px, pixel %.3f x %.3f, %s, nodata %s, compression %s, block %d x %d%s, "
             "overviews %d, file %.2f GB (raw %.2f GB)",
@@ -110,43 +110,45 @@ if __name__ == "__main__":
             raise SystemExit(
                 f"working_resolution_m {resolution} is finer than the DTM pixel {info['pixel_x']}."
             )
-    if len({round(abs(i["pixel_x"]), 6) for i in infos}) > 1:
+    if len({round(abs(i["pixel_x"]), 6) for i in list_info}) > 1:
         log.warning("DTM files differ in pixel size; the VRT uses the finest one.")
-    pd.DataFrame(infos).drop(columns=["crs_wkt"]).to_csv(
+    pd.DataFrame(list_info).drop(columns=["crs_wkt"]).to_csv(
         out_dir / "dtm_inspection.csv", index=False
     )
 
     # --- 2. Valid-data footprint ---
-    footprint_path = out_dir / "dtm_footprint.gpkg"
-    if footprint_path.exists() and not run["FORCE"]:
-        footprints = gpd.read_file(footprint_path)
-        log.info("Footprint reused from %s (set FORCE to recompute).", footprint_path)
+    fp_path = out_dir / "dtm_footprint.gpkg"
+    if fp_path.exists() and not run["FORCE"]:
+        gdf_fp = gpd.read_file(fp_path)
+        log.info("Footprint reused from %s (set FORCE to recompute).", fp_path)
     else:
-        frames = []
-        for info in infos:
+        list_fp = []
+        for info in list_info:
             start = time.perf_counter()
-            part = gis.Raster.footprint(info["path"], country["footprint_resolution_m"])
-            part["dtm"] = Path(info["path"]).stem
-            part["path"] = info["path"]
-            frames.append(part)
+            gdf_part = gis.Raster.footprint(
+                info["path"], country["footprint_resolution_m"]
+            )
+            gdf_part["dtm"] = Path(info["path"]).stem
+            gdf_part["path"] = info["path"]
+            list_fp.append(gdf_part)
             log.info(
                 "Footprint of %s derived in %.1f s.",
                 Path(info["path"]).name,
                 time.perf_counter() - start,
             )
-        footprints = gpd.GeoDataFrame(
-            pd.concat(frames, ignore_index=True), crs=frames[0].crs
+        gdf_fp = gpd.GeoDataFrame(
+            pd.concat(list_fp, ignore_index=True), crs=list_fp[0].crs
         )
-        footprints["area_km2"] = footprints.area / 1e6
-        gis.Vector.write_gpkg(footprints, footprint_path)
-    for info in infos:
+        gdf_fp["area_km2"] = gdf_fp.area / 1e6
+        gis.Vector.write_gpkg(gdf_fp, fp_path)
+    for info in list_info:
         extent_km2 = (
             info["width"]
             * info["height"]
             * abs(info["pixel_x"] * info["pixel_y"])
             / 1e6
         )
-        area_km2 = footprints.loc[footprints["path"] == info["path"]].area.sum() / 1e6
+        area_km2 = gdf_fp.loc[gdf_fp["path"] == info["path"]].area.sum() / 1e6
         log.info(
             "Valid data of %s: %.1f km2 of %.1f km2 raster extent (%.1f %%).",
             Path(info["path"]).name,
@@ -156,11 +158,11 @@ if __name__ == "__main__":
         )
 
     # --- 2b. DSM (Stage D): same inspection, same CRS as the DTM, footprint, VRT ---
-    dsm_infos = [gis.Raster.inspect(path) for path in country["dsm"]]
-    dsm_footprints = gpd.GeoDataFrame(columns=["path", "geometry"], geometry="geometry")
-    if dsm_infos:
-        dtm_srs = osr.SpatialReference(wkt=infos[0]["crs_wkt"])
-        for info in dsm_infos:
+    list_dsm_info = [gis.Raster.inspect(path) for path in country["dsm"]]
+    gdf_dsm_fp = gpd.GeoDataFrame(columns=["path", "geometry"], geometry="geometry")
+    if list_dsm_info:
+        dtm_srs = osr.SpatialReference(wkt=list_info[0]["crs_wkt"])
+        for info in list_dsm_info:
             if not osr.SpatialReference(wkt=info["crs_wkt"]).IsSame(dtm_srs):
                 raise SystemExit(
                     f"DSM {info['path']} has a different CRS than the DTM; reproject it first."
@@ -184,41 +186,39 @@ if __name__ == "__main__":
                 info["raw_size_gb"],
             )
         gis.Raster.build_vrt(country["dsm"], work_dir / "dsm" / "dsm.vrt")
-        pd.DataFrame(dsm_infos).drop(columns=["crs_wkt"]).to_csv(
+        pd.DataFrame(list_dsm_info).drop(columns=["crs_wkt"]).to_csv(
             out_dir / "dsm_inspection.csv", index=False
         )
-        dsm_footprint_path = out_dir / "dsm_footprint.gpkg"
-        if dsm_footprint_path.exists() and not run["FORCE"]:
-            dsm_footprints = gpd.read_file(dsm_footprint_path)
+        dsm_fp_path = out_dir / "dsm_footprint.gpkg"
+        if dsm_fp_path.exists() and not run["FORCE"]:
+            gdf_dsm_fp = gpd.read_file(dsm_fp_path)
         else:
-            frames = []
-            for info in dsm_infos:
-                part = gis.Raster.footprint(
+            list_fp = []
+            for info in list_dsm_info:
+                gdf_part = gis.Raster.footprint(
                     info["path"], country["footprint_resolution_m"]
                 )
-                part["path"] = info["path"]
-                frames.append(part)
-            dsm_footprints = gpd.GeoDataFrame(
-                pd.concat(frames, ignore_index=True), crs=frames[0].crs
+                gdf_part["path"] = info["path"]
+                list_fp.append(gdf_part)
+            gdf_dsm_fp = gpd.GeoDataFrame(
+                pd.concat(list_fp, ignore_index=True), crs=list_fp[0].crs
             )
-            gis.Vector.write_gpkg(dsm_footprints, dsm_footprint_path)
+            gis.Vector.write_gpkg(gdf_dsm_fp, dsm_fp_path)
 
     # --- 3. Benchmark (DTM and, when configured, DSM: same windows, same measures) ---
     estimates = {"country": run["COUNTRY"], "dtm": [], "dsm": []}
     if run["RUN_BENCHMARK"]:
         rng = np.random.default_rng(bench["seed"])
-        for kind, kind_infos, kind_footprints in [
-            ("dtm", infos, footprints),
-            ("dsm", dsm_infos, dsm_footprints),
+        for kind, list_kinfo, gdf_kfp in [
+            ("dtm", list_info, gdf_fp),
+            ("dsm", list_dsm_info, gdf_dsm_fp),
         ]:
-            records = []
-            for info in kind_infos:
+            list_rec = []
+            for info in list_kinfo:
                 polygon = shapely.union_all(
-                    kind_footprints.loc[
-                        kind_footprints["path"] == info["path"]
-                    ].geometry.values
+                    gdf_kfp.loc[gdf_kfp["path"] == info["path"]].geometry.values
                 )
-                rows, summary, source_widths = gis.Raster.benchmark_reads(
+                list_rows, summary, list_sw = gis.Raster.benchmark_reads(
                     info,
                     polygon,
                     bench["n_windows"],
@@ -229,36 +229,36 @@ if __name__ == "__main__":
                     compress,
                     rng,
                 )
-                if len(rows) < bench["n_windows"]:
+                if len(list_rows) < bench["n_windows"]:
                     log.warning(
                         "Only %d benchmark windows fit inside the footprint of %s.",
-                        len(rows),
+                        len(list_rows),
                         info["path"],
                     )
-                if not source_widths:
+                if not list_sw:
                     log.warning(
                         "Could not determine from the GDAL debug output whether gdal.Warp used an "
                         "overview for %s.",
                         Path(info["path"]).name,
                     )
-                elif min(source_widths) < 0.9 * summary["window_px"]:
+                elif min(list_sw) < 0.9 * summary["window_px"]:
                     log.info(
                         "gdal.Warp read %s from an overview: source windows of %d px instead of %d "
                         "native px (factor %.0f).",
                         Path(info["path"]).name,
-                        min(source_widths),
+                        min(list_sw),
                         summary["window_px"],
-                        summary["window_px"] / min(source_widths),
+                        summary["window_px"] / min(list_sw),
                     )
                 else:
                     log.info(
                         "gdal.Warp read %s at full resolution (source window %d px, %d overviews): "
                         "every native pixel is decoded.",
                         Path(info["path"]).name,
-                        min(source_widths),
+                        min(list_sw),
                         info["overviews"],
                     )
-                records += rows
+                list_rec += list_rows
                 estimates[kind].append(summary)
                 log.info(
                     "Benchmark %s %s (%d windows of %d x %d px = %.2f km2): native read %.2f s/window (p90 %.2f), "
@@ -266,7 +266,7 @@ if __name__ == "__main__":
                     "read %.0f MB/s; %s compression ratio %.2f at %.0f MB/s.",
                     kind.upper(),
                     Path(info["path"]).name,
-                    len(rows),
+                    len(list_rows),
                     summary["window_px"],
                     summary["window_px"],
                     summary["window_ground_km2"],
@@ -282,8 +282,8 @@ if __name__ == "__main__":
                     summary["compression_ratio"],
                     summary["compression_mb_s"],
                 )
-            if kind_infos:
-                pd.DataFrame(records).to_csv(
+            if list_kinfo:
+                pd.DataFrame(list_rec).to_csv(
                     out_dir / f"{kind}_benchmark.csv", index=False
                 )
         log.info(
@@ -299,15 +299,15 @@ if __name__ == "__main__":
         bench_km2 = np.mean([d["window_ground_km2"] for d in estimates["dtm"]])
         warp_s = np.mean([d["warp_s_median"] for d in estimates["dtm"]])
         if units_csv.exists():
-            units = pd.read_csv(units_csv, dtype={"unit_id": str})
-            window_km2 = units["est_window_cells"] * resolution**2 / 1e6
+            df_units = pd.read_csv(units_csv, dtype={"unit_id": str})
+            window_km2 = df_units["est_window_cells"] * resolution**2 / 1e6
             read_total = float((window_km2 / bench_km2 * warp_s).sum())
             log.info(
                 "Terrain read estimate: %d units, %.0f s per unit on average, %s in total on %d workers "
                 "(source: median warp s/window x unit window area / benchmark window area; assumes reads scale with "
                 "workers, which the disk may not allow).",
-                len(units),
-                read_total / len(units),
+                len(df_units),
+                read_total / len(df_units),
                 gis.Run.format_seconds(read_total / general["n_workers"]),
                 general["n_workers"],
             )
@@ -354,7 +354,7 @@ if __name__ == "__main__":
                 summary["compression_mb_s"],
             )
             if corridor is not None:
-                part = footprints.loc[footprints["path"] == summary["path"]].union_all()
+                part = gdf_fp.loc[gdf_fp["path"] == summary["path"]].union_all()
                 share = (
                     corridor.intersection(part).area / part.area if part.area else 0.0
                 )
@@ -377,7 +377,7 @@ if __name__ == "__main__":
         (out_dir / "dtm_estimates.json").write_text(json.dumps(estimates, indent=2))
 
     # --- 5. Optional conversion ---
-    targets = []
+    list_tgt = []
     if country["convert_dtm"]:
         option = country["dtm_conversion"]
         if option == "B" and not corridor_path.exists():
@@ -389,7 +389,7 @@ if __name__ == "__main__":
             if option == "B"
             else None
         )
-        for info in infos:
+        for info in list_info:
             target = work_dir / "dtm" / f"{Path(info['path']).stem}_{option}.tif"
             marker = target.with_suffix(".done")
             if marker.exists() and not run["FORCE"]:
@@ -398,7 +398,7 @@ if __name__ == "__main__":
                     Path(info["path"]).name,
                     target,
                 )
-                targets.append(str(target))
+                list_tgt.append(str(target))
                 continue
             need_gb = next(
                 (
@@ -419,7 +419,7 @@ if __name__ == "__main__":
             gt = src.GetGeoTransform()
             numpy_type = gdal_array.GDALTypeCodeToNumericTypeCode(band.DataType)
             is_float = np.issubdtype(numpy_type, np.floating)
-            creation = [
+            list_co = [
                 "TILED=YES",
                 "BLOCKXSIZE=512",
                 "BLOCKYSIZE=512",
@@ -429,12 +429,12 @@ if __name__ == "__main__":
                 "NUM_THREADS=ALL_CPUS",
             ]
             start = time.perf_counter()
-            last_report = [start]
+            list_last = [start]
 
             def progress(complete, message, data):
                 now = time.perf_counter()
-                if now - last_report[0] > 60:
-                    last_report[0] = now
+                if now - list_last[0] > 60:
+                    list_last[0] = now
                     eta = (now - start) / max(complete, 1e-9) * (1 - complete)
                     log.info(
                         "  %s: %.1f %% done, ETA %s",
@@ -449,13 +449,13 @@ if __name__ == "__main__":
                     str(target),
                     src,
                     format="GTiff",
-                    creationOptions=creation,
+                    creationOptions=list_co,
                     callback=progress,
                     callback_data=target.name,
                 )
             else:
                 part = corridor.intersection(
-                    footprints.loc[footprints["path"] == info["path"]].union_all()
+                    gdf_fp.loc[gdf_fp["path"] == info["path"]].union_all()
                 )
                 if part.is_empty:
                     log.warning(
@@ -474,7 +474,7 @@ if __name__ == "__main__":
                         float("nan") if is_float else float(np.iinfo(numpy_type).min)
                     )
                 dst = gdal.GetDriverByName("GTiff").Create(
-                    str(target), width, height, 1, band.DataType, creation
+                    str(target), width, height, 1, band.DataType, list_co
                 )
                 dst_gt = (
                     gt[0] + col0 * gt[1],
@@ -574,14 +574,14 @@ if __name__ == "__main__":
                 gis.Run.format_seconds(t_convert),
                 gis.Run.format_seconds(t_overviews),
             )
-            targets.append(str(target))
+            list_tgt.append(str(target))
 
     # --- 6. DTM used by the processing scripts ---
     vrt = gis.Raster.build_vrt(
-        targets if targets else country["dtm"], work_dir / "dtm" / "dtm.vrt"
+        list_tgt if list_tgt else country["dtm"], work_dir / "dtm" / "dtm.vrt"
     )
     log.info(
         "Processing DTM: %s -> %s",
         vrt,
-        "converted copies" if targets else "original files",
+        "converted copies" if list_tgt else "original files",
     )

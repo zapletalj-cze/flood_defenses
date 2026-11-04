@@ -4,8 +4,12 @@
 
 # Stage E, step E.2: outputs check, read benchmark and plan
 
-Status: **proposal, waiting for approval.** No Stage E code has been written yet. The prototypes behind the timings
-below live only in a scratch folder.
+Status: **approved.** Decisions taken:
+- **Plan:** approved as below.
+- **Order:** E1–E3 now. E4 uses the stage A barrier lines while the D2 outputs are missing. E5 follows D4.
+- **Naming:** stages A–D were renamed to the naming convention of section 3.4.
+
+The prototypes behind the timings below live only in a scratch folder.
 
 ---
 
@@ -123,7 +127,9 @@ All additions are extensions. Two moves of existing code are needed, and both ar
   - `gdf_sjoin_<a>_<b>` for spatial joins;
   - short names.
 
-  Code of stages A–D stays as it is unless you want a separate mechanical renaming pass; the tests would guard it.
+  The code of stages A–D was renamed to the same scheme, mechanically and scope by scope. The full test suite
+  guards the renaming. Its outputs are identical before and after it, apart from paths, timings and memory
+  measurements.
 
 ---
 
@@ -166,4 +172,4 @@ All additions are extensions. Two moves of existing code are needed, and both ar
    used.
 6. **`exclude_building_tags`.** taginfo is not reachable, so the counts come from the country extract (logged in
    E3).
-7. **Renaming stages A–D to the new naming convention:** yes or no.
+7. **Renaming stages A–D to the new naming convention:** yes; done.

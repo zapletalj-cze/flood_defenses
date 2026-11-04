@@ -129,11 +129,11 @@ def process_unit(task):
     times["read_terrain"] = time.perf_counter() - t
     shape = dtm.shape
     t = time.perf_counter()
-    domain_gdf = gpd.read_file(task["domain_path"], where=f"unit_id = '{unit_id}'")
+    gdf_dom = gpd.read_file(task["domain_path"], where=f"unit_id = '{unit_id}'")
     domain = (
         gis.Raster.rasterize_geometries(
-            domain_gdf.geometry,
-            np.ones(len(domain_gdf)),
+            gdf_dom.geometry,
+            np.ones(len(gdf_dom)),
             shape,
             gt,
             wkt,
@@ -145,10 +145,10 @@ def process_unit(task):
     data = ~np.isnan(dtm)
     dtm[~domain] = np.nan
     counts["domain_cells"] = int(domain.sum())
-    rivers = gpd.read_file(task["rivers_used"], bbox=bounds)
+    gdf_rn = gpd.read_file(task["rivers_used"], bbox=bounds)
     river_cells = (
         gis.Raster.rasterize_geometries(
-            rivers.geometry, np.ones(len(rivers)), shape, gt, wkt, False, np.uint8
+            gdf_rn.geometry, np.ones(len(gdf_rn)), shape, gt, wkt, False, np.uint8
         )
         > 0
     )
@@ -187,7 +187,7 @@ def process_unit(task):
                 # Water surfaces: interpolation from the banks lies above the water. River cells are
                 # interpolated along each river line between valid river cells (the river profile).
                 along = np.zeros(shape, bool)
-                for geometry in rivers.geometry:
+                for geometry in gdf_rn.geometry:
                     for part in shapely.get_parts(geometry):
                         steps = np.append(
                             np.arange(0.0, part.length, res / 2), part.length
@@ -249,19 +249,19 @@ def process_unit(task):
 
     # --- Barrier cells and crest elevations ---
     t = time.perf_counter()
-    lines = gpd.read_file(task["barrier_lines"], bbox=bounds)
+    gdf_bl = gpd.read_file(task["barrier_lines"], bbox=bounds)
     bridged = (
-        lines["bridged"].astype(bool).to_numpy() if len(lines) else np.zeros(0, bool)
+        gdf_bl["bridged"].astype(bool).to_numpy() if len(gdf_bl) else np.zeros(0, bool)
     )
-    levee_lines, bridge_lines = lines[~bridged], lines[bridged]
+    gdf_lv, gdf_br = gdf_bl[~bridged], gdf_bl[bridged]
     levee_cells = np.zeros(shape, bool)
     crest_full = np.full(shape, np.nan, np.float32)
     counts["crest_boxes"] = 0
-    if len(levee_lines):
+    if len(gdf_lv):
         levee_cells = (
             gis.Raster.rasterize_geometries(
-                levee_lines.geometry,
-                np.ones(len(levee_lines)),
+                gdf_lv.geometry,
+                np.ones(len(gdf_lv)),
                 shape,
                 gt,
                 wkt,
@@ -284,9 +284,9 @@ def process_unit(task):
         needed = (
             gis.Raster.rasterize_geometries(
                 shapely.buffer(
-                    levee_lines.geometry.values, p["crest_search_radius_m"] + res
+                    gdf_lv.geometry.values, p["crest_search_radius_m"] + res
                 ),
-                np.ones(len(levee_lines)),
+                np.ones(len(gdf_lv)),
                 box_shape,
                 box_gt,
                 wkt,
@@ -336,10 +336,10 @@ def process_unit(task):
     t = time.perf_counter()
     crest = np.where(levee_cells, crest_full, np.nan).astype(np.float32)
     bridge_cells = np.zeros(shape, bool)
-    if len(bridge_lines):
+    if len(gdf_br):
         bridge_id = gis.Raster.rasterize_geometries(
-            bridge_lines.geometry,
-            np.arange(1, len(bridge_lines) + 1),
+            gdf_br.geometry,
+            np.arange(1, len(gdf_br) + 1),
             shape,
             gt,
             wkt,
@@ -347,7 +347,7 @@ def process_unit(task):
             np.int32,
         )
         bridge_cells = (bridge_id > 0) & ~levee_cells
-        ends = np.array([[g.coords[0], g.coords[-1]] for g in bridge_lines.geometry])
+        ends = np.array([[g.coords[0], g.coords[-1]] for g in gdf_br.geometry])
         end_cols = np.floor((ends[..., 0] - gt[0]) / res).astype(np.int64)
         end_rows = np.floor((gt[3] - ends[..., 1]) / res).astype(np.int64)
         inside = (
@@ -449,17 +449,17 @@ def process_unit(task):
     for k, zone in enumerate(inner_zones, start=1):
         inner_labels[zones == zone] = k
     del zones
-    enclosed = gis.Raster.polygonize_labels(inner_labels, gt, wkt).rename(
+    gdf_encl = gis.Raster.polygonize_labels(inner_labels, gt, wkt).rename(
         columns={"label": "zone"}
     )
-    enclosed["area_m2"] = (
-        np.bincount(inner_labels.ravel())[enclosed["zone"]] * cell_area
+    gdf_encl["area_m2"] = (
+        np.bincount(inner_labels.ravel())[gdf_encl["zone"]] * cell_area
     )
-    enclosed["stream_cells"] = np.bincount(
+    gdf_encl["stream_cells"] = np.bincount(
         inner_labels[stream], minlength=len(inner_zones) + 1
-    )[enclosed["zone"]]
-    enclosed["gated"] = p["gated_crossings"]
-    enclosed["unit_id"] = unit_id
+    )[gdf_encl["zone"]]
+    gdf_encl["gated"] = p["gated_crossings"]
+    gdf_encl["unit_id"] = unit_id
     counts["enclosed_stream_zones"] = len(inner_zones)
     if len(inner_zones):
         log.warning(
@@ -574,7 +574,7 @@ def process_unit(task):
     if len(ids):
         # Statistics over compartment cells only (scipy.ndimage label statistics scan the whole window).
         cells = np.flatnonzero(labels.ravel())
-        frame = pd.DataFrame(
+        df_cells = pd.DataFrame(
             {
                 "label": labels.ravel()[cells],
                 "spill": spill_def.ravel()[cells],
@@ -584,14 +584,16 @@ def process_unit(task):
                 "cell": cells,
             }
         )
-        grouped = frame.groupby("label")
+        grouped = df_cells.groupby("label")
         # Entry = first compartment cell reached by the defended flood; source = seed river cell of its path.
         entry_rows, entry_cols = np.divmod(
-            frame["cell"].to_numpy()[grouped["order"].idxmin().reindex(ids).to_numpy()],
+            df_cells["cell"].to_numpy()[
+                grouped["order"].idxmin().reindex(ids).to_numpy()
+            ],
             shape[1],
         )
         seed_rows, seed_cols = np.divmod(seed_def[entry_rows, entry_cols], shape[1])
-        del frame["order"], frame["cell"]
+        del df_cells["order"], df_cells["cell"]
         border = np.unique(
             np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
         )
@@ -600,7 +602,7 @@ def process_unit(task):
         at_dtm_edge = np.unique(
             labels[ndimage.binary_dilation(np.isnan(dtm) & domain) & (labels > 0)]
         )
-        stats = pd.DataFrame(
+        df_stats = pd.DataFrame(
             {
                 "unit_label": ids,
                 "area_m2": sizes[keep] * cell_area,
@@ -620,25 +622,27 @@ def process_unit(task):
                 "touches_dtm_edge": np.isin(ids, at_dtm_edge),
             }
         ).astype(UNIT_COLUMNS)
-        del frame, grouped
+        del df_cells, grouped
     else:
-        stats = pd.DataFrame({c: pd.Series(dtype=d) for c, d in UNIT_COLUMNS.items()})
-    polygons = gis.Raster.polygonize_labels(labels, gt, wkt).rename(
+        df_stats = pd.DataFrame(
+            {c: pd.Series(dtype=d) for c, d in UNIT_COLUMNS.items()}
+        )
+    gdf_poly = gis.Raster.polygonize_labels(labels, gt, wkt).rename(
         columns={"label": "unit_label"}
     )
-    compartments = polygons.merge(stats, on="unit_label", how="inner")
-    compartments["unit_id"] = unit_id
-    counts["compartments"] = len(compartments)
+    gdf_comp = gdf_poly.merge(df_stats, on="unit_label", how="inner")
+    gdf_comp["unit_id"] = unit_id
+    counts["compartments"] = len(gdf_comp)
     times["compartments"] = time.perf_counter() - t
 
     # --- Crest statistics of barrier lines inside the core ---
     t = time.perf_counter()
     crest_attr = np.where(barrier, crest, np.nan)
     crest_hand = crest_attr - river_ref
-    crest_records = []
-    in_core = lines[lines.intersects(core)] if len(lines) else lines
+    list_crest = []
+    gdf_bl_core = gdf_bl[gdf_bl.intersects(core)] if len(gdf_bl) else gdf_bl
     for line_id, geometry in (
-        zip(in_core["line_id"], in_core.geometry) if len(in_core) else []
+        zip(gdf_bl_core["line_id"], gdf_bl_core.geometry) if len(gdf_bl_core) else []
     ):
         xy = shapely.get_coordinates(
             shapely.segmentize(geometry.intersection(core), res / 2)
@@ -650,7 +654,7 @@ def process_unit(task):
             np.floor((gt[3] - xy[:, 1]) / res).astype(np.int64), 0, shape[0] - 1
         )
         values, hand_values = crest_attr[rows, cols], crest_hand[rows, cols]
-        crest_records.append(
+        list_crest.append(
             (
                 line_id,
                 float(np.nanmin(values)) if np.isfinite(values).any() else np.nan,
@@ -681,10 +685,10 @@ def process_unit(task):
             ("crest", np.where(barrier, crest, np.nan)),
         ]:
             gis.Raster.write_array(unit_dir / f"{name}.tif", array, gt, wkt)
-    gis.Vector.write_gpkg(compartments, unit_dir / "compartments.gpkg")
-    gis.Vector.write_gpkg(enclosed, unit_dir / "enclosed_streams.gpkg")
+    gis.Vector.write_gpkg(gdf_comp, unit_dir / "compartments.gpkg")
+    gis.Vector.write_gpkg(gdf_encl, unit_dir / "enclosed_streams.gpkg")
     pd.DataFrame(
-        crest_records, columns=["line_id", "crest_min_m", "crest_hand_min_m"]
+        list_crest, columns=["line_id", "crest_min_m", "crest_hand_min_m"]
     ).to_csv(unit_dir / "barrier_crest.csv", index=False)
     times["write"] = time.perf_counter() - t
 
@@ -701,7 +705,7 @@ def process_unit(task):
         **counts,
     }
     done["summary"] = (
-        f"unit {unit_id}: {len(compartments)} compartments in {seconds:.0f} s (read {times['read_terrain']:.1f} s, "
+        f"unit {unit_id}: {len(gdf_comp)} compartments in {seconds:.0f} s (read {times['read_terrain']:.1f} s, "
         f"crest {times['crest_read']:.1f} s in {counts['crest_boxes']} boxes, hand {times.get('hand', 0):.1f} s, "
         f"flood {times.get('flood', 0):.1f} s, write {times['write']:.1f} s), peak RSS {peak_mb / 1024:.2f} GB "
         f"({done['bytes_per_cell']:.0f} B per window cell)"
@@ -742,38 +746,38 @@ if __name__ == "__main__":
         general["gdal_cachemax_mb"], general["gdal_threads_per_worker"]
     )
     vrt_path = work_dir / "dtm" / "dtm.vrt"
-    needed = [
+    list_need = [
         vrt_path,
         out_dir / "units.csv",
         out_dir / "units_core.gpkg",
         out_dir / "units_window.gpkg",
         work_dir / "units_domain.gpkg",
     ]
-    if not all(path.exists() for path in needed):
+    if not all(path.exists() for path in list_need):
         raise SystemExit(
-            f"Missing inputs {[str(p) for p in needed if not p.exists()]}; "
+            f"Missing inputs {[str(p) for p in list_need if not p.exists()]}; "
             "run prepare_dtm.py and build_units.py first."
         )
     wkt = gdal.Open(str(vrt_path)).GetProjection()
     resolution = country["working_resolution_m"]
-    units = pd.read_csv(out_dir / "units.csv", dtype={"unit_id": str})
+    df_units = pd.read_csv(out_dir / "units.csv", dtype={"unit_id": str})
     all_windows = (
-        units.win_xmin.min(),
-        units.win_ymin.min(),
-        units.win_xmax.max(),
-        units.win_ymax.max(),
+        df_units.win_xmin.min(),
+        df_units.win_ymin.min(),
+        df_units.win_xmax.max(),
+        df_units.win_ymax.max(),
     )
 
     # --- Barrier lines for the whole country: merge, bridge gaps (deterministic, shared by all units) ---
     t = time.perf_counter()
     gap, touch = params["gap_tolerance_m"], params["touch_tolerance_m"]
-    levees = gis.Vector.read_merged(country["levees"], wkt, bbox=all_windows).explode(
+    gdf_lv = gis.Vector.read_merged(country["levees"], wkt, bbox=all_windows).explode(
         index_parts=False
     )
-    levees = levees[
-        (levees.geom_type == "LineString") & (levees.length > 0)
+    gdf_lv = gdf_lv[
+        (gdf_lv.geom_type == "LineString") & (gdf_lv.length > 0)
     ].reset_index(drop=True)
-    geoms = levees.geometry.values
+    geoms = gdf_lv.geometry.values
     starts, ends = shapely.get_point(geoms, 0), shapely.get_point(geoms, -1)
     bridges = {}
     own_gap = shapely.distance(starts, ends)
@@ -792,28 +796,30 @@ if __name__ == "__main__":
                 ]
             )
         )
-        bridges[key] = (levees.at[i, "source"], LineString([starts[i], ends[i]]))
+        bridges[key] = (gdf_lv.at[i, "source"], LineString([starts[i], ends[i]]))
     open_lines = np.flatnonzero(~self_close)
     points = np.concatenate([starts[open_lines], ends[open_lines]])
     owners = np.concatenate([open_lines, open_lines])
     if len(points):
-        point_idx, line_idx = levees.sindex.query(
+        point_idx, line_idx = gdf_lv.sindex.query(
             points, predicate="dwithin", distance=gap
         )
         other = line_idx != owners[point_idx]
-        pairs = pd.DataFrame({"point": point_idx[other], "line": line_idx[other]})
-        pairs["distance"] = shapely.distance(points[pairs.point], geoms[pairs.line])
-        connected = pairs.groupby("point")["distance"].min() <= touch
-        nearest = pairs.loc[pairs.groupby("point")["distance"].idxmin()]
-        nearest = nearest[~nearest.point.map(connected).astype(bool).to_numpy()]
-        for point, line in zip(nearest.point, nearest.line):
+        df_pairs = pd.DataFrame({"point": point_idx[other], "line": line_idx[other]})
+        df_pairs["distance"] = shapely.distance(
+            points[df_pairs.point], geoms[df_pairs.line]
+        )
+        connected = df_pairs.groupby("point")["distance"].min() <= touch
+        df_near = df_pairs.loc[df_pairs.groupby("point")["distance"].idxmin()]
+        df_near = df_near[~df_near.point.map(connected).astype(bool).to_numpy()]
+        for point, line in zip(df_near.point, df_near.line):
             endpoint, other_line = points[point], geoms[line]
-            other_ends = [starts[line], ends[line]]
-            end_distances = [endpoint.distance(e) for e in other_ends]
+            list_ends = [starts[line], ends[line]]
+            list_dist = [endpoint.distance(e) for e in list_ends]
             # Prefer endpoint-to-endpoint, otherwise connect to the nearest point on the other line.
             target = (
-                other_ends[int(np.argmin(end_distances))]
-                if min(end_distances) <= gap
+                list_ends[int(np.argmin(list_dist))]
+                if min(list_dist) <= gap
                 else shapely.line_interpolate_point(
                     other_line, shapely.line_locate_point(other_line, endpoint)
                 )
@@ -826,14 +832,14 @@ if __name__ == "__main__":
                     ]
                 )
             )
-            sources = sorted(
-                {levees.at[owners[point], "source"], levees.at[line, "source"]}
+            list_src = sorted(
+                {gdf_lv.at[owners[point], "source"], gdf_lv.at[line, "source"]}
             )
-            bridges[key] = ("|".join(sources), LineString([endpoint, target]))
-    barrier_lines = gpd.GeoDataFrame(
+            bridges[key] = ("|".join(list_src), LineString([endpoint, target]))
+    gdf_bl = gpd.GeoDataFrame(
         pd.concat(
             [
-                levees[["source"]].assign(bridged=False),
+                gdf_lv[["source"]].assign(bridged=False),
                 pd.DataFrame(
                     {"source": [b[0] for b in bridges.values()], "bridged": True}
                 ),
@@ -843,11 +849,11 @@ if __name__ == "__main__":
         geometry=list(geoms) + [b[1] for b in bridges.values()],
         crs=wkt,
     )
-    barrier_lines.insert(0, "line_id", np.arange(len(barrier_lines)))
-    gis.Vector.write_gpkg(barrier_lines, work_dir / "barrier_lines.gpkg")
+    gdf_bl.insert(0, "line_id", np.arange(len(gdf_bl)))
+    gis.Vector.write_gpkg(gdf_bl, work_dir / "barrier_lines.gpkg")
     log.info(
         "Barrier lines: %d levee lines, %d bridged gaps (%d self-closed rings) in %.1f s.",
-        len(levees),
+        len(gdf_lv),
         len(bridges),
         int(self_close.sum()),
         time.perf_counter() - t,
@@ -856,34 +862,34 @@ if __name__ == "__main__":
     # --- Water sources ---
     sources_path = out_dir / "rivers_sources.gpkg"
     if sources_path.exists():
-        rivers = gpd.read_file(sources_path).to_crs(wkt)
-        n_all = len(rivers)
-        rivers = rivers[rivers["is_source"].astype(bool)]
+        gdf_rn = gpd.read_file(sources_path).to_crs(wkt)
+        n_all = len(gdf_rn)
+        gdf_rn = gdf_rn[gdf_rn["is_source"].astype(bool)]
         log.info(
             "Water sources from rivers_sources.gpkg: %d of %d river features (closed streams are excluded "
             "from the seeds and from the HAND drainage network).",
-            len(rivers),
+            len(gdf_rn),
             n_all,
         )
     else:
-        rivers = gis.Vector.read_merged(country["rivers"], wkt, bbox=all_windows)
+        gdf_rn = gis.Vector.read_merged(country["rivers"], wkt, bbox=all_windows)
         log.info(
             "rivers_sources.gpkg not found (osm_hydraulics.py not run yet): all %d river features are water "
             "sources.",
-            len(rivers),
+            len(gdf_rn),
         )
-    gis.Vector.write_gpkg(rivers[["geometry"]], work_dir / "rivers_used.gpkg")
+    gis.Vector.write_gpkg(gdf_rn[["geometry"]], work_dir / "rivers_used.gpkg")
 
     # --- Units ---
-    unknown = sorted(set(run["UNITS"]) - set(units.unit_id))
-    if unknown:
-        raise SystemExit(f"Unknown unit ids in UNITS: {unknown}")
-    selected = units[units.unit_id.isin(run["UNITS"])] if run["UNITS"] else units
-    tasks, weights, skipped = [], [], []
-    for row in selected.to_dict("records"):
+    list_unk = sorted(set(run["UNITS"]) - set(df_units.unit_id))
+    if list_unk:
+        raise SystemExit(f"Unknown unit ids in UNITS: {list_unk}")
+    df_sel = df_units[df_units.unit_id.isin(run["UNITS"])] if run["UNITS"] else df_units
+    list_task, list_w, list_skip = [], [], []
+    for row in df_sel.to_dict("records"):
         unit_dir = work_dir / "units" / row["unit_id"]
         if (unit_dir / "done.json").exists() and not run["FORCE"]:
-            skipped.append(row["unit_id"])
+            list_skip.append(row["unit_id"])
             continue
         row.update(
             {
@@ -898,70 +904,70 @@ if __name__ == "__main__":
                 "params": params,
             }
         )
-        tasks.append(row)
-        weights.append(max(row["est_domain_cells"], 1))
+        list_task.append(row)
+        list_w.append(max(row["est_domain_cells"], 1))
     log.info(
         "Units: %d to process, %d already finished and skipped (set FORCE to recompute).",
-        len(tasks),
-        len(skipped),
+        len(list_task),
+        len(list_skip),
     )
-    if tasks:
+    if list_task:
         # Compile the numba kernels once so that worker processes load them from the cache.
         gis.Hydro.breach_to_streams(np.zeros((3, 3), np.float32), np.eye(3, dtype=bool))
         gis.Hydro.priority_flood(np.zeros((3, 3), np.float32), np.eye(3, dtype=bool))
-    results, failed = gis.Run.run_units(
+    list_res, list_fail = gis.Run.run_units(
         process_unit,
-        tasks,
+        list_task,
         general["n_workers"],
         general["gdal_cachemax_mb"],
         general["gdal_threads_per_worker"],
-        weights,
+        list_w,
         log,
     )
-    if failed:
+    if list_fail:
         log.error(
             "%d units failed: %s. Rerun to retry them; finished units are skipped.",
-            len(failed),
-            failed,
+            len(list_fail),
+            list_fail,
         )
 
     # --- Merge all finished units ---
     t = time.perf_counter()
-    cores = gpd.read_file(out_dir / "units_core.gpkg").set_index("unit_id")
-    windows = gpd.read_file(out_dir / "units_window.gpkg").set_index("unit_id")
-    done_units = [
-        u for u in units.unit_id if (work_dir / "units" / u / "done.json").exists()
+    gdf_core = gpd.read_file(out_dir / "units_core.gpkg").set_index("unit_id")
+    gdf_win = gpd.read_file(out_dir / "units_window.gpkg").set_index("unit_id")
+    list_done = [
+        u for u in df_units.unit_id if (work_dir / "units" / u / "done.json").exists()
     ]
-    frames = [
-        gpd.read_file(work_dir / "units" / u / "compartments.gpkg") for u in done_units
+    list_comp = [
+        gpd.read_file(work_dir / "units" / u / "compartments.gpkg") for u in list_done
     ]
-    frames = [f for f in frames if len(f)]
-    if frames:
-        candidates = gpd.GeoDataFrame(
-            pd.concat(frames, ignore_index=True), geometry="geometry", crs=wkt
+    list_comp = [f for f in list_comp if len(f)]
+    if list_comp:
+        gdf_cand = gpd.GeoDataFrame(
+            pd.concat(list_comp, ignore_index=True), geometry="geometry", crs=wkt
         )
     else:
-        candidates = gpd.GeoDataFrame(
+        gdf_cand = gpd.GeoDataFrame(
             {c: pd.Series(dtype=d) for c, d in UNIT_COLUMNS.items()}
             | {"unit_id": pd.Series(dtype=str)},
             geometry=gpd.GeoSeries([], crs=wkt),
         )
-    if len(candidates):
-        geoms = candidates.geometry.values
+    if len(gdf_cand):
+        geoms = gdf_cand.geometry.values
         areas = shapely.area(geoms)
-        representative = shapely.point_on_surface(geoms)
-        candidates["in_core"] = shapely.covers(
-            cores.geometry.reindex(candidates.unit_id).values, representative
+        rep_pt = shapely.point_on_surface(geoms)
+        gdf_cand["in_core"] = shapely.covers(
+            gdf_core.geometry.reindex(gdf_cand.unit_id).values, rep_pt
         )
-        candidates["edge_distance"] = shapely.distance(
-            representative,
-            shapely.boundary(windows.geometry.reindex(candidates.unit_id).values),
+        gdf_cand["edge_distance"] = shapely.distance(
+            rep_pt,
+            shapely.boundary(gdf_win.geometry.reindex(gdf_cand.unit_id).values),
         )
         # The same compartment seen from several unit windows: candidates of different units overlapping by at
         # least merge_overlap_ratio of the smaller one form one group.
-        left, right = candidates.sindex.query(geoms, predicate="intersects")
+        left, right = gdf_cand.sindex.query(geoms, predicate="intersects")
         pair = (left < right) & (
-            candidates.unit_id.values[left] != candidates.unit_id.values[right]
+            gdf_cand.unit_id.values[left] != gdf_cand.unit_id.values[right]
         )
         left, right = left[pair], right[pair]
         overlap = shapely.area(
@@ -970,33 +976,33 @@ if __name__ == "__main__":
         same = overlap >= country["merge_overlap_ratio"]
         graph = coo_matrix(
             (np.ones(same.sum()), (left[same], right[same])),
-            shape=(len(candidates),) * 2,
+            shape=(len(gdf_cand),) * 2,
         )
-        _, candidates["group"] = connected_components(graph, directed=False)
-        group_size = candidates.groupby("group")["group"].transform("size")
-        chosen = [candidates[group_size == 1]]
-        for _, members in candidates[group_size > 1].groupby("group"):
-            complete = members[~members["truncated"].astype(bool)]
-            if len(complete):
+        _, gdf_cand["group"] = connected_components(graph, directed=False)
+        group_size = gdf_cand.groupby("group")["group"].transform("size")
+        list_keep = [gdf_cand[group_size == 1]]
+        for _, gdf_grp in gdf_cand[group_size > 1].groupby("group"):
+            gdf_full = gdf_grp[~gdf_grp["truncated"].astype(bool)]
+            if len(gdf_full):
                 # Prefer a complete candidate whose representative point lies in its own core, then the most
                 # central one (largest distance from its window edge).
-                chosen.append(
-                    complete.sort_values(
+                list_keep.append(
+                    gdf_full.sort_values(
                         ["in_core", "edge_distance"], ascending=False
                     ).iloc[[0]]
                 )
             else:
                 # Truncated in every window: union of the pieces (recall), lowest protection level among them.
-                merged = members.loc[[members.geometry.area.idxmax()]].copy()
-                lowest = members.loc[members["protection_level_m"].idxmin()]
-                merged = merged.set_geometry(
+                gdf_mrg = gdf_grp.loc[[gdf_grp.geometry.area.idxmax()]].copy()
+                lowest = gdf_grp.loc[gdf_grp["protection_level_m"].idxmin()]
+                gdf_mrg = gdf_mrg.set_geometry(
                     gpd.GeoSeries(
-                        [shapely.union_all(members.geometry.values)],
-                        index=merged.index,
+                        [shapely.union_all(gdf_grp.geometry.values)],
+                        index=gdf_mrg.index,
                         crs=wkt,
                     )
                 )
-                merged["area_m2"] = merged.geometry.area
+                gdf_mrg["area_m2"] = gdf_mrg.geometry.area
                 for column in [
                     "protection_level_m",
                     "entry_x",
@@ -1004,73 +1010,73 @@ if __name__ == "__main__":
                     "source_x",
                     "source_y",
                 ]:
-                    merged[column] = lowest[column]
+                    gdf_mrg[column] = lowest[column]
                 for column in ["touches_corridor_edge", "touches_dtm_edge"]:
-                    merged[column] = members[column].astype(bool).any()
-                chosen.append(merged)
-        final = gpd.GeoDataFrame(
-            pd.concat(chosen, ignore_index=True), geometry="geometry", crs=wkt
+                    gdf_mrg[column] = gdf_grp[column].astype(bool).any()
+                list_keep.append(gdf_mrg)
+        gdf_final = gpd.GeoDataFrame(
+            pd.concat(list_keep, ignore_index=True), geometry="geometry", crs=wkt
         )
         # A compartment truncated in every window may exist only because window edges
         # closed it. Units whose windows see the same area and found nothing there have
         # the better view (an edge can only add walls); drop it if they cover enough.
-        n_contradicted = 0
+        n_contra = 0
         if country["drop_contradicted_truncated"]:
-            done_windows = windows.loc[done_units]
-            keep_rows = np.ones(len(final), bool)
-            for k in np.flatnonzero(final["truncated"].astype(bool).to_numpy()):
-                geometry = final.geometry.iloc[k]
+            gdf_win_done = gdf_win.loc[list_done]
+            keep_rows = np.ones(len(gdf_final), bool)
+            for k in np.flatnonzero(gdf_final["truncated"].astype(bool).to_numpy()):
+                geometry = gdf_final.geometry.iloc[k]
                 members = set(
-                    candidates.unit_id[candidates.group == final.group.iloc[k]]
+                    gdf_cand.unit_id[gdf_cand.group == gdf_final.group.iloc[k]]
                 )
-                others = done_windows[
-                    ~done_windows.index.isin(members)
-                    & done_windows.intersects(geometry)
+                gdf_oth = gdf_win_done[
+                    ~gdf_win_done.index.isin(members)
+                    & gdf_win_done.intersects(geometry)
                 ]
-                hits = candidates.unit_id.values[
-                    candidates.sindex.query(geometry, predicate="intersects")
+                hits = gdf_cand.unit_id.values[
+                    gdf_cand.sindex.query(geometry, predicate="intersects")
                 ]
-                silent = others[~others.index.isin(hits)]
-                if len(silent):
+                gdf_sil = gdf_oth[~gdf_oth.index.isin(hits)]
+                if len(gdf_sil):
                     covered = geometry.intersection(
-                        shapely.union_all(silent.geometry.values)
+                        shapely.union_all(gdf_sil.geometry.values)
                     ).area / max(geometry.area, 1e-9)
                     keep_rows[k] = covered < country["contradiction_ratio"]
-            n_contradicted = int((~keep_rows).sum())
-            final = final[keep_rows].reset_index(drop=True)
+            n_contra = int((~keep_rows).sum())
+            gdf_final = gdf_final[keep_rows].reset_index(drop=True)
     else:
-        final = candidates.copy()
-        n_contradicted = 0
-    representative = shapely.point_on_surface(final.geometry.values)
+        gdf_final = gdf_cand.copy()
+        n_contra = 0
+    rep_pt = shapely.point_on_surface(gdf_final.geometry.values)
     step = country["id_rounding_m"]
     ids = pd.Series(
         [
             f"{run['COUNTRY']}_{int(round(x / step) * step)}_{int(round(y / step) * step)}"
-            for x, y in shapely.get_coordinates(representative)
+            for x, y in shapely.get_coordinates(rep_pt)
         ],
         dtype=str,
     )
-    duplicate_rank = ids.groupby(ids).cumcount()
-    final["compartment_id"] = np.where(
-        duplicate_rank > 0, ids + "_" + (duplicate_rank + 1).astype(str), ids
+    dup_rank = ids.groupby(ids).cumcount()
+    gdf_final["compartment_id"] = np.where(
+        dup_rank > 0, ids + "_" + (dup_rank + 1).astype(str), ids
     )
     distance = country["rp"]["levee_adjacent_distance_m"]
     pumping_path = out_dir / "osm_pumping.gpkg"
-    if pumping_path.exists() and len(final):
-        pumps = gpd.read_file(pumping_path).to_crs(wkt)
-        hits, _ = pumps.sindex.query(
-            final.geometry.values, predicate="dwithin", distance=distance
+    if pumping_path.exists() and len(gdf_final):
+        gdf_pump = gpd.read_file(pumping_path).to_crs(wkt)
+        hits, _ = gdf_pump.sindex.query(
+            gdf_final.geometry.values, predicate="dwithin", distance=distance
         )
-        final["has_pumping"] = np.isin(np.arange(len(final)), hits)
+        gdf_final["has_pumping"] = np.isin(np.arange(len(gdf_final)), hits)
     else:
-        final["has_pumping"] = False
+        gdf_final["has_pumping"] = False
         log.info(
             "osm_pumping.gpkg not found (osm_hydraulics.py not run yet): has_pumping is False everywhere."
         )
-    final["no_levee"] = (
-        gis.Vector.length_near_boundary(final, barrier_lines, distance) == 0
+    gdf_final["no_levee"] = (
+        gis.Vector.length_near_boundary(gdf_final, gdf_bl, distance) == 0
     )
-    final = final[OUTPUT_COLUMNS].astype(
+    gdf_final = gdf_final[OUTPUT_COLUMNS].astype(
         {
             "truncated": bool,
             "touches_corridor_edge": bool,
@@ -1079,95 +1085,86 @@ if __name__ == "__main__":
             "no_levee": bool,
         }
     )
-    gis.Vector.write_gpkg(final, out_dir / "compartments.gpkg")
-    n_truncated = int(final["truncated"].sum())
+    gis.Vector.write_gpkg(gdf_final, out_dir / "compartments.gpkg")
+    n_truncated = int(gdf_final["truncated"].sum())
     log.info(
         "Compartments: %d from %d unit candidates in %d finished units; truncated %d (%.1f %%; many truncated "
         "compartments mean the halo is too small), dropped as contradicted by neighbouring windows %d, touching "
         "the corridor edge %d, no levee %d, with pumping %d. Merge took %.1f s.",
-        len(final),
-        len(candidates),
-        len(done_units),
+        len(gdf_final),
+        len(gdf_cand),
+        len(list_done),
         n_truncated,
-        100 * n_truncated / max(len(final), 1),
-        n_contradicted,
-        int(final["touches_corridor_edge"].sum()),
-        int(final["no_levee"].sum()),
-        int(final["has_pumping"].sum()),
+        100 * n_truncated / max(len(gdf_final), 1),
+        n_contra,
+        int(gdf_final["touches_corridor_edge"].sum()),
+        int(gdf_final["no_levee"].sum()),
+        int(gdf_final["has_pumping"].sum()),
         time.perf_counter() - t,
     )
 
     # --- Barrier lines with crest attributes (minimum over the units' cores) ---
-    tables = [
-        pd.read_csv(work_dir / "units" / u / "barrier_crest.csv") for u in done_units
+    list_crest = [
+        pd.read_csv(work_dir / "units" / u / "barrier_crest.csv") for u in list_done
     ]
-    tables = [table for table in tables if len(table)]
-    crest_table = (
-        pd.concat(tables).groupby("line_id")[["crest_min_m", "crest_hand_min_m"]].min()
-        if tables
+    list_crest = [table for table in list_crest if len(table)]
+    df_crest = (
+        pd.concat(list_crest)
+        .groupby("line_id")[["crest_min_m", "crest_hand_min_m"]]
+        .min()
+        if list_crest
         else pd.DataFrame(columns=["crest_min_m", "crest_hand_min_m"])
     )
-    barriers = barrier_lines.merge(
-        crest_table, left_on="line_id", right_index=True, how="left"
-    )
-    gis.Vector.write_gpkg(barriers, out_dir / "barriers.gpkg")
+    gdf_bar = gdf_bl.merge(df_crest, left_on="line_id", right_index=True, how="left")
+    gis.Vector.write_gpkg(gdf_bar, out_dir / "barriers.gpkg")
 
-    enclosed_frames = [
+    list_encl = [
         gpd.read_file(work_dir / "units" / u / "enclosed_streams.gpkg")
-        for u in done_units
+        for u in list_done
     ]
-    enclosed_frames = [f for f in enclosed_frames if len(f)]
-    if enclosed_frames:
-        enclosed = gpd.GeoDataFrame(
-            pd.concat(enclosed_frames, ignore_index=True), geometry="geometry", crs=wkt
+    list_encl = [f for f in list_encl if len(f)]
+    if list_encl:
+        gdf_encl = gpd.GeoDataFrame(
+            pd.concat(list_encl, ignore_index=True), geometry="geometry", crs=wkt
         )
-        enclosed = enclosed[
+        gdf_encl = gdf_encl[
             shapely.covers(
-                cores.geometry.reindex(enclosed.unit_id).values,
-                shapely.point_on_surface(enclosed.geometry.values),
+                gdf_core.geometry.reindex(gdf_encl.unit_id).values,
+                shapely.point_on_surface(gdf_encl.geometry.values),
             )
         ]
         gis.Vector.write_gpkg(
-            enclosed.reset_index(drop=True), out_dir / "enclosed_streams.gpkg"
+            gdf_encl.reset_index(drop=True), out_dir / "enclosed_streams.gpkg"
         )
         log.warning(
             "%d levee-enclosed areas contain river cells (see enclosed_streams.gpkg).",
-            len(enclosed),
+            len(gdf_encl),
         )
 
     # --- Measured performance and extrapolation to the whole country ---
-    performance = pd.DataFrame(
+    df_perf = pd.DataFrame(
         [
             json.loads((work_dir / "units" / u / "done.json").read_text())
-            for u in done_units
+            for u in list_done
         ]
     )
-    if len(performance):
-        seconds_per_cell = performance["seconds"].sum() / max(
-            performance["domain_cells"].sum(), 1
-        )
-        bytes_per_cell = performance["bytes_per_cell"].max()
-        remaining = units[~units.unit_id.isin(done_units)]
+    if len(df_perf):
+        s_cell = df_perf["seconds"].sum() / max(df_perf["domain_cells"].sum(), 1)
+        b_cell = df_perf["bytes_per_cell"].max()
+        df_rem = df_units[~df_units.unit_id.isin(list_done)]
         step_share = (
-            pd.DataFrame(list(performance["times"])).sum()
-            / performance["seconds"].sum()
+            pd.DataFrame(list(df_perf["times"])).sum() / df_perf["seconds"].sum()
         )
-        total_s = (
-            units["est_domain_cells"].sum() * seconds_per_cell / general["n_workers"]
-        )
-        remaining_s = (
-            remaining["est_domain_cells"].sum()
-            * seconds_per_cell
-            / general["n_workers"]
-        )
+        total_s = df_units["est_domain_cells"].sum() * s_cell / general["n_workers"]
+        remaining_s = df_rem["est_domain_cells"].sum() * s_cell / general["n_workers"]
         log.info(
             "Measured on %d units: %.2f microseconds per domain cell, up to %.0f bytes per window cell (configured "
             "%.0f), peak RSS up to %.2f GB. Time shares: %s.",
-            len(performance),
-            1e6 * seconds_per_cell,
-            bytes_per_cell,
+            len(df_perf),
+            1e6 * s_cell,
+            b_cell,
             country["bytes_per_cell"],
-            performance["peak_rss_mb"].max() / 1024,
+            df_perf["peak_rss_mb"].max() / 1024,
             ", ".join(
                 f"{k} {100 * v:.0f} %"
                 for k, v in step_share.sort_values(ascending=False).items()
@@ -1178,16 +1175,16 @@ if __name__ == "__main__":
             "%d units %s; largest unit window needs about %.1f GB.",
             general["n_workers"],
             gis.Run.format_seconds(total_s),
-            len(remaining),
+            len(df_rem),
             gis.Run.format_seconds(remaining_s),
-            units["est_window_cells"].max() * bytes_per_cell / 1e9,
+            df_units["est_window_cells"].max() * b_cell / 1e9,
         )
         (out_dir / "performance.json").write_text(
             json.dumps(
                 {
-                    "units_measured": len(performance),
-                    "seconds_per_domain_cell": seconds_per_cell,
-                    "bytes_per_window_cell": bytes_per_cell,
+                    "units_measured": len(df_perf),
+                    "seconds_per_domain_cell": s_cell,
+                    "bytes_per_window_cell": b_cell,
                     "country_seconds": total_s,
                     "remaining_seconds": remaining_s,
                     "time_shares": step_share.to_dict(),

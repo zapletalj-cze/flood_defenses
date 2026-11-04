@@ -73,13 +73,13 @@ def screen_item(job):
     """
     p = job["params"]
     screen = p["screen"]
-    grids = [job["grids"][unit_id] for unit_id in job["units"]]
-    xmin = min(g["x0"] for g in grids)
-    ymax = max(g["y1"] for g in grids)
-    xmax = max(g["x0"] + g["mask"].shape[1] * screen for g in grids)
-    ymin = min(g["y1"] - g["mask"].shape[0] * screen for g in grids)
+    list_grid = [job["grids"][unit_id] for unit_id in job["units"]]
+    xmin = min(g["x0"] for g in list_grid)
+    ymax = max(g["y1"] for g in list_grid)
+    xmax = max(g["x0"] + g["mask"].shape[1] * screen for g in list_grid)
+    ymin = min(g["y1"] - g["mask"].shape[0] * screen for g in list_grid)
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", job["item_id"])
-    rows = []
+    list_rows = []
     try:
         # Mean of the 0/1 flood layer per screening cell = flooded share (nodata excluded).
         share, _ = gis.Raster.read_window(
@@ -91,7 +91,7 @@ def screen_item(job):
             dst_wkt=p["wkt"],
             src_nodata=p["nodata"],
         )
-        for unit_id, grid in zip(job["units"], grids):
+        for unit_id, grid in zip(job["units"], list_grid):
             r0 = int(round((ymax - grid["y1"]) / screen))
             c0 = int(round((grid["x0"] - xmin) / screen))
             part = share[
@@ -128,7 +128,7 @@ def screen_item(job):
                     ],
                 )
                 row[f"{role}_path"] = str(target)
-            rows.append(row)
+            list_rows.append(row)
     except RuntimeError as error:
         logging.getLogger("download_gfm").warning(
             "Item %s unreadable (%s); it is retried in the next run.",
@@ -137,7 +137,7 @@ def screen_item(job):
         )
         return []
     time.sleep(p["pause"])
-    return rows
+    return list_rows
 
 
 if __name__ == "__main__":
@@ -151,23 +151,23 @@ if __name__ == "__main__":
     log = gis.Run.logger("download_gfm", out_dir / "logs", general["log_level"])
     gis.Config.warn_placeholders(cfg)
     assets = sources["gfm_assets"]
-    missing = [k for k in ["gfm_stac_url", "gfm_collection"] if not sources[k]]
-    missing += [f"gfm_assets.{k}" for k in REQUIRED_ASSETS if not assets.get(k)]
-    if missing:
+    list_miss = [k for k in ["gfm_stac_url", "gfm_collection"] if not sources[k]]
+    list_miss += [f"gfm_assets.{k}" for k in REQUIRED_ASSETS if not assets.get(k)]
+    if list_miss:
         raise SystemExit(
-            f"GFM sources not configured: {missing}. The STAC endpoint, collection and asset names have not been "
+            f"GFM sources not configured: {list_miss}. The STAC endpoint, collection and asset names have not been "
             "verified against the GFM documentation; fill them in [sources]."
         )
-    needed = [
+    list_need = [
         work_dir / "dtm" / "dtm.vrt",
         out_dir / "units.csv",
         work_dir / "units_domain.gpkg",
     ]
-    if not all(path.exists() for path in needed):
+    if not all(path.exists() for path in list_need):
         raise SystemExit(
             "dtm.vrt, units.csv or units_domain.gpkg is missing; run prepare_dtm.py and build_units.py."
         )
-    wkt = gdal.Open(str(needed[0])).GetProjection()
+    wkt = gdal.Open(str(list_need[0])).GetProjection()
     screen = sources["gfm_screen_resolution_m"]
     pause = sources["request_pause_s"]
     headers = {}
@@ -185,30 +185,26 @@ if __name__ == "__main__":
     date_to = sources["gfm_date_to"] or datetime.date.today().isoformat()
     period = f"{sources['gfm_date_from']}T00:00:00Z/{date_to}T23:59:59Z"
 
-    all_units = pd.read_csv(out_dir / "units.csv", dtype={"unit_id": str})
-    units = (
-        all_units[all_units["unit_id"].isin(run["UNITS"])]
-        if run["UNITS"]
-        else all_units
-    )
-    domains = gpd.read_file(work_dir / "units_domain.gpkg").set_index("unit_id")
+    df_all = pd.read_csv(out_dir / "units.csv", dtype={"unit_id": str})
+    df_units = df_all[df_all["unit_id"].isin(run["UNITS"])] if run["UNITS"] else df_all
+    gdf_dom = gpd.read_file(work_dir / "units_domain.gpkg").set_index("unit_id")
     gfm_dir = work_dir / "gfm"
     gfm_dir.mkdir(parents=True, exist_ok=True)
     # Checkpoint: every screened pair of scene and unit, kept or not; a rerun screens only new pairs.
-    screening_path = gfm_dir / "screening.csv"
-    screened = (
-        pd.read_csv(screening_path, dtype={"unit_id": str}, keep_default_na=False)
-        if screening_path.exists()
+    scr_path = gfm_dir / "screening.csv"
+    df_scr = (
+        pd.read_csv(scr_path, dtype={"unit_id": str}, keep_default_na=False)
+        if scr_path.exists()
         else pd.DataFrame(columns=COLUMNS)
     )
     if run["FORCE"]:
-        screened = screened[~screened["unit_id"].isin(units["unit_id"])]
-        screened.to_csv(screening_path, index=False)
-    done = set(zip(screened["item_id"], screened["unit_id"]))
+        df_scr = df_scr[~df_scr["unit_id"].isin(df_units["unit_id"])]
+        df_scr.to_csv(scr_path, index=False)
+    done = set(zip(df_scr["item_id"], df_scr["unit_id"]))
 
     # --- Screening grid per unit: its window on a grid of screening cells shared by all units, domain mask ---
-    grids, cores = {}, []
-    for unit in units.itertuples():
+    grids, list_core = {}, []
+    for unit in df_units.itertuples():
         x0 = float(np.floor(unit.win_xmin / screen) * screen)
         x1 = float(np.ceil(unit.win_xmax / screen) * screen)
         y0 = float(np.floor(unit.win_ymin / screen) * screen)
@@ -216,7 +212,7 @@ if __name__ == "__main__":
         grid_shape = (int(round((y1 - y0) / screen)), int(round((x1 - x0) / screen)))
         mask = (
             gis.Raster.rasterize_geometries(
-                [domains.geometry[unit.unit_id]],
+                [gdf_dom.geometry[unit.unit_id]],
                 [1],
                 grid_shape,
                 (x0, screen, 0.0, y1, 0.0, -screen),
@@ -232,7 +228,7 @@ if __name__ == "__main__":
             "mask": mask,
             "window": (unit.win_xmin, unit.win_ymin, unit.win_xmax, unit.win_ymax),
         }
-        cores.append(
+        list_core.append(
             shapely.segmentize(
                 shapely.box(
                     unit.core_xmin, unit.core_ymin, unit.core_xmax, unit.core_ymax
@@ -240,9 +236,9 @@ if __name__ == "__main__":
                 500.0,
             )
         )
-    cores = gpd.GeoSeries(cores, index=units["unit_id"].to_numpy(), crs=wkt).to_crs(
-        4326
-    )
+    cores = gpd.GeoSeries(
+        list_core, index=df_units["unit_id"].to_numpy(), crs=wkt
+    ).to_crs(4326)
 
     # --- One STAC item search over all selected units, with paging ---
     items = {}
@@ -261,13 +257,13 @@ if __name__ == "__main__":
     while True:
         for feature in response.get("features", []):
             items[feature["id"]] = feature
-        following = [
+        list_next = [
             link for link in response.get("links", []) if link.get("rel") == "next"
         ]
-        if not following:
+        if not list_next:
             break
         time.sleep(pause)
-        link = following[0]
+        link = list_next[0]
         response = gis.Http.get_json(
             link["href"],
             body=(
@@ -293,34 +289,34 @@ if __name__ == "__main__":
         "gfm_dir": str(gfm_dir),
         "pause": pause,
     }
-    jobs = []
+    list_job = []
     for item_id, item in sorted(
         items.items(), key=lambda kv: kv[1]["properties"].get("datetime") or ""
     ):
         available = item.get("assets", {})
-        absent = [assets[r] for r in REQUIRED_ASSETS if assets[r] not in available]
-        if absent:
-            log.warning("Item %s lacks assets %s; skipped.", item_id, absent)
+        list_abs = [assets[r] for r in REQUIRED_ASSETS if assets[r] not in available]
+        if list_abs:
+            log.warning("Item %s lacks assets %s; skipped.", item_id, list_abs)
             continue
         footprint = (
             shape(item["geometry"])
             if item.get("geometry")
             else shapely.box(*item["bbox"])
         )
-        members = [
+        list_mem = [
             u
             for u in cores.index[cores.intersects(footprint)]
             if (item_id, u) not in done
         ]
-        if not members:
+        if not list_mem:
             continue
-        jobs.append(
+        list_job.append(
             {
                 "item_id": item_id,
                 "datetime": item["properties"].get("datetime")
                 or item["properties"].get("start_datetime"),
-                "units": members,
-                "grids": {u: grids[u] for u in members},
+                "units": list_mem,
+                "grids": {u: grids[u] for u in list_mem},
                 "assets": {
                     role: available[assets[role]]["href"]
                     for role in REQUIRED_ASSETS + OPTIONAL_ASSETS
@@ -332,45 +328,45 @@ if __name__ == "__main__":
     log.info(
         "%d GFM items found for %d units; %d items to screen (%d scene-unit pairs screened in earlier runs).",
         len(items),
-        len(units),
-        len(jobs),
+        len(df_units),
+        len(list_job),
         len(done),
     )
 
     # --- Screening and copies, several scenes at a time ---
     start, kept = time.perf_counter(), 0
     with ThreadPoolExecutor(max_workers=sources["gfm_download_threads"]) as pool:
-        for k, rows in enumerate(pool.map(screen_item, jobs), start=1):
-            if rows:
-                pd.DataFrame(rows, columns=COLUMNS).to_csv(
-                    screening_path,
+        for k, list_rows in enumerate(pool.map(screen_item, list_job), start=1):
+            if list_rows:
+                pd.DataFrame(list_rows, columns=COLUMNS).to_csv(
+                    scr_path,
                     mode="a",
-                    header=not screening_path.exists(),
+                    header=not scr_path.exists(),
                     index=False,
                 )
-                kept += sum(bool(r["kept"]) for r in rows)
-            if k % 50 == 0 or k == len(jobs):
+                kept += sum(bool(r["kept"]) for r in list_rows)
+            if k % 50 == 0 or k == len(list_job):
                 log.info(
                     "Screened %d of %d items in %s; %d unit windows kept.",
                     k,
-                    len(jobs),
+                    len(list_job),
                     gis.Run.format_seconds(time.perf_counter() - start),
                     kept,
                 )
 
     # --- Index of the kept unit windows (all runs, all units) ---
-    screened = (
-        pd.read_csv(screening_path, dtype={"unit_id": str}, keep_default_na=False)
-        if screening_path.exists()
+    df_scr = (
+        pd.read_csv(scr_path, dtype={"unit_id": str}, keep_default_na=False)
+        if scr_path.exists()
         else pd.DataFrame(columns=COLUMNS)
     )
-    keep = screened["kept"].astype(str).str.lower().isin(["true", "1"])
-    index = screened[keep & screened["unit_id"].isin(all_units["unit_id"])]
-    index = index.drop(columns="kept").sort_values(["unit_id", "datetime"])
-    index.to_csv(out_dir / "gfm_index.csv", index=False)
+    keep = df_scr["kept"].astype(str).str.lower().isin(["true", "1"])
+    df_idx = df_scr[keep & df_scr["unit_id"].isin(df_all["unit_id"])]
+    df_idx = df_idx.drop(columns="kept").sort_values(["unit_id", "datetime"])
+    df_idx.to_csv(out_dir / "gfm_index.csv", index=False)
     log.info(
         "gfm_index.csv: %d scene windows in %d units (screened pairs: %d).",
-        len(index),
-        index["unit_id"].nunique() if len(index) else 0,
-        len(screened),
+        len(df_idx),
+        df_idx["unit_id"].nunique() if len(df_idx) else 0,
+        len(df_scr),
     )

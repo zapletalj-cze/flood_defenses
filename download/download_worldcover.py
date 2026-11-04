@@ -56,9 +56,9 @@ if __name__ == "__main__":
             "corridor.gpkg and dtm_footprint.gpkg are missing; run prepare_dtm.py and build_units.py first."
         )
     gis.Vector.check_single_layer(area_path)
-    area = gpd.read_file(area_path)
+    gdf_area = gpd.read_file(area_path)
     area = gpd.GeoSeries(
-        [shapely.segmentize(area.union_all(), 1000.0)], crs=area.crs
+        [shapely.segmentize(gdf_area.union_all(), 1000.0)], crs=gdf_area.crs
     ).to_crs(4326)
 
     # --- Tiles of the official grid that intersect the area ---
@@ -70,42 +70,46 @@ if __name__ == "__main__":
         pause,
     )
     gis.Vector.check_single_layer(grid_path)
-    grid = gpd.read_file(grid_path).to_crs(4326)
+    gdf_grid = gpd.read_file(grid_path).to_crs(4326)
     field = sources["worldcover_tile_field"]
-    if field not in grid.columns:
+    if field not in gdf_grid.columns:
         raise SystemExit(
-            f"Field {field!r} not found in the WorldCover grid; columns: {list(grid.columns)}"
+            f"Field {field!r} not found in the WorldCover grid; columns: {list(gdf_grid.columns)}"
         )
-    tiles = sorted(grid.loc[grid.intersects(area.iloc[0]), field].astype(str))
-    if not tiles:
+    list_tile = sorted(
+        gdf_grid.loc[gdf_grid.intersects(area.iloc[0]), field].astype(str)
+    )
+    if not list_tile:
         raise SystemExit("No WorldCover tile intersects the corridor.")
     log.info(
         "WorldCover %s (%d): %d tiles intersect %s: %s.",
         sources["worldcover_version"],
         sources["worldcover_year"],
-        len(tiles),
+        len(list_tile),
         area_path.name,
-        ", ".join(tiles),
+        ", ".join(list_tile),
     )
 
     # --- Download (skipped when the local file has the size the server reports), mosaic ---
-    paths, urls = [], []
-    for tile in tiles:
+    list_path, list_url = [], []
+    for tile in list_tile:
         url = sources["worldcover_url_template"].format(
             version=sources["worldcover_version"],
             year=sources["worldcover_year"],
             tile=tile,
         )
-        paths.append(gis.Http.download(url, work_dir / Path(url).name, retries, pause))
-        urls.append(url)
-    vrt = gis.Raster.build_vrt(paths, out_dir / "worldcover.vrt")
-    metadata = gdal.Open(paths[0]).GetMetadata()
+        list_path.append(
+            gis.Http.download(url, work_dir / Path(url).name, retries, pause)
+        )
+        list_url.append(url)
+    vrt = gis.Raster.build_vrt(list_path, out_dir / "worldcover.vrt")
+    metadata = gdal.Open(list_path[0]).GetMetadata()
     record = {
         "version": sources["worldcover_version"],
         "year": sources["worldcover_year"],
-        "tiles": tiles,
-        "urls": urls,
-        "files": paths,
+        "tiles": list_tile,
+        "urls": list_url,
+        "files": list_path,
         "licence": metadata.get("license", ""),
         "attribution": metadata.get("copyright", ""),
         "legend": metadata.get("legend", ""),
@@ -113,6 +117,6 @@ if __name__ == "__main__":
     (out_dir / "worldcover_sources.json").write_text(json.dumps(record, indent=2))
     log.info(
         "worldcover.vrt over %d tiles; licence: %s.",
-        len(paths),
+        len(list_path),
         record["licence"] or "not stated in the file",
     )

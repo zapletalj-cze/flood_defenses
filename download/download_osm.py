@@ -100,14 +100,14 @@ if __name__ == "__main__":
         "industrial": country["context"]["osm_industrial"],
     }
     for name, table in tags.items():
-        for key, values in table.items():
-            if not isinstance(values, list) or not all(
-                isinstance(v, str) for v in values
+        for key, list_val in table.items():
+            if not isinstance(list_val, list) or not all(
+                isinstance(v, str) for v in list_val
             ):
                 raise SystemExit(
                     f"sources.osm_tags_{name}.{key} must be a list of tag values."
                 )
-    missing = sorted(
+    list_miss = sorted(
         {
             k
             for k in tags["hydraulic"]
@@ -120,9 +120,9 @@ if __name__ == "__main__":
             if k not in EXPOSED[layer]
         }
     )
-    if missing:
+    if list_miss:
         raise SystemExit(
-            f"OSM keys {missing} are not exposed as columns by {OSM_CONFIG}; add them to the "
+            f"OSM keys {list_miss} are not exposed as columns by {OSM_CONFIG}; add them to the "
             "attributes of the [points], [lines] and [multipolygons] sections and to EXPOSED."
         )
 
@@ -143,9 +143,9 @@ if __name__ == "__main__":
         gis.Http.download(url, pbf, sources["max_retries"], sources["request_pause_s"])
 
     # --- Extraction inside the DTM footprint (one VectorTranslate call per output) ---
-    footprint_path = out_dir / "dtm_footprint.gpkg"
+    fp_path = out_dir / "dtm_footprint.gpkg"
     vrt_path = work_dir / "dtm" / "dtm.vrt"
-    if not footprint_path.exists() or not vrt_path.exists():
+    if not fp_path.exists() or not vrt_path.exists():
         raise SystemExit(
             "dtm_footprint.gpkg or dtm.vrt is missing; run prepare_dtm.py first."
         )
@@ -153,9 +153,9 @@ if __name__ == "__main__":
     # OSM data are in WGS 84; GDAL accepts no spatial-filter CRS together with SQL, so the footprint's
     # bounding box (densified before reprojection) is given in WGS 84.
     extent = gpd.GeoSeries(
-        [box(*gpd.read_file(footprint_path).to_crs(wkt).total_bounds)], crs=wkt
+        [box(*gpd.read_file(fp_path).to_crs(wkt).total_bounds)], crs=wkt
     )
-    bounds = list(
+    list_bnd = list(
         extent.segmentize(extent.iloc[0].length / 400).to_crs(4326).total_bounds
     )
     gdal.SetConfigOption("OSM_CONFIG_FILE", str(OSM_CONFIG))
@@ -164,15 +164,15 @@ if __name__ == "__main__":
     (work_dir / "osm").mkdir(parents=True, exist_ok=True)
 
     def condition(table, layer):
-        parts = [
+        list_part = [
             f"{key} IN ({', '.join(repr(v) for v in values)})"
             for key, values in table.items()
             if key in EXPOSED[layer] and values
         ]
-        return " OR ".join(parts) if parts else "0"
+        return " OR ".join(list_part) if list_part else "0"
 
-    columns = sorted(set(tags["hydraulic"]) | {"name"})
-    select = ", ".join(columns)
+    list_col = sorted(set(tags["hydraulic"]) | {"name"})
+    select = ", ".join(list_col)
     outputs = {
         "osm_hydraulic_points": (
             f"SELECT osm_id, 'node' AS osm_element, {select}, geometry FROM points "
@@ -248,13 +248,13 @@ if __name__ == "__main__":
                 SQLStatement=sql,
                 SQLDialect="SQLITE",
                 layerName=name,
-                spatFilter=bounds,
+                spatFilter=list_bnd,
                 dstSRS=wkt,
                 geometryType=geometry_type,
             )
         gis.Vector.check_single_layer(path)
-        extracted = gpd.read_file(path)
-        log.info("%s: %d features.", path.name, len(extracted))
+        gdf_ext = gpd.read_file(path)
+        log.info("%s: %d features.", path.name, len(gdf_ext))
         # Counts per tag value, to adjust the tag lists in the configuration.
         table = {
             "osm_hydraulic_points": tags["hydraulic"],
@@ -266,7 +266,7 @@ if __name__ == "__main__":
             "osm_walls": tags["walls"],
         }.get(name, {})
         for key in table:
-            if key in extracted.columns:
-                counts = extracted[key].dropna().value_counts()
+            if key in gdf_ext.columns:
+                counts = gdf_ext[key].dropna().value_counts()
                 for value, count in counts.items():
                     log.info("  %s=%s: %d", key, value, count)

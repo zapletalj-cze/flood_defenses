@@ -39,36 +39,36 @@ if __name__ == "__main__":
     if not cfg["sources"]["glofas_enabled"]:
         log.info("glofas_enabled is false; no observed bounds.")
         raise SystemExit(0)
-    needed = [
+    list_need = [
         out_dir / "compartments_rp.gpkg",
         out_dir / "gfm_evidence.csv",
         out_dir / "glofas_discharge.npz",
     ]
-    if not all(path.exists() for path in needed):
+    if not all(path.exists() for path in list_need):
         raise SystemExit(
-            f"Missing inputs {[str(p) for p in needed if not p.exists()]}; run rp_index.py, "
+            f"Missing inputs {[str(p) for p in list_need if not p.exists()]}; run rp_index.py, "
             "gfm_evidence.py and download_glofas.py first."
         )
-    result = gpd.read_file(needed[0])
+    gdf_comp = gpd.read_file(list_need[0])
     # The model values of rp_index.py are kept as *_prior, so that reruns start from them again.
     for column in MODEL_COLUMNS:
-        if f"{column}_prior" not in result.columns:
-            result[f"{column}_prior"] = result[column]
-        result[column] = result[f"{column}_prior"]
+        if f"{column}_prior" not in gdf_comp.columns:
+            gdf_comp[f"{column}_prior"] = gdf_comp[column]
+        gdf_comp[column] = gdf_comp[f"{column}_prior"]
     classes = np.asarray(cfg["country"]["rp"]["classes"], float)
 
     # --- Matching compartments to GloFAS cells: within the radius, upstream area ratio in range, closest ratio ---
-    glofas = np.load(needed[2])
+    glofas = np.load(list_need[2])
     cells = gpd.GeoSeries(
         gpd.points_from_xy(glofas["lon"], glofas["lat"]), crs=4326
-    ).to_crs(result.crs)
+    ).to_crs(gdf_comp.crs)
     tree = cKDTree(np.column_stack([cells.x, cells.y]))
     cell_area = glofas["upstream_area_km2"]
-    match_cell = np.full(len(result), -1, np.int64)
-    match_distance = np.full(len(result), np.nan)
-    match_ratio = np.full(len(result), np.nan)
+    match_cell = np.full(len(gdf_comp), -1, np.int64)
+    match_d = np.full(len(gdf_comp), np.nan)
+    match_ratio = np.full(len(gdf_comp), np.nan)
     for i, (x, y, area) in enumerate(
-        zip(result["source_x"], result["source_y"], result["upstream_area_km2"])
+        zip(gdf_comp["source_x"], gdf_comp["source_y"], gdf_comp["upstream_area_km2"])
     ):
         if not (np.isfinite(x) and np.isfinite(area) and area > 0):
             continue
@@ -88,16 +88,16 @@ if __name__ == "__main__":
             continue
         best = candidates[ok][np.argmin(np.abs(np.log(ratio[ok])))]
         match_cell[i] = best
-        match_distance[i] = np.hypot(cells.x[best] - x, cells.y[best] - y) / 1000.0
+        match_d[i] = np.hypot(cells.x[best] - x, cells.y[best] - y) / 1000.0
         match_ratio[i] = cell_area[best] / area
-    result["glofas_cell"] = match_cell
-    result["glofas_distance_km"] = match_distance
-    result["glofas_area_ratio"] = match_ratio
-    matched = result["glofas_cell"] >= 0
+    gdf_comp["glofas_cell"] = match_cell
+    gdf_comp["glofas_distance_km"] = match_d
+    gdf_comp["glofas_area_ratio"] = match_ratio
+    matched = gdf_comp["glofas_cell"] >= 0
     log.info(
         "Matched to a GloFAS cell: %d of %d compartments.",
         int(matched.sum()),
-        len(result),
+        len(gdf_comp),
     )
 
     # --- Gumbel fit (L-moments) of the annual maxima of each matched cell ---
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     discharge = glofas["discharge"]
     years = dates.astype("datetime64[Y]").astype(int) + 1970
     fits = {}
-    for cell in np.unique(result.loc[matched, "glofas_cell"]).astype(int):
+    for cell in np.unique(gdf_comp.loc[matched, "glofas_cell"]).astype(int):
         series = pd.Series(discharge[:, cell]).groupby(years)
         complete = series.count() >= cfg["sources"]["glofas_min_days_per_year"]
         maxima = series.max()[complete]
@@ -118,25 +118,23 @@ if __name__ == "__main__":
             )
 
     # --- Event return periods of the GFM tests ---
-    tests = pd.read_csv(needed[1])
-    tests = tests[tests["outcome"].isin(["held", "flooded"])].copy()
-    tests = tests.merge(
-        result[["compartment_id", "glofas_cell"]], on="compartment_id", how="inner"
+    df_test = pd.read_csv(list_need[1])
+    df_test = df_test[df_test["outcome"].isin(["held", "flooded"])].copy()
+    df_test = df_test.merge(
+        gdf_comp[["compartment_id", "glofas_cell"]], on="compartment_id", how="inner"
     )
-    tests = tests[tests["glofas_cell"] >= 0]
+    df_test = df_test[df_test["glofas_cell"] >= 0]
     day_index = {d: i for i, d in enumerate(dates)}
     window = evidence["flooded_window_days"]
-    event_rp = []
-    acquisition_days = pd.to_datetime(
-        tests["datetime"], utc=True, format="ISO8601"
-    ).dt.date
+    list_erp = []
+    acq_days = pd.to_datetime(df_test["datetime"], utc=True, format="ISO8601").dt.date
     for outcome, day, cell in zip(
-        tests["outcome"], acquisition_days, tests["glofas_cell"].astype(int)
+        df_test["outcome"], acq_days, df_test["glofas_cell"].astype(int)
     ):
         k = day_index.get(np.datetime64(day, "D"))
         xi, alpha = fits.get(cell, (np.nan, np.nan))
         if k is None or not np.isfinite(alpha):
-            event_rp.append(np.nan)
+            list_erp.append(np.nan)
             continue
         if outcome == "held":
             q = discharge[
@@ -146,28 +144,32 @@ if __name__ == "__main__":
             q = np.nanmax(
                 discharge[max(k - window + 1, 0) : k + 1, cell]
             )  # peak before and on the day: upper bound
-        event_rp.append(float(gis.Stats.gumbel_rp(q, xi, alpha)))
-    tests["event_rp"] = event_rp
-    tests = tests[np.isfinite(tests["event_rp"])]
+        list_erp.append(float(gis.Stats.gumbel_rp(q, xi, alpha)))
+    df_test["event_rp"] = list_erp
+    df_test = df_test[np.isfinite(df_test["event_rp"])]
     log.info(
         "GFM tests with an event return period: %d (held %d, flooded %d).",
-        len(tests),
-        int((tests["outcome"] == "held").sum()),
-        int((tests["outcome"] == "flooded").sum()),
+        len(df_test),
+        int((df_test["outcome"] == "held").sum()),
+        int((df_test["outcome"] == "flooded").sum()),
     )
 
-    held = tests[tests["outcome"] == "held"].groupby("compartment_id")["event_rp"]
-    flooded = tests[tests["outcome"] == "flooded"].groupby("compartment_id")["event_rp"]
-    result["n_held"] = result["compartment_id"].map(held.count()).fillna(0).astype(int)
-    result["n_flooded"] = (
-        result["compartment_id"].map(flooded.count()).fillna(0).astype(int)
+    held = df_test[df_test["outcome"] == "held"].groupby("compartment_id")["event_rp"]
+    flooded = df_test[df_test["outcome"] == "flooded"].groupby("compartment_id")[
+        "event_rp"
+    ]
+    gdf_comp["n_held"] = (
+        gdf_comp["compartment_id"].map(held.count()).fillna(0).astype(int)
     )
-    result["obs_rp_low"] = result["compartment_id"].map(held.max())
-    result["obs_rp_high"] = result["compartment_id"].map(flooded.min())
-    result["obs_conflict"] = (result["obs_rp_low"] > result["obs_rp_high"]).fillna(
-        False
+    gdf_comp["n_flooded"] = (
+        gdf_comp["compartment_id"].map(flooded.count()).fillna(0).astype(int)
     )
-    result["model_obs_conflict"] = False
+    gdf_comp["obs_rp_low"] = gdf_comp["compartment_id"].map(held.max())
+    gdf_comp["obs_rp_high"] = gdf_comp["compartment_id"].map(flooded.min())
+    gdf_comp["obs_conflict"] = (
+        gdf_comp["obs_rp_low"] > gdf_comp["obs_rp_high"]
+    ).fillna(False)
+    gdf_comp["model_obs_conflict"] = False
 
     # --- Combination with the model interval ---
     cases = {
@@ -177,8 +179,8 @@ if __name__ == "__main__":
         "override_kept": 0,
     }
     log_classes = np.log(classes)
-    for i in result.index[(result["n_held"] + result["n_flooded"]) > 0]:
-        row = result.loc[i]
+    for i in gdf_comp.index[(gdf_comp["n_held"] + gdf_comp["n_flooded"]) > 0]:
+        row = gdf_comp.loc[i]
         if row["rp_source_prior"] == "override":
             cases["override_kept"] += 1
             continue
@@ -192,7 +194,7 @@ if __name__ == "__main__":
         if low > high:
             # The observations contradict the model interval: only the observed interval is used, a side
             # without observations stays open.
-            result.loc[i, "model_obs_conflict"] = True
+            gdf_comp.loc[i, "model_obs_conflict"] = True
             cases["model_obs_conflict"] += 1
             low, high = obs_low, obs_high
         else:
@@ -208,15 +210,15 @@ if __name__ == "__main__":
             low = classes[max(k - 1, 0)]
         if not np.isfinite(high):
             high = classes[min(k + 1, len(classes) - 1)]
-        result.loc[i, "rp"] = snapped
-        result.loc[i, "rp_low"] = min(low, snapped)
-        result.loc[i, "rp_high"] = max(high, snapped)
-        result.loc[i, "rp_source"] = f"{row['rp_source_prior']}+obs"
+        gdf_comp.loc[i, "rp"] = snapped
+        gdf_comp.loc[i, "rp_low"] = min(low, snapped)
+        gdf_comp.loc[i, "rp_high"] = max(high, snapped)
+        gdf_comp.loc[i, "rp_source"] = f"{row['rp_source_prior']}+obs"
     for column in ["rp", "rp_low", "rp_high"]:
-        result[column] = result[column].astype(float)
-    gis.Vector.write_gpkg(result, out_dir / "compartments_rp.gpkg")
+        gdf_comp[column] = gdf_comp[column].astype(float)
+    gis.Vector.write_gpkg(gdf_comp, out_dir / "compartments_rp.gpkg")
     log.info(
         "Observed bounds: %s. compartments_rp.gpkg updated (%d compartments).",
         ", ".join(f"{k} {v}" for k, v in cases.items()),
-        len(result),
+        len(gdf_comp),
     )

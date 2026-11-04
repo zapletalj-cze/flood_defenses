@@ -100,19 +100,19 @@ del surface, rows, cols, lx, ly
 
 # --- OSM extract: buildings, water, crossings, walls, industrial areas ---
 to_lonlat = Transformer.from_crs(EPSG, 4326, always_xy=True)
-nodes, ways = [], []
+list_node, list_way = [], []
 
 
 def node(x, y):
     lon, lat = to_lonlat.transform(X0 + x, Y_TOP - HEIGHT_M + y)
-    nodes.append((len(nodes) + 1, lat, lon))
-    return len(nodes)
+    list_node.append((len(list_node) + 1, lat, lon))
+    return len(list_node)
 
 
 def closed(bounds):
-    ids = [node(bounds[0], bounds[1]), node(bounds[2], bounds[1])]
-    ids += [node(bounds[2], bounds[3]), node(bounds[0], bounds[3])]
-    return ids + [ids[0]]
+    list_id = [node(bounds[0], bounds[1]), node(bounds[2], bounds[1])]
+    list_id += [node(bounds[2], bounds[3]), node(bounds[0], bounds[3])]
+    return list_id + [list_id[0]]
 
 
 def line(points):
@@ -120,7 +120,7 @@ def line(points):
 
 
 way_id = 1000
-for refs, tags in [
+for list_ref, tags in [
     (closed((300, 1000, 330, 1020)), {"building": "yes"}),
     (closed((340, 1000, 370, 1020)), {"building": "yes"}),
     (closed((1200, 1500, 1230, 1530)), {"building": "industrial"}),
@@ -134,32 +134,32 @@ for refs, tags in [
     (closed((1000, 1200, 1150, 1450)), {"landuse": "industrial"}),
     (closed((200, 300, 350, 450)), {"man_made": "works"}),
 ]:
-    ways.append((way_id, refs, tags))
+    list_way.append((way_id, list_ref, tags))
     way_id += 1
-xml = [
+list_xml = [
     "<?xml version='1.0' encoding='UTF-8'?>",
     '<osm version="0.6" generator="synthetic">',
 ]
-xml += [
+list_xml += [
     f'  <node id="{nid}" lat="{lat:.8f}" lon="{lon:.8f}" version="1"/>'
-    for nid, lat, lon in nodes
+    for nid, lat, lon in list_node
 ]
-for wid, refs, tags in ways:
-    xml.append(
+for wid, list_ref, tags in list_way:
+    list_xml.append(
         f'  <way id="{wid}" version="1">'
-        + "".join(f'<nd ref="{r}"/>' for r in refs)
+        + "".join(f'<nd ref="{r}"/>' for r in list_ref)
         + "".join(f'<tag k="{k}" v="{v}"/>' for k, v in tags.items())
         + "</way>"
     )
-xml.append("</osm>")
-(data_d / "t4d.osm").write_text("\n".join(xml))
+list_xml.append("</osm>")
+(data_d / "t4d.osm").write_text("\n".join(list_xml))
 
 # --- GHSL settlement model and population: zipped Mollweide tiles of the Stage B tiling schema ---
-schema = gpd.read_file(f"/vsizip/{data / 'tiling_schema.zip'}/tiling_schema.shp")
+gdf_sch = gpd.read_file(f"/vsizip/{data / 'tiling_schema.zip'}/tiling_schema.shp")
 from_moll = Transformer.from_crs(MOLLWEIDE, EPSG, always_xy=True)
 moll = osr.SpatialReference()
 moll.SetFromUserInput(MOLLWEIDE)
-for tile, geometry in zip(schema["tile_id"], schema.geometry):
+for tile, geometry in zip(gdf_sch["tile_id"], gdf_sch.geometry):
     tx0, ty0, tx1, ty1 = geometry.bounds
     ncols, nrows = int(round((tx1 - tx0) / 100)), int(round((ty1 - ty0) / 100))
     cx, cy = np.meshgrid(
@@ -348,34 +348,34 @@ def run(module, label, config_name="test_d.toml", **variables):
     return proc
 
 
-results = []
+list_res = []
 
 # --- prepare_dtm.py with a DSM, build_units.py ---
 proc = run("processing.prepare_dtm", "prepare_dtm")
-inspection = (
+df_insp = (
     pd.read_csv(out / "dsm_inspection.csv")
     if (out / "dsm_inspection.csv").exists()
     else pd.DataFrame()
 )
-bench = (
+df_bench = (
     pd.read_csv(out / "dsm_benchmark.csv")
     if (out / "dsm_benchmark.csv").exists()
     else pd.DataFrame()
 )
-results.append(
+list_res.append(
     (
-        f"prepare_dtm: DSM inspected (tiled {inspection.get('block_x', pd.Series([0])).iloc[0]} px blocks) and "
-        f"benchmarked ({len(bench)} windows) like the DTM",
+        f"prepare_dtm: DSM inspected (tiled {df_insp.get('block_x', pd.Series([0])).iloc[0]} px blocks) and "
+        f"benchmarked ({len(df_bench)} windows) like the DTM",
         proc.returncode == 0
-        and len(inspection) == 1
-        and not bool(inspection["strip_layout"].iloc[0])
-        and len(bench) == 2
+        and len(df_insp) == 1
+        and not bool(df_insp["strip_layout"].iloc[0])
+        and len(df_bench) == 2
         and (out / "dtm_benchmark.csv").exists()
         and "Benchmark DSM" in proc.stderr,
     )
 )
 proc = run("processing.build_units", "build_units")
-results.append(("build_units for T4D", proc.returncode == 0))
+list_res.append(("build_units for T4D", proc.returncode == 0))
 
 # --- download_osm.py: Stage D outputs and candidate counts ---
 proc = run("download.download_osm", "download_osm", FORCE="1")
@@ -396,7 +396,7 @@ osm_counts = {
         "osm_industrial",
     ]
 }
-results.append(
+list_res.append(
     (
         f"download_osm: buildings, water, crossings (no footway), walls, industrial areas {osm_counts}",
         proc.returncode == 0
@@ -410,7 +410,7 @@ results.append(
         },
     )
 )
-results.append(
+list_res.append(
     (
         "candidate wall tags counted in the extract (barrier=wall 2, wall=flood_wall 1, man_made=dyke 1)",
         all(
@@ -430,7 +430,9 @@ if (
 ):
     values = gdal.Open(str(out / "ghsl_smod.vrt")).ReadAsArray()
     smod_ok = set(np.unique(values)) >= {11, 22, 30}
-results.append(("download_ghsl: SMOD and GHS-POP mosaics of the probed epoch", smod_ok))
+list_res.append(
+    ("download_ghsl: SMOD and GHS-POP mosaics of the probed epoch", smod_ok)
+)
 
 # --- download_clms.py: a wrong known pixel stops it; the right one passes ---
 proc_bad = run(
@@ -448,7 +450,7 @@ if proc.returncode == 0 and (out / "corine_codes.tif").exists():
         int(codes_ds.ReadAsArray(col, row, 1, 1)[0, 0]) == 121
         and {111, 121, 211} <= present
     )
-results.append(
+list_res.append(
     (
         "CORINE legend mapping verified on a known pixel: wrong code stops the script, codes 111/121/211 written",
         proc_bad.returncode != 0
@@ -456,23 +458,23 @@ results.append(
         and codes_ok,
     )
 )
-ua = (
+gdf_ua = (
     gpd.read_file(out / "urban_atlas.gpkg")
     if (out / "urban_atlas.gpkg").exists()
     else gpd.GeoDataFrame()
 )
-results.append(
+list_res.append(
     (
         "Urban Atlas: layer of the two-layer file merged in the DTM CRS with numeric codes",
-        len(ua) == 2
-        and set(ua["ua_code"]) == {12100, 11100}
-        and ua.crs.to_epsg() == EPSG,
+        len(gdf_ua) == 2
+        and set(gdf_ua["ua_code"]) == {12100, 11100}
+        and gdf_ua.crs.to_epsg() == EPSG,
     )
 )
 
 # --- context_zones.py ---
 proc = run("processing.context_zones", "context_zones")
-zones = (
+gdf_zone = (
     gpd.read_file(out / "zones.gpkg") if proc.returncode == 0 else gpd.GeoDataFrame()
 )
 probes = {
@@ -486,12 +488,14 @@ probes = {
     "urban (SMOD 22)": ((2300, 1000), "urban"),
     "rural": ((1000, 400), "rural"),
 }
-if len(zones):
+if len(gdf_zone):
     found = {}
     for label, (xy, _) in probes.items():
-        hit = zones[zones.covers(world(Point(*xy)))]
-        found[label] = hit["context"].iloc[0] if len(hit) == 1 else f"{len(hit)} zones"
-    results.append(
+        gdf_hit = gdf_zone[gdf_zone.covers(world(Point(*xy)))]
+        found[label] = (
+            gdf_hit["context"].iloc[0] if len(gdf_hit) == 1 else f"{len(gdf_hit)} zones"
+        )
+    list_res.append(
         (
             "context zones: order wins where sources overlap; small zones fall through; rural is the rest",
             all(found[k] == v for k, (_, v) in probes.items()),
@@ -505,18 +509,18 @@ if len(zones):
     )
     overlap = sum(
         shapely.intersection(a, b).area
-        for i, a in enumerate(zones.geometry)
-        for b in zones.geometry.iloc[i + 1 :]
+        for i, a in enumerate(gdf_zone.geometry)
+        for b in gdf_zone.geometry.iloc[i + 1 :]
     )
-    results.append(
+    list_res.append(
         (
-            f"zones do not overlap ({overlap:.1f} m2) and tile the corridor ({zones.area.sum() / corridor.area:.6f})",
-            overlap < 1.0 and abs(zones.area.sum() / corridor.area - 1) < 1e-6,
+            f"zones do not overlap ({overlap:.1f} m2) and tile the corridor ({gdf_zone.area.sum() / corridor.area:.6f})",
+            overlap < 1.0 and abs(gdf_zone.area.sum() / corridor.area - 1) < 1e-6,
         )
     )
     # zones_to_grid on a unit grid: earlier contexts carry lower values.
-    units = pd.read_csv(out / "units.csv", dtype={"unit_id": str})
-    unit = units[units["unit_id"] == "000_000"].iloc[0]
+    df_units = pd.read_csv(out / "units.csv", dtype={"unit_id": str})
+    unit = df_units[df_units["unit_id"] == "000_000"].iloc[0]
     res = 2.0
     grid_gt = (unit.win_xmin, res, 0.0, unit.win_ymax, 0.0, -res)
     shape = (
@@ -524,22 +528,22 @@ if len(zones):
         int(round((unit.win_xmax - unit.win_xmin) / res)),
     )
     grid = gis.Vector.zones_to_grid(
-        zones,
+        gdf_zone,
         ["industrial", "dense_urban", "urban", "rural"],
         shape,
         grid_gt,
         gdal.Open(str(root / "work" / "T4D" / "dtm" / "dtm.vrt")).GetProjection(),
     )
-    checks = []
+    list_chk = []
     for (px, py), expected in [((800, 1300), 1), ((400, 1000), 2), ((1000, 400), 4)]:
         c = int((X0 + px - grid_gt[0]) / res)
         r = int((grid_gt[3] - (Y_TOP - HEIGHT_M + py)) / res)
-        checks.append(int(grid[r, c]) == expected)
-    results.append(("zones_to_grid: context codes on a unit grid", all(checks)))
+        list_chk.append(int(grid[r, c]) == expected)
+    list_res.append(("zones_to_grid: context codes on a unit grid", all(list_chk)))
 else:
-    results.append(("context_zones runs", False))
+    list_res.append(("context_zones runs", False))
 
 print("Timings (s): " + ", ".join(f"{k} {v:.1f}" for k, v in timings.items()))
-for label, ok in results:
+for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")
-sys.exit(0 if all(ok for _, ok in results) else 1)
+sys.exit(0 if all(ok for _, ok in list_res) else 1)

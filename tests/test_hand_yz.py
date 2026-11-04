@@ -76,8 +76,8 @@ if not (out / "compartments_rp.gpkg").exists():
 stage_b = root / "compartments_rp_stage_b.gpkg"
 if not stage_b.exists():
     shutil.copy(out / "compartments_rp.gpkg", stage_b)
-model = gpd.read_file(stage_b)
-compartments = gpd.read_file(out / "compartments.gpkg")
+gdf_model = gpd.read_file(stage_b)
+gdf_comp = gpd.read_file(out / "compartments.gpkg")
 
 
 def world(geometry):
@@ -91,15 +91,14 @@ def grown(bounds, margin):
 
 
 member = {
-    k: compartments[compartments.covers(world(Point(*xy)))].iloc[0]
-    for k, xy in probes.items()
+    k: gdf_comp[gdf_comp.covers(world(Point(*xy)))].iloc[0] for k, xy in probes.items()
 }
 
 # --- Synthetic WorldCover: two tiles of the official grid (the corridor crosses 15 degrees east) ---
 to_local = Transformer.from_crs(4326, EPSG, always_xy=True)
 srs = osr.SpatialReference()
 srs.ImportFromEPSG(4326)
-wc_boxes = [
+list_wc = [
     (grown(interiors["R1"], 20), 40),  # cropland -> agriculture
     (grown(interiors["R2"], 20), 50),  # built-up -> built_up
     (grown(interiors["R3"], 20), 10),  # tree cover: no value, replaced by Urban Atlas
@@ -116,7 +115,7 @@ for tile, (west, east) in tiles.items():
     x, y = to_local.transform(lon, lat)
     x, y = x - X0, y - (Y_TOP - HEIGHT_M)
     classes = np.full(lon.shape, 30, np.uint8)  # grassland: no value
-    for geometry, code in wc_boxes:
+    for geometry, code in list_wc:
         classes[shapely.contains_xy(geometry, x, y)] = code
     path = data / "wc" / f"ESA_WorldCover_10m_2021_v200_{tile}_Map.tif"
     ds = gdal.GetDriverByName("GTiff").Create(
@@ -128,7 +127,7 @@ for tile, (west, east) in tiles.items():
     ds.GetRasterBand(1).SetNoDataValue(0)
     ds.GetRasterBand(1).WriteArray(classes)
     ds = None
-grid = gpd.GeoDataFrame(
+gdf_grid = gpd.GeoDataFrame(
     {"ll_tile": ["N48E012", "N48E015", "N45E015", "N51E015"]},
     geometry=[
         box(12, 48, 15, 51),
@@ -138,13 +137,13 @@ grid = gpd.GeoDataFrame(
     ],
     crs=4326,
 )
-grid.to_file(data / "wc" / "worldcover_grid.geojson", driver="GeoJSON")
+gdf_grid.to_file(data / "wc" / "worldcover_grid.geojson", driver="GeoJSON")
 
 # --- Synthetic Urban Atlas: a two-layer GeoPackage (land use polygons and a boundary) in EPSG:3035 ---
 to_ua = Transformer.from_crs(EPSG, UA_EPSG, always_xy=True)
 ua_srs = osr.SpatialReference()
 ua_srs.ImportFromEPSG(UA_EPSG)
-ua_polygons = [
+list_ua = [
     (
         "14100",
         box(1080, 930, UA_SPLIT_X, 1270),
@@ -158,7 +157,7 @@ if ua_path.exists():
 ua_ds = ogr.GetDriverByName("GPKG").CreateDataSource(str(ua_path))
 layer = ua_ds.CreateLayer("TEST001L1_UA2018", ua_srs, ogr.wkbPolygon)
 layer.CreateField(ogr.FieldDefn("code_2018", ogr.OFTString))
-for code, geometry in ua_polygons:
+for code, geometry in list_ua:
     feature = ogr.Feature(layer.GetLayerDefn())
     feature.SetField("code_2018", code)
     projected = shapely.transform(
@@ -258,7 +257,7 @@ def expected_value(label, factor=1.0, urban_atlas=True):
     return total
 
 
-results = []
+list_res = []
 
 # --- download_worldcover.py ---
 proc = run("download.download_worldcover", "download_worldcover")
@@ -267,7 +266,7 @@ record = (
     if proc.returncode == 0
     else {}
 )
-results.append(
+list_res.append(
     (
         f"download_worldcover: tiles of the grid that touch the corridor ({record.get('tiles')}), VRT, licence",
         proc.returncode == 0
@@ -279,15 +278,15 @@ results.append(
 
 # --- HAND_YZ.py ---
 proc = run("processing.HAND_YZ", "hand_yz")
-table = (
+df_exp = (
     pd.read_csv(out / "exposure_lulc.csv").set_index("compartment_id")
     if proc.returncode == 0
     else pd.DataFrame()
 )
-if len(table):
-    got = {k: float(table.loc[member[k].compartment_id, "value_lulc"]) for k in probes}
+if len(df_exp):
+    got = {k: float(df_exp.loc[member[k].compartment_id, "value_lulc"]) for k in probes}
     want = {k: expected_value(k) for k in probes}
-    results.append(
+    list_res.append(
         (
             "land cover value per compartment equals the independent computation "
             + ", ".join(f"{k} {got[k]:.0f}/{want[k]:.0f}" for k in probes),
@@ -295,33 +294,33 @@ if len(table):
             and all(want[k] > 0 for k in probes),
         )
     )
-    results.append(
+    list_res.append(
         (
             "WorldCover classes: cropland -> agriculture (ring 1), built-up -> built_up (ring 2)",
-            table.loc[member["R1"].compartment_id, "lulc_agriculture"] == got["R1"]
-            and table.loc[member["R2"].compartment_id, "lulc_built_up"] == got["R2"],
+            df_exp.loc[member["R1"].compartment_id, "lulc_agriculture"] == got["R1"]
+            and df_exp.loc[member["R2"].compartment_id, "lulc_built_up"] == got["R2"],
         )
     )
-    results.append(
+    list_res.append(
         (
             "Urban Atlas takes precedence: ring 3 (tree cover) valued as transport, west of ring 2 without value",
-            table.loc[member["R3"].compartment_id, "lulc_transport"] == got["R3"]
-            and table.loc[member["R3"].compartment_id, "lulc_built_up"] == 0
+            df_exp.loc[member["R3"].compartment_id, "lulc_transport"] == got["R3"]
+            and df_exp.loc[member["R3"].compartment_id, "lulc_built_up"] == 0
             and 0 < got["R2"] < 0.8 * expected_value("R2", urban_atlas=False),
         )
     )
 else:
-    results.append(("HAND_YZ runs and writes exposure_lulc.csv", False))
-copies = list((root / "work" / "T4" / "lulc").glob("*_layer.gpkg"))
-kept_polygons = (
+    list_res.append(("HAND_YZ runs and writes exposure_lulc.csv", False))
+list_copy = list((root / "work" / "T4" / "lulc").glob("*_layer.gpkg"))
+gdf_kept = (
     gpd.read_file(root / "work" / "T4" / "lulc" / "urban_atlas_categories.gpkg")
     if (root / "work" / "T4" / "lulc" / "urban_atlas_categories.gpkg").exists()
     else gpd.GeoDataFrame()
 )
-results.append(
+list_res.append(
     (
-        f"Urban Atlas layer copied from the two-layer file; {len(kept_polygons)} polygons touch compartments",
-        len(copies) == 1 and len(kept_polygons) == 2,
+        f"Urban Atlas layer copied from the two-layer file; {len(gdf_kept)} polygons touch compartments",
+        len(list_copy) == 1 and len(gdf_kept) == 2,
     )
 )
 
@@ -335,48 +334,48 @@ pd.DataFrame(
     ]
 ).to_csv(data / "lulc_max_damage.csv", index=False)
 proc = run("processing.HAND_YZ", "hand_yz_new_values")
-doubled = (
+df_dbl = (
     pd.read_csv(out / "exposure_lulc.csv").set_index("compartment_id")
     if proc.returncode == 0
     else pd.DataFrame()
 )
-results.append(
+list_res.append(
     (
         "unchanged rerun skips every unit; changed values are detected and recomputed (value doubles)",
         rerun_skipped
         and "0 to process" not in proc.stderr
-        and len(doubled) == len(table)
-        and np.allclose(doubled["value_lulc"], 2 * table["value_lulc"]),
+        and len(df_dbl) == len(df_exp)
+        and np.allclose(df_dbl["value_lulc"], 2 * df_exp["value_lulc"]),
     )
 )
 
 # --- rp_index.py: building value plus land cover value ---
 proc = run("processing.rp_index", "rp_index_lulc")
-combined = (
+gdf_comb = (
     gpd.read_file(out / "compartments_rp.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
-if len(combined):
-    merged = combined.set_index("compartment_id")
-    before = model.set_index("compartment_id")
-    results.append(
+if len(gdf_comb):
+    gdf_mrg = gdf_comb.set_index("compartment_id")
+    gdf_before = gdf_model.set_index("compartment_id")
+    list_res.append(
         (
             "rp_index: value_exposed = value_ghsl + value_lulc, GHSL part unchanged from Stage B",
-            np.allclose(merged.value_exposed, merged.value_ghsl + merged.value_lulc)
+            np.allclose(gdf_mrg.value_exposed, gdf_mrg.value_ghsl + gdf_mrg.value_lulc)
             and np.allclose(
-                merged.loc[before.index, "value_ghsl"], before.value_exposed
+                gdf_mrg.loc[gdf_before.index, "value_ghsl"], gdf_before.value_exposed
             )
             and np.allclose(
-                merged.loc[doubled.index, "value_lulc"], doubled["value_lulc"]
+                gdf_mrg.loc[df_dbl.index, "value_lulc"], df_dbl["value_lulc"]
             )
-            and "lulc_transport" in merged.columns,
+            and "lulc_transport" in gdf_mrg.columns,
         )
     )
 else:
-    results.append(("rp_index runs with land cover exposure", False))
+    list_res.append(("rp_index runs with land cover exposure", False))
 shutil.copy(stage_b, out / "compartments_rp.gpkg")
 
-for label, ok in results:
+for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")
-sys.exit(0 if all(ok for _, ok in results) else 1)
+sys.exit(0 if all(ok for _, ok in list_res) else 1)

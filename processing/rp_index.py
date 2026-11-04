@@ -146,13 +146,13 @@ def index_unit(task):
     exposed = np.bincount(
         labels.ravel(), weights=damage.ravel(), minlength=labels.max() + 1
     )
-    result = pd.DataFrame(
+    df_res = pd.DataFrame(
         {
             "unit_label": list(task["levels"]),
             "value_exposed": exposed[list(task["levels"])],
         }
     )
-    result.to_csv(unit_dir / "rp_index.csv", index=False)
+    df_res.to_csv(unit_dir / "rp_index.csv", index=False)
     seconds = time.perf_counter() - start
     done = {
         "unit_id": task["unit_id"],
@@ -160,7 +160,7 @@ def index_unit(task):
         "total_ratio": checks,
         "peak_rss_mb": gis.Run.peak_rss_mb(),
         "summary": (
-            f"unit {task['unit_id']}: {len(result)} compartments valued in {seconds:.1f} s; warped/source "
+            f"unit {task['unit_id']}: {len(df_res)} compartments valued in {seconds:.1f} s; warped/source "
             "volume " + ", ".join(f"{k} {v:.4f}" for k, v in checks.items())
         ),
     }
@@ -184,15 +184,15 @@ if __name__ == "__main__":
     gis.Run.configure_gdal(
         general["gdal_cachemax_mb"], general["gdal_threads_per_worker"]
     )
-    needed = [
+    list_need = [
         out_dir / "compartments.gpkg",
         out_dir / "barriers.gpkg",
         out_dir / "ghsl_total.vrt",
         out_dir / "ghsl_non_residential.vrt",
     ]
-    if not all(path.exists() for path in needed):
+    if not all(path.exists() for path in list_need):
         raise SystemExit(
-            f"Missing inputs {[str(p) for p in needed if not p.exists()]}; run compartments.py "
+            f"Missing inputs {[str(p) for p in list_need if not p.exists()]}; run compartments.py "
             "and download_ghsl.py first."
         )
     if not country["river_upstream_area_field"] and not country["upstream_area_raster"]:
@@ -202,32 +202,34 @@ if __name__ == "__main__":
         )
 
     # --- Damage tables ---
-    max_damage = pd.read_csv(rp["max_damage_csv"])
+    df_maxd = pd.read_csv(rp["max_damage_csv"])
     expected = {"country", "residential", "non_residential"}
-    if not expected <= set(max_damage.columns):
+    if not expected <= set(df_maxd.columns):
         raise SystemExit(
             f"{rp['max_damage_csv']} needs the columns {sorted(expected)}; found "
-            f"{list(max_damage.columns)}."
+            f"{list(df_maxd.columns)}."
         )
-    row = max_damage[
-        max_damage["country"].astype(str).str.upper() == run["COUNTRY"].upper()
+    df_row = df_maxd[
+        df_maxd["country"].astype(str).str.upper() == run["COUNTRY"].upper()
     ]
-    if len(row) != 1:
+    if len(df_row) != 1:
         raise SystemExit(
             f"{rp['max_damage_csv']} needs exactly one row with country = {run['COUNTRY']}."
         )
     damage_values = {
-        k: float(row[k].iloc[0]) for k in ["residential", "non_residential"]
+        k: float(df_row[k].iloc[0]) for k in ["residential", "non_residential"]
     }
-    curve = pd.read_csv(rp["depth_damage_csv"])
-    if not {"depth_m", "res", "nonres"} <= set(curve.columns):
+    df_curve = pd.read_csv(rp["depth_damage_csv"])
+    if not {"depth_m", "res", "nonres"} <= set(df_curve.columns):
         raise SystemExit(
             f"{rp['depth_damage_csv']} needs the columns depth_m, res, nonres."
         )
-    curve = curve.sort_values("depth_m")
+    df_curve = df_curve.sort_values("depth_m")
     if (
-        not curve["depth_m"].is_unique
-        or ((curve[["res", "nonres"]] < 0) | (curve[["res", "nonres"]] > 1)).any().any()
+        not df_curve["depth_m"].is_unique
+        or ((df_curve[["res", "nonres"]] < 0) | (df_curve[["res", "nonres"]] > 1))
+        .any()
+        .any()
     ):
         raise SystemExit(
             f"{rp['depth_damage_csv']}: depths must be unique and fractions within 0..1."
@@ -240,13 +242,13 @@ if __name__ == "__main__":
     )
 
     # --- Exposure per unit (parallel, checkpointed) ---
-    compartments = gpd.read_file(out_dir / "compartments.gpkg")
-    wkt = compartments.crs.to_wkt()
-    units = sorted(compartments["unit_id"].unique())
+    gdf_comp = gpd.read_file(out_dir / "compartments.gpkg")
+    wkt = gdf_comp.crs.to_wkt()
+    list_unit = sorted(gdf_comp["unit_id"].unique())
     if run["UNITS"]:
-        units = [u for u in units if u in run["UNITS"]]
-    tasks, skipped = [], []
-    for unit_id in units:
+        list_unit = [u for u in list_unit if u in run["UNITS"]]
+    list_task, list_skip = [], []
+    for unit_id in list_unit:
         unit_dir = work_dir / "units" / unit_id
         marker = unit_dir / "rp_index.json"
         if (
@@ -254,17 +256,17 @@ if __name__ == "__main__":
             and not run["FORCE"]
             and marker.stat().st_mtime >= (unit_dir / "done.json").stat().st_mtime
         ):
-            skipped.append(unit_id)
+            list_skip.append(unit_id)
             continue
-        members = compartments[compartments["unit_id"] == unit_id]
-        tasks.append(
+        gdf_mem = gdf_comp[gdf_comp["unit_id"] == unit_id]
+        list_task.append(
             {
                 "unit_id": unit_id,
                 "unit_dir": str(unit_dir),
                 "levels": dict(
                     zip(
-                        members["unit_label"].astype(int),
-                        members["protection_level_m"].astype(float),
+                        gdf_mem["unit_label"].astype(int),
+                        gdf_mem["protection_level_m"].astype(float),
                     )
                 ),
                 "ghsl": {
@@ -276,107 +278,107 @@ if __name__ == "__main__":
                 "storey_height_m": rp["storey_height_m"],
                 "max_damage": damage_values,
                 "depth_damage": {
-                    c: curve[c].to_list() for c in ["depth_m", "res", "nonres"]
+                    c: df_curve[c].to_list() for c in ["depth_m", "res", "nonres"]
                 },
             }
         )
     log.info(
         "Units with compartments: %d to process, %d finished and skipped.",
-        len(tasks),
-        len(skipped),
+        len(list_task),
+        len(list_skip),
     )
-    results, failed = gis.Run.run_units(
+    list_res, list_fail = gis.Run.run_units(
         index_unit,
-        tasks,
+        list_task,
         general["n_workers"],
         general["gdal_cachemax_mb"],
         general["gdal_threads_per_worker"],
-        [1] * len(tasks),
+        [1] * len(list_task),
         log,
     )
-    if failed:
-        raise SystemExit(f"Units failed: {failed}; rerun to retry them.")
-    ratios = [
+    if list_fail:
+        raise SystemExit(f"Units failed: {list_fail}; rerun to retry them.")
+    list_ratio = [
         r
-        for result in results
+        for result in list_res
         for r in result["total_ratio"].values()
         if np.isfinite(r)
     ]
-    if ratios:
-        worst = max(abs(r - 1) for r in ratios)
+    if list_ratio:
+        worst = max(abs(r - 1) for r in list_ratio)
         (log.warning if worst > rp["value_total_tolerance"] else log.info)(
             "Value warp check: warped totals differ from the source totals by at most %.3f %% (tolerance %.1f %%).",
             100 * worst,
             100 * rp["value_total_tolerance"],
         )
 
-    values = pd.concat(
+    df_val = pd.concat(
         [
             pd.read_csv(work_dir / "units" / u / "rp_index.csv").assign(unit_id=u)
-            for u in units
+            for u in list_unit
             if (work_dir / "units" / u / "rp_index.csv").exists()
         ],
         ignore_index=True,
     )
-    result = compartments.merge(values, on=["unit_id", "unit_label"], how="left")
-    if result["value_exposed"].isna().any():
+    gdf_rp = gdf_comp.merge(df_val, on=["unit_id", "unit_label"], how="left")
+    if gdf_rp["value_exposed"].isna().any():
         log.warning(
             "%d compartments have no exposure value (units not processed).",
-            int(result["value_exposed"].isna().sum()),
+            int(gdf_rp["value_exposed"].isna().sum()),
         )
     # Land cover exposure (HAND_YZ.py) supplements the building value.
-    result["value_ghsl"] = result["value_exposed"]
-    result["value_lulc"] = 0.0
+    gdf_rp["value_ghsl"] = gdf_rp["value_exposed"]
+    gdf_rp["value_lulc"] = 0.0
     if country["lulc"]["enabled"]:
         lulc_path = out_dir / "exposure_lulc.csv"
         if not lulc_path.exists():
             raise SystemExit(
                 "lulc.enabled is true but exposure_lulc.csv is missing; run HAND_YZ.py first."
             )
-        lulc = pd.read_csv(lulc_path).drop(columns=["unit_id", "unit_label"])
-        result = result.drop(columns="value_lulc").merge(
-            lulc, on="compartment_id", how="left"
+        df_lulc = pd.read_csv(lulc_path).drop(columns=["unit_id", "unit_label"])
+        gdf_rp = gdf_rp.drop(columns="value_lulc").merge(
+            df_lulc, on="compartment_id", how="left"
         )
-        if result["value_lulc"].isna().any():
+        if gdf_rp["value_lulc"].isna().any():
             log.warning(
                 "%d compartments have no land cover value (HAND_YZ.py not run for their units); 0 is used.",
-                int(result["value_lulc"].isna().sum()),
+                int(gdf_rp["value_lulc"].isna().sum()),
             )
-        lulc_columns = [c for c in lulc.columns if c != "compartment_id"]
-        result[lulc_columns] = result[lulc_columns].fillna(0.0)
-        result["value_exposed"] = result["value_ghsl"] + result["value_lulc"]
+        list_lulc_col = [c for c in df_lulc.columns if c != "compartment_id"]
+        gdf_rp[list_lulc_col] = gdf_rp[list_lulc_col].fillna(0.0)
+        gdf_rp["value_exposed"] = gdf_rp["value_ghsl"] + gdf_rp["value_lulc"]
         log.info(
             "Land cover value added: %.4g on top of %.4g from buildings (%.1f %%).",
-            result["value_lulc"].sum(),
-            result["value_ghsl"].sum(),
-            100 * result["value_lulc"].sum() / max(result["value_ghsl"].sum(), 1e-9),
+            gdf_rp["value_lulc"].sum(),
+            gdf_rp["value_ghsl"].sum(),
+            100 * gdf_rp["value_lulc"].sum() / max(gdf_rp["value_ghsl"].sum(), 1e-9),
         )
 
     # --- Levee length, upstream area ---
-    barriers = gpd.read_file(out_dir / "barriers.gpkg").to_crs(wkt)
-    result["levee_length_m"] = gis.Vector.length_near_boundary(
-        result, barriers, rp["levee_adjacent_distance_m"]
+    gdf_bar = gpd.read_file(out_dir / "barriers.gpkg").to_crs(wkt)
+    gdf_rp["levee_length_m"] = gis.Vector.length_near_boundary(
+        gdf_rp, gdf_bar, rp["levee_adjacent_distance_m"]
     )
-    result["no_levee"] = result["levee_length_m"] <= 0
-    sources_points = gpd.GeoDataFrame(
-        geometry=gpd.points_from_xy(result["source_x"], result["source_y"]), crs=wkt
+    gdf_rp["no_levee"] = gdf_rp["levee_length_m"] <= 0
+    gdf_src = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(gdf_rp["source_x"], gdf_rp["source_y"]), crs=wkt
     )
     if country["river_upstream_area_field"]:
         field = country["river_upstream_area_field"]
-        rivers = gis.Vector.read_merged(country["rivers"], wkt, keep_columns=[field])
-        if field not in rivers.columns:
+        gdf_rn = gis.Vector.read_merged(country["rivers"], wkt, keep_columns=[field])
+        if field not in gdf_rn.columns:
             raise SystemExit(f"Column {field!r} not found in the river files.")
-        nearest = gpd.sjoin_nearest(
-            sources_points, rivers[[field, "geometry"]], how="left"
+        gdf_sjoin_src_rn = gpd.sjoin_nearest(
+            gdf_src, gdf_rn[[field, "geometry"]], how="left"
         )
-        nearest = nearest[~nearest.index.duplicated()]
-        result["upstream_area_km2"] = pd.to_numeric(
-            nearest[field], errors="coerce"
+        gdf_sjoin_src_rn = gdf_sjoin_src_rn[~gdf_sjoin_src_rn.index.duplicated()]
+        gdf_rp["upstream_area_km2"] = pd.to_numeric(
+            gdf_sjoin_src_rn[field], errors="coerce"
         ).to_numpy()
     else:
         raster = gdal.Open(country["upstream_area_raster"])
-        points = sources_points.to_crs(raster.GetProjection())
-        result["upstream_area_km2"] = [
+        gdf_pts = gdf_src.to_crs(raster.GetProjection())
+        gdf_rp["upstream_area_km2"] = [
             (
                 float(
                     np.nanmean(gis.Raster.read_native(raster, (p.x, p.y, p.x, p.y))[0])
@@ -384,9 +386,9 @@ if __name__ == "__main__":
                 if not p.is_empty
                 else np.nan
             )
-            for p in points.geometry
+            for p in gdf_pts.geometry
         ]
-    missing_area = ~(result["upstream_area_km2"] > 0)
+    missing_area = ~(gdf_rp["upstream_area_km2"] > 0)
     if missing_area.any():
         log.warning(
             "%d compartments have no upstream area; their score uses the value term only.",
@@ -394,88 +396,90 @@ if __name__ == "__main__":
         )
 
     # --- Score and quantile mapping (compartments with levees only) ---
-    scored = ~result["no_levee"]
-    result["v_rel"] = np.where(
-        scored, result["value_exposed"] / result["levee_length_m"].where(scored), np.nan
+    scored = ~gdf_rp["no_levee"]
+    gdf_rp["v_rel"] = np.where(
+        scored, gdf_rp["value_exposed"] / gdf_rp["levee_length_m"].where(scored), np.nan
     )
     with np.errstate(divide="ignore"):
         rank_value = gis.Stats.percentile_rank(
-            np.where(scored, np.log(result["v_rel"]), np.nan)
+            np.where(scored, np.log(gdf_rp["v_rel"]), np.nan)
         )
         rank_area = gis.Stats.percentile_rank(
             np.where(
-                scored & ~missing_area, np.log(result["upstream_area_km2"]), np.nan
+                scored & ~missing_area, np.log(gdf_rp["upstream_area_km2"]), np.nan
             )
         )
     weight_v, weight_a = rp["score_weight_value"], rp["score_weight_upstream"]
-    result["score"] = np.where(
+    gdf_rp["score"] = np.where(
         np.isnan(rank_area),
         rank_value,
         (weight_v * rank_value + weight_a * rank_area) / (weight_v + weight_a),
     )
-    result.loc[~scored, "score"] = np.nan
-    result["rp_model"] = gis.Stats.quantile_classes(
-        result["score"], rp["distribution_classes"], rp["distribution_shares"]
+    gdf_rp.loc[~scored, "score"] = np.nan
+    gdf_rp["rp_model"] = gis.Stats.quantile_classes(
+        gdf_rp["score"], rp["distribution_classes"], rp["distribution_shares"]
     )
 
     # --- Cap, final RP and interval ---
     cap_index = np.searchsorted(
-        rp["cap_levels_m"], result["protection_level_m"].to_numpy(), side="right"
+        rp["cap_levels_m"], gdf_rp["protection_level_m"].to_numpy(), side="right"
     )
-    result["rp_cap"] = np.where(
+    gdf_rp["rp_cap"] = np.where(
         cap_index < len(rp["cap_rp"]),
         np.asarray(rp["cap_rp"], float)[np.minimum(cap_index, len(rp["cap_rp"]) - 1)],
         np.nan,
     )
     candidates = np.column_stack(
         [
-            result["rp_model"],
-            result["rp_cap"],
-            np.full(len(result), float(rp["max_rp"])),
+            gdf_rp["rp_model"],
+            gdf_rp["rp_cap"],
+            np.full(len(gdf_rp), float(rp["max_rp"])),
         ]
     )
-    result["rp"] = np.nanmin(candidates, axis=1)
-    lowered = result["rp_model"].isna() | (result["rp"] < result["rp_model"])
-    result["rp_source"] = np.where(lowered, "cap", "model")
+    gdf_rp["rp"] = np.nanmin(candidates, axis=1)
+    lowered = gdf_rp["rp_model"].isna() | (gdf_rp["rp"] < gdf_rp["rp_model"])
+    gdf_rp["rp_source"] = np.where(lowered, "cap", "model")
     classes = np.asarray(rp["classes"], float)
-    position = np.searchsorted(classes, result["rp"].to_numpy())
-    result["rp_low"] = classes[np.maximum(position - 1, 0)]
+    position = np.searchsorted(classes, gdf_rp["rp"].to_numpy())
+    gdf_rp["rp_low"] = classes[np.maximum(position - 1, 0)]
     upper = classes[np.minimum(position + 1, len(classes) - 1)]
     bound = np.nanmin(
         np.column_stack(
-            [upper, result["rp_cap"], np.full(len(result), float(rp["max_rp"]))]
+            [upper, gdf_rp["rp_cap"], np.full(len(gdf_rp), float(rp["max_rp"]))]
         ),
         axis=1,
     )
-    result["rp_high"] = np.maximum(result["rp"], bound)
+    gdf_rp["rp_high"] = np.maximum(gdf_rp["rp"], bound)
 
     # --- Overrides ---
     if country["overrides"]:
-        overrides = gis.Vector.read_merged(
+        gdf_ovr = gis.Vector.read_merged(
             country["overrides"], wkt, keep_columns=["rp", "note"]
         )
-        joined = gpd.sjoin(
-            overrides, result[["geometry"]], predicate="within", how="inner"
+        gdf_sjoin_ovr_rp = gpd.sjoin(
+            gdf_ovr, gdf_rp[["geometry"]], predicate="within", how="inner"
         )
-        conflicts = joined.groupby("index_right")["rp"].nunique()
+        conflicts = gdf_sjoin_ovr_rp.groupby("index_right")["rp"].nunique()
         if (conflicts > 1).any():
             log.warning(
                 "%d compartments contain override points with different rp; the first is used.",
                 int((conflicts > 1).sum()),
             )
-        first = joined.drop_duplicates("index_right").set_index("index_right")
-        result.loc[first.index, ["rp", "rp_low", "rp_high"]] = np.repeat(
-            first["rp"].astype(float).to_numpy()[:, None], 3, axis=1
+        gdf_first = gdf_sjoin_ovr_rp.drop_duplicates("index_right").set_index(
+            "index_right"
         )
-        result.loc[first.index, "rp_source"] = "override"
-        log.info("Overrides applied to %d compartments.", len(first))
+        gdf_rp.loc[gdf_first.index, ["rp", "rp_low", "rp_high"]] = np.repeat(
+            gdf_first["rp"].astype(float).to_numpy()[:, None], 3, axis=1
+        )
+        gdf_rp.loc[gdf_first.index, "rp_source"] = "override"
+        log.info("Overrides applied to %d compartments.", len(gdf_first))
 
     for column, value in OBSERVATION_COLUMNS.items():
-        result[column] = value
+        gdf_rp[column] = value
     for column in ["rp_model", "rp_cap", "rp", "rp_low", "rp_high"]:
-        result[column] = result[column].astype(float)
-    gis.Vector.write_gpkg(result, out_dir / "compartments_rp.gpkg")
-    shares = result.loc[scored, "rp_model"].value_counts(normalize=True).sort_index()
+        gdf_rp[column] = gdf_rp[column].astype(float)
+    gis.Vector.write_gpkg(gdf_rp, out_dir / "compartments_rp.gpkg")
+    shares = gdf_rp.loc[scored, "rp_model"].value_counts(normalize=True).sort_index()
     log.info(
         "Model classes (share of compartments with levees): %s; targets %s.",
         ", ".join(f"{int(k)}: {v:.2f}" for k, v in shares.items()),
@@ -486,6 +490,6 @@ if __name__ == "__main__":
     )
     log.info(
         "RP sources: %s. compartments_rp.gpkg written (%d compartments).",
-        ", ".join(f"{k} {v}" for k, v in result["rp_source"].value_counts().items()),
-        len(result),
+        ", ".join(f"{k} {v}" for k, v in gdf_rp["rp_source"].value_counts().items()),
+        len(gdf_rp),
     )

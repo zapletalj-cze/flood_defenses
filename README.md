@@ -23,7 +23,7 @@ explicitly.
 | C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
-| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | plan (step E.2) waiting for approval |
+| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | plan (step E.2) approved; E1 in progress |
 
 ---
 
@@ -110,7 +110,7 @@ config/defenses.toml       configuration template
 config/osmconf.ini         OSM driver configuration exposing the tag keys used
 docs/navod_cs.md           short guide to running the scripts, in Czech
 docs/stage_d_plan.md       Stage D, step D.1: inventory, inputs, plan and measured runtime impact
-docs/stage_e_plan.md       Stage E, step E.2: outputs check, corridor read benchmark, plan (waiting for approval)
+docs/stage_e_plan.md       Stage E, step E.2: outputs check, corridor read benchmark, plan (approved)
 download/
   download_osm.py          Geofabrik extract -> hydraulic points, drains (single-layer GeoPackages)
   download_ghsl.py         GHSL building volume tiles -> VRT mosaics
@@ -165,6 +165,19 @@ function was modified. The only change to existing lines is the import block.
 | `Http` | `get_json(url, params, body, retries, pause_s, headers)` | JSON GET with query parameters or POST of a JSON body, with backoff (STAC search and its `next` links) |
 | `Stats` | `percentile_rank`, `quantile_classes` | Ranks and quantile mapping for the RP score |
 | `Stats` | `gumbel_lmoments(sample)`, `gumbel_rp(q, xi, alpha)` | Gumbel fit by L-moments; return period of a discharge |
+
+### Naming in the code
+
+All scripts and tests name their variables by one scheme:
+- **Prefixes:** `gdf_…` for GeoDataFrames, `df_…` for DataFrames, `list_…` for lists.
+- **Spatial joins:** `gdf_sjoin_<a>_<b>`, for example `gdf_sjoin_src_rn` (river sources joined to the rivers).
+- **Short abbreviations:**
+  - `rn` rivers, `lv` levees, `bl` barrier lines, `br` bridges, `bar` barriers with crest heights;
+  - `comp` compartments, `fp` footprints, `poly` polygons, `win` and `core` unit windows and cores;
+  - `ua` Urban Atlas, `ev` GFM evidence, `ovr` overrides.
+
+In `gis.py` the scheme applies to the local variables of the functions added for this package. The original
+functions and all function parameters are unchanged.
 
 ## 3. Configuration
 

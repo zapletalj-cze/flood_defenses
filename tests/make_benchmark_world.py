@@ -30,17 +30,17 @@ xs = np.linspace(0, SIZE_M, 400)
 main = np.column_stack([xs, SIZE_M / 2 + 1500 * np.sin(xs / 3000)])
 trib_1 = np.column_stack([np.full(50, 7000.0), np.linspace(SIZE_M, main[117, 1], 50)])
 trib_2 = np.column_stack([np.full(50, 16000.0), np.linspace(0, main[267, 1], 50)])
-rivers = [LineString(main), LineString(trib_1), LineString(trib_2)]
+list_rn = [LineString(main), LineString(trib_1), LineString(trib_2)]
 
 # Levees: both banks of the main river 120 m from the centre line with gaps, plus closed rings on the floodplain.
-levees = []
+list_lv = []
 for side in (-1, 1):
     bank = main + np.array([0, side * 120.0])
     for start in range(0, len(bank) - 30, 40):
-        levees.append(LineString(bank[start : start + 36]))
+        list_lv.append(LineString(bank[start : start + 36]))
 for cx in range(2000, SIZE_M - 2000, 3000):
     cy = SIZE_M / 2 + 1500 * np.sin(cx / 3000) + 600
-    levees.append(
+    list_lv.append(
         LineString(
             [(cx, cy), (cx + 500, cy), (cx + 500, cy + 400), (cx, cy + 400), (cx, cy)]
         )
@@ -48,7 +48,7 @@ for cx in range(2000, SIZE_M - 2000, 3000):
 
 srs = osr.SpatialReference()
 srs.ImportFromEPSG(EPSG)
-files = []
+list_file = []
 centre = np.interp(np.arange(n) * NATIVE, main[:, 0], main[:, 1])
 for k, (c0, c1) in enumerate([(0, n // 2), (n // 2, n)]):
     path = data / f"dtm_block_{k}.tif"
@@ -67,14 +67,14 @@ for k, (c0, c1) in enumerate([(0, n // 2), (n // 2, n)]):
         z += rng.normal(0, 0.03, z.shape)  # lidar-like noise
         ds.GetRasterBand(1).WriteArray(z.astype(np.float32), 0, r)
     ds = None
-    files.append(str(path))
+    list_file.append(str(path))
     print(f"Written {path}")
 
 # Embankments (2.5 m) on the rings only; the bank lines stay without embankment, like false detections.
 for k, (c0, c1) in enumerate([(0, n // 2), (n // 2, n)]):
-    ds = gdal.Open(files[k], gdal.GA_Update)
+    ds = gdal.Open(list_file[k], gdal.GA_Update)
     band = ds.GetRasterBand(1)
-    for ring in levees[-7:]:
+    for ring in list_lv[-7:]:
         xmin, ymin, xmax, ymax = ring.bounds
         w0, w1 = max(int(xmin - 5) - c0, 0), min(int(xmax + 5) - c0, c1 - c0)
         r0, r1 = max(int(SIZE_M - ymax - 5), 0), min(int(SIZE_M - ymin + 5), n)
@@ -93,10 +93,10 @@ for k, (c0, c1) in enumerate([(0, n // 2), (n // 2, n)]):
     ds = None
 
 world = lambda g: __import__("shapely").affinity.translate(g, X0, Y_TOP - SIZE_M)
-gpd.GeoDataFrame(geometry=[world(g) for g in rivers], crs=EPSG).to_file(
+gpd.GeoDataFrame(geometry=[world(g) for g in list_rn], crs=EPSG).to_file(
     data / "rivers.gpkg", driver="GPKG"
 )
-gpd.GeoDataFrame(geometry=[world(g) for g in levees], crs=EPSG).to_file(
+gpd.GeoDataFrame(geometry=[world(g) for g in list_lv], crs=EPSG).to_file(
     data / "levees.gpkg", driver="GPKG"
 )
 (root / "benchmark.toml").write_text(f"""placeholders = ["country.bytes_per_cell"]
@@ -117,7 +117,7 @@ sequential_rows = 512
 seed = 42
 
 [countries.BM]
-dtm = {json.dumps([str(Path(f).resolve()) for f in files])}
+dtm = {json.dumps([str(Path(f).resolve()) for f in list_file])}
 dsm = []
 levees = "{(data / 'levees.gpkg').resolve()}"
 rivers = "{(data / 'rivers.gpkg').resolve()}"

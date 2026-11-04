@@ -55,11 +55,11 @@ if __name__ == "__main__":
     if not sources["glofas_enabled"]:
         log.info("glofas_enabled is false; nothing to do.")
         raise SystemExit(0)
-    footprint_path = out_dir / "dtm_footprint.gpkg"
-    if not footprint_path.exists():
+    fp_path = out_dir / "dtm_footprint.gpkg"
+    if not fp_path.exists():
         raise SystemExit("dtm_footprint.gpkg is missing; run prepare_dtm.py first.")
-    footprint = gpd.read_file(footprint_path)
-    extent = gpd.GeoSeries([box(*footprint.total_bounds)], crs=footprint.crs)
+    gdf_fp = gpd.read_file(fp_path)
+    extent = gpd.GeoSeries([box(*gdf_fp.total_bounds)], crs=gdf_fp.crs)
     west, south, east, north = (
         extent.segmentize(extent.iloc[0].length / 400).to_crs(4326).total_bounds
     )
@@ -74,8 +74,8 @@ if __name__ == "__main__":
     )
 
     # --- Discharge files: local list or download per year ---
-    files = sources["glofas_files"]
-    if not files:
+    list_file = sources["glofas_files"]
+    if not list_file:
         if not sources["glofas_request"]:
             raise SystemExit(
                 "sources.glofas_request is empty. Paste the request of the EWDS form for "
@@ -111,7 +111,7 @@ if __name__ == "__main__":
             log.info("Requesting GloFAS discharge %d.", year)
             client.retrieve(sources["glofas_dataset_id"], request, str(target))
             time.sleep(sources["request_pause_s"])
-        files = sorted(
+        list_file = sorted(
             str(p)
             for p in work_dir.glob(f"discharge_*.{sources['glofas_file_extension']}")
         )
@@ -159,8 +159,8 @@ if __name__ == "__main__":
         )
 
     # --- Daily discharge of the kept cells ---
-    dates, series = [], []
-    for path in files:
+    list_date, list_q = [], []
+    for path in list_file:
         name = (
             f'NETCDF:"{path}":{sources["glofas_discharge_variable"]}'
             if sources["glofas_discharge_variable"]
@@ -221,15 +221,15 @@ if __name__ == "__main__":
             # A 24 h value stamped at the end of its period belongs to the day that ends (config switch).
             if sources["glofas_valid_time_ends_day"]:
                 stamp -= pd.Timedelta(seconds=1)
-            dates.append(np.datetime64(stamp.date(), "D"))
-            series.append(values[r - y0, c - x0])
+            list_date.append(np.datetime64(stamp.date(), "D"))
+            list_q.append(values[r - y0, c - x0])
         log.info("Read %s: %d time steps.", Path(path).name, ds.RasterCount)
-    if not dates:
+    if not list_date:
         raise SystemExit("No discharge data read.")
-    dates = np.array(dates)
+    dates = np.array(list_date)
     order = np.argsort(dates, kind="stable")
     dates, unique = np.unique(dates[order], return_index=True)
-    discharge = np.vstack(series)[order][unique]
+    discharge = np.vstack(list_q)[order][unique]
     expected = (dates[-1] - dates[0]).astype(int) + 1
     if len(dates) < expected:
         log.warning(

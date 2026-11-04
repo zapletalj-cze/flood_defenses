@@ -50,70 +50,70 @@ if __name__ == "__main__":
     gap = country["compartments"]["gap_tolerance_m"]
     near = country["rp"]["levee_adjacent_distance_m"]
 
-    rivers = gis.Vector.read_merged(country["rivers"], wkt, keep_columns=True)
-    rivers.insert(0, "river_id", np.arange(len(rivers)))
-    levees = gis.Vector.read_merged(country["levees"], wkt)
+    gdf_rn = gis.Vector.read_merged(country["rivers"], wkt, keep_columns=True)
+    gdf_rn.insert(0, "river_id", np.arange(len(gdf_rn)))
+    gdf_lv = gis.Vector.read_merged(country["levees"], wkt)
     gis.Vector.check_single_layer(points_path)
-    structures = gpd.read_file(points_path).to_crs(wkt)
+    gdf_st = gpd.read_file(points_path).to_crs(wkt)
 
     def matching(frame, table):
         hit = np.zeros(len(frame), bool)
-        for key, values in table.items():
+        for key, list_val in table.items():
             if key in frame.columns:
-                hit |= frame[key].isin(values).to_numpy()
+                hit |= frame[key].isin(list_val).to_numpy()
         return hit
 
     def describe(frame):
-        keys = [k for k in sources["osm_tags_hydraulic"] if k in frame.columns]
-        return frame[keys].apply(
+        list_key = [k for k in sources["osm_tags_hydraulic"] if k in frame.columns]
+        return frame[list_key].apply(
             lambda r: ", ".join(f"{k}={v}" for k, v in r.items() if pd.notna(v)), axis=1
         )
 
-    closing = structures[matching(structures, sources["osm_tags_closing"])].reset_index(
+    gdf_close = gdf_st[matching(gdf_st, sources["osm_tags_closing"])].reset_index(
         drop=True
     )
-    pumping = structures[matching(structures, sources["osm_tags_pumping"])].reset_index(
+    gdf_pump = gdf_st[matching(gdf_st, sources["osm_tags_pumping"])].reset_index(
         drop=True
     )
-    closing["tags"] = describe(closing) if len(closing) else []
+    gdf_close["tags"] = describe(gdf_close) if len(gdf_close) else []
     log.info(
         "OSM structures: %d in total, %d closing structures, %d pumping stations.",
-        len(structures),
-        len(closing),
-        len(pumping),
+        len(gdf_st),
+        len(gdf_close),
+        len(gdf_pump),
     )
 
-    reasons = pd.Series("", index=rivers.index, dtype=object)
+    reasons = pd.Series("", index=gdf_rn.index, dtype=object)
 
     # --- Closing structures at river-levee crossings ---
-    if len(levees) and len(closing):
-        river_idx, levee_idx = levees.sindex.query(
-            rivers.geometry.values, predicate="intersects"
+    if len(gdf_lv) and len(gdf_close):
+        river_idx, levee_idx = gdf_lv.sindex.query(
+            gdf_rn.geometry.values, predicate="intersects"
         )
         crossings = shapely.intersection(
-            rivers.geometry.values[river_idx], levees.geometry.values[levee_idx]
+            gdf_rn.geometry.values[river_idx], gdf_lv.geometry.values[levee_idx]
         )
         parts = shapely.get_parts(crossings, return_index=True)
         points = shapely.point_on_surface(parts[0])
         owner = river_idx[parts[1]]
-        cross_idx, structure_idx = closing.sindex.query(
+        cross_idx, structure_idx = gdf_close.sindex.query(
             points, predicate="dwithin", distance=gap
         )
         if len(cross_idx):
-            hits = (
+            df_hits = (
                 pd.DataFrame(
                     {
                         "river": owner[cross_idx],
-                        "tags": closing["tags"].to_numpy()[structure_idx],
+                        "tags": gdf_close["tags"].to_numpy()[structure_idx],
                         "distance": shapely.distance(
-                            points[cross_idx], closing.geometry.values[structure_idx]
+                            points[cross_idx], gdf_close.geometry.values[structure_idx]
                         ),
                     }
                 )
                 .sort_values("distance")
                 .drop_duplicates("river")
             )
-            for river, tags, distance in hits.itertuples(index=False):
+            for river, tags, distance in df_hits.itertuples(index=False):
                 reasons[river] = (
                     f"closing structure ({tags}) {distance:.1f} m from a levee crossing"
                 )
@@ -124,11 +124,11 @@ if __name__ == "__main__":
         )
 
     # --- Downstream ends from DTM elevations at both line ends ---
-    coords = [shapely.get_coordinates(g) for g in rivers.geometry]
-    first = np.array([c[0] for c in coords])
-    last = np.array([c[-1] for c in coords])
+    list_xy = [shapely.get_coordinates(g) for g in gdf_rn.geometry]
+    first = np.array([c[0] for c in list_xy])
+    last = np.array([c[-1] for c in list_xy])
     radius = country["endpoint_elevation_radius_m"]
-    elevation = np.full((len(rivers), 2), np.nan)
+    elevation = np.full((len(gdf_rn), 2), np.nan)
     for k, (start, end) in enumerate(zip(first, last)):
         for j, (x, y) in enumerate((start, end)):
             window, _ = gis.Raster.read_native(
@@ -138,15 +138,15 @@ if __name__ == "__main__":
                 elevation[k, j] = np.nanmedian(window)
         if (k + 1) % 5000 == 0:
             log.info(
-                "  endpoint elevations: %d of %d river features", k + 1, len(rivers)
+                "  endpoint elevations: %d of %d river features", k + 1, len(gdf_rn)
             )
     by_dtm = np.isfinite(elevation).all(axis=1) & (
         np.abs(elevation[:, 0] - elevation[:, 1]) > 1e-3
     )
     start_lower = by_dtm & (elevation[:, 0] < elevation[:, 1])
     downstream = np.where(start_lower[:, None], first, last)
-    rivers["downstream_x"], rivers["downstream_y"] = downstream[:, 0], downstream[:, 1]
-    rivers["downstream_method"] = np.where(by_dtm, "dtm elevation", "line direction")
+    gdf_rn["downstream_x"], gdf_rn["downstream_y"] = downstream[:, 0], downstream[:, 1]
+    gdf_rn["downstream_method"] = np.where(by_dtm, "dtm elevation", "line direction")
     log.info(
         "Downstream ends: %d from DTM elevations, %d from the line direction (equal or missing elevations).",
         int(by_dtm.sum()),
@@ -154,54 +154,54 @@ if __name__ == "__main__":
     )
 
     # --- Pumping stations at the downstream end ---
-    if len(pumping):
-        end_idx, pump_idx = pumping.sindex.query(
+    if len(gdf_pump):
+        end_idx, pump_idx = gdf_pump.sindex.query(
             shapely.points(downstream), predicate="dwithin", distance=gap
         )
         for river, pump in zip(end_idx, pump_idx):
             if not reasons[river]:
                 distance = shapely.distance(
-                    shapely.points(downstream[river]), pumping.geometry.values[pump]
+                    shapely.points(downstream[river]), gdf_pump.geometry.values[pump]
                 )
                 reasons[river] = (
                     f"pumping station {distance:.1f} m from the downstream end"
                 )
 
-    rivers["is_source"] = reasons == ""
-    rivers["reason"] = reasons
-    gis.Vector.write_gpkg(rivers, out_dir / "rivers_sources.gpkg")
+    gdf_rn["is_source"] = reasons == ""
+    gdf_rn["reason"] = reasons
+    gis.Vector.write_gpkg(gdf_rn, out_dir / "rivers_sources.gpkg")
     log.info(
         "rivers_sources.gpkg: %d river features, %d closed during floods (not water sources).",
-        len(rivers),
-        int((~rivers.is_source).sum()),
+        len(gdf_rn),
+        int((~gdf_rn.is_source).sum()),
     )
 
     # --- Pumping stations next to levees or rivers ---
-    near_levee = np.zeros(len(pumping), bool)
-    near_river = np.zeros(len(pumping), bool)
-    if len(pumping) and len(levees):
+    near_levee = np.zeros(len(gdf_pump), bool)
+    near_river = np.zeros(len(gdf_pump), bool)
+    if len(gdf_pump) and len(gdf_lv):
         near_levee[
             np.unique(
-                levees.sindex.query(
-                    pumping.geometry.values, predicate="dwithin", distance=near
+                gdf_lv.sindex.query(
+                    gdf_pump.geometry.values, predicate="dwithin", distance=near
                 )[0]
             )
         ] = True
-    if len(pumping) and len(rivers):
+    if len(gdf_pump) and len(gdf_rn):
         near_river[
             np.unique(
-                rivers.sindex.query(
-                    pumping.geometry.values, predicate="dwithin", distance=near
+                gdf_rn.sindex.query(
+                    gdf_pump.geometry.values, predicate="dwithin", distance=near
                 )[0]
             )
         ] = True
-    selected = pumping.assign(near_levee=near_levee, near_river=near_river)[
+    gdf_sel = gdf_pump.assign(near_levee=near_levee, near_river=near_river)[
         near_levee | near_river
     ]
-    gis.Vector.write_gpkg(selected.reset_index(drop=True), out_dir / "osm_pumping.gpkg")
+    gis.Vector.write_gpkg(gdf_sel.reset_index(drop=True), out_dir / "osm_pumping.gpkg")
     log.info(
         "osm_pumping.gpkg: %d of %d pumping stations within %.0f m of a levee or river.",
-        len(selected),
-        len(pumping),
+        len(gdf_sel),
+        len(gdf_pump),
         near,
     )

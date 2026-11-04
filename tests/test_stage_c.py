@@ -77,7 +77,7 @@ stage_b = root / "compartments_rp_stage_b.gpkg"
 if not stage_b.exists():
     shutil.copy(out / "compartments_rp.gpkg", stage_b)
 shutil.copy(stage_b, out / "compartments_rp.gpkg")
-model = gpd.read_file(stage_b)
+gdf_model = gpd.read_file(stage_b)
 
 
 def world(geometry):
@@ -88,8 +88,8 @@ def covering(frame, label):
     return frame[frame.covers(world(Point(*probes[label])))]
 
 
-ids = {k: covering(model, k).compartment_id.iloc[0] for k in probes}
-before = {k: covering(model, k).iloc[0] for k in probes}
+ids = {k: covering(gdf_model, k).compartment_id.iloc[0] for k in probes}
+before = {k: covering(gdf_model, k).iloc[0] for k in probes}
 
 # --- GFM scenes: 20 m grid in EPSG:3035, flood extent from the undefended HAND of the Stage A units ---
 to_gfm = Transformer.from_crs(EPSG, GFM_EPSG, always_xy=True)
@@ -109,10 +109,10 @@ cx, cy = np.meshgrid(
 )
 ux, uy = from_gfm.transform(cx, cy)
 lx, ly = ux - X0, uy - (Y_TOP - HEIGHT_M)
-hand_tifs = sorted(
+list_hand = sorted(
     str(p) for p in (root / "work" / "T4" / "units").glob("*/hand_undef.tif")
 )
-vrt = gdal.BuildVRT(str(data / "hand.vrt"), hand_tifs)
+vrt = gdal.BuildVRT(str(data / "hand.vrt"), list_hand)
 vrt = None
 warped = gdal.Warp(
     "",
@@ -161,7 +161,7 @@ gfm_srs.ImportFromEPSG(GFM_EPSG)
 lonlat = Transformer.from_crs(EPSG, 4326, always_xy=True)
 lon_w, lat_s = lonlat.transform(X0 - 300, Y_TOP - HEIGHT_M - 300)
 lon_e, lat_n = lonlat.transform(X0 + WIDTH_M + 300, Y_TOP + 300)
-items = []
+list_item = []
 for name, (stamp, flood, excluded, likelihood) in scenes.items():
     layers = {
         "ensemble_flood_extent": np.where(
@@ -183,7 +183,7 @@ for name, (stamp, flood, excluded, likelihood) in scenes.items():
         ds.GetRasterBand(1).WriteArray(values.astype(np.uint8))
         ds = None  # no band nodata: the flood layer's 255 must come from gfm_nodata_values
         assets[key] = {"href": f"file://{path}", "type": "image/tiff"}
-    items.append(
+    list_item.append(
         {
             "type": "Feature",
             "stac_version": "1.0.0",
@@ -195,23 +195,23 @@ for name, (stamp, flood, excluded, likelihood) in scenes.items():
             "assets": assets,
         }
     )
-requests = []
+list_req = []
 
 
 class StacMock(BaseHTTPRequestHandler):
     # Item search with paging: page 1 links to page 2 by GET, page 2 to page 3 by POST (both occur in STAC APIs).
     def search(self, query, method):
-        requests.append((method, int(query.get("page", 1))))
+        list_req.append((method, int(query.get("page", 1))))
         if self.headers.get("Authorization") != f"Bearer {TOKEN}":
             self.send_response(401)
             self.end_headers()
             return
         start, end = query["datetime"].split("/")
         west, south, east, north = [float(v) for v in query["bbox"]]
-        hits = sorted(
+        list_hit = sorted(
             (
                 item
-                for item in items
+                for item in list_item
                 if item["collection"] in query["collections"]
                 and start <= item["properties"]["datetime"] <= end
                 and item["bbox"][0] <= east
@@ -222,8 +222,8 @@ class StacMock(BaseHTTPRequestHandler):
             key=lambda item: item["id"],
         )
         page, limit = int(query.get("page", 1)), int(query["limit"])
-        links = []
-        if page * limit < len(hits):
+        list_link = []
+        if page * limit < len(list_hit):
             following = {**query, "page": page + 1}
             href = f"http://127.0.0.1:{self.server.server_address[1]}/stac/search"
             if page % 2:
@@ -231,19 +231,19 @@ class StacMock(BaseHTTPRequestHandler):
                     k: ",".join(map(str, v)) if isinstance(v, list) else v
                     for k, v in following.items()
                 }
-                links.append(
+                list_link.append(
                     {"rel": "next", "href": f"{href}?{urllib.parse.urlencode(params)}"}
                 )
             else:
-                links.append(
+                list_link.append(
                     {"rel": "next", "href": href, "method": "POST", "body": following}
                 )
         body = json.dumps(
             {
                 "type": "FeatureCollection",
-                "features": hits[(page - 1) * limit : page * limit],
-                "links": links,
-                "numberMatched": len(hits),
+                "features": list_hit[(page - 1) * limit : page * limit],
+                "links": list_link,
+                "numberMatched": len(list_hit),
             }
         ).encode()
         self.send_response(200)
@@ -328,15 +328,15 @@ def write_netcdf(path, variable, values, time_values=None):
     group = ds.GetRootGroup()
     float64 = gdal.ExtendedDataType.Create(gdal.GDT_Float64)
     text = gdal.ExtendedDataType.CreateString()
-    dimensions = []
-    axes = [
+    list_dim = []
+    list_axis = [
         ("lat", lat_centers, "degrees_north", "latitude", gdal.DIM_TYPE_HORIZONTAL_Y)
     ]
-    axes.append(
+    list_axis.append(
         ("lon", lon_centers, "degrees_east", "longitude", gdal.DIM_TYPE_HORIZONTAL_X)
     )
     if time_values is not None:
-        axes.insert(
+        list_axis.insert(
             0,
             (
                 "time",
@@ -346,15 +346,15 @@ def write_netcdf(path, variable, values, time_values=None):
                 gdal.DIM_TYPE_TEMPORAL,
             ),
         )
-    for name, coordinates, units, standard_name, kind in axes:
+    for name, coordinates, units, standard_name, kind in list_axis:
         dimension = group.CreateDimension(name, kind, None, len(coordinates))
         coordinate = group.CreateMDArray(name, [dimension], float64)
         coordinate.Write(np.asarray(coordinates, np.float64))
         for key, value in [("units", units), ("standard_name", standard_name)]:
             coordinate.CreateAttribute(key, [], text).Write(value)
-        dimensions.append(dimension)
+        list_dim.append(dimension)
     array = group.CreateMDArray(
-        variable, dimensions, gdal.ExtendedDataType.Create(gdal.GDT_Float32)
+        variable, list_dim, gdal.ExtendedDataType.Create(gdal.GDT_Float32)
     )
     array.Write(np.ascontiguousarray(values, np.float32))
     ds = None
@@ -375,7 +375,7 @@ for year in (2019, 2020, 2021):
     )
     mem.SetGeoTransform([grid_west, 0.05, 0, grid_north, 0, -0.05])
     mem.SetProjection(wgs84.ExportToWkt())
-    options = [
+    list_opt = [
         "DISCIPLINE=1",
         "PDS_PDTN=0",
         "PDS_TEMPLATE_NUMBERS=0 7 2 0 0 0 0 0 1 0 0 0 0 1 0 0 0 0 0 255 0 0 0 0 0",
@@ -385,23 +385,23 @@ for year in (2019, 2020, 2021):
     for b, k in enumerate(selected):
         mem.GetRasterBand(b + 1).WriteArray(discharge[k])
         valid_time = pd.Timestamp(days[k]) + pd.Timedelta(days=1)
-        options.append(
+        list_opt.append(
             f"BAND_{b + 1}_IDS=CENTER=98 SIGNF_REF_TIME=1 "
             f"REF_TIME={valid_time:%Y-%m-%dT%H:%M:%SZ} PROD_STATUS=0 TYPE=1"
         )
     gdal.GetDriverByName("GRIB").CreateCopy(
-        str(data / f"glofas_{year}.grib"), mem, options=options
+        str(data / f"glofas_{year}.grib"), mem, options=list_opt
     )
     mem = None
 
 # --- Reference protected areas for validate.py: ring interiors with reference RP, one area without compartment ---
-reference = gpd.GeoDataFrame(
+gdf_ref = gpd.GeoDataFrame(
     {"rp_ref": [300.0, 20.0, 100.0, 50.0]},
     geometry=[world(box(*interiors[k])) for k in ["R1", "R2", "R3"]]
     + [world(box(1600, 1300, 1700, 1400))],
     crs=EPSG,
 )
-reference.to_file(data / "reference.gpkg", driver="GPKG")
+gdf_ref.to_file(data / "reference.gpkg", driver="GPKG")
 
 # --- Configuration: the Stage B test configuration plus the Stage C keys ---
 base_config = (root / "test.toml").read_text()
@@ -510,61 +510,62 @@ def run(module, label, config="test_c.toml", **variables):
 
 
 def outcome(table, scene, label):
-    rows = table[
+    df_rows = table[
         (table.item_id == f"GFM_TEST_{scene}") & (table.compartment_id == ids[label])
     ]
-    return set(rows.outcome)
+    return set(df_rows.outcome)
 
 
-results = []
+list_res = []
 
 # --- download_gfm.py ---
 proc = run("download.download_gfm", "download_gfm", FORCE="1")
-index = (
+df_idx = (
     pd.read_csv(out / "gfm_index.csv", dtype={"unit_id": str}).fillna("")
     if proc.returncode == 0
     else pd.DataFrame(columns=["unit_id", "item_id"])
 )
 units = pd.read_csv(out / "units.csv", dtype={"unit_id": str}).unit_id
-results.append(
+list_res.append(
     (
         "download_gfm: every unit keeps scenes A, B, D, E; C (a few wet pixels) is screened out",
         proc.returncode == 0
         and all(
-            set(index[index.unit_id == u].item_id) == {f"GFM_TEST_{s}" for s in "ABDE"}
+            set(df_idx[df_idx.unit_id == u].item_id)
+            == {f"GFM_TEST_{s}" for s in "ABDE"}
             for u in units
         ),
     )
 )
-results.append(
+list_res.append(
     (
-        f"STAC search with token, once for all units: two GET pages and one POST page ({len(requests)} requests)",
-        sorted(requests) == [("GET", 1), ("GET", 2), ("POST", 3)],
+        f"STAC search with token, once for all units: two GET pages and one POST page ({len(list_req)} requests)",
+        sorted(list_req) == [("GET", 1), ("GET", 2), ("POST", 3)],
     )
 )
 proc = run("download.download_gfm", "download_gfm_rerun")
-results.append(
+list_res.append(
     (
         "download_gfm rerun: nothing screened twice, same index (checkpoint screening.csv)",
         proc.returncode == 0
         and "; 0 items to screen" in proc.stderr
         and pd.read_csv(out / "gfm_index.csv", dtype={"unit_id": str})
         .fillna("")
-        .equals(index),
+        .equals(df_idx),
     )
 )
-first = index[(index.unit_id == "000_000") & (index.item_id == "GFM_TEST_A")]
+df_first = df_idx[(df_idx.unit_id == "000_000") & (df_idx.item_id == "GFM_TEST_A")]
 copy_ok = False
-if len(first):
-    clipped = gdal.Open(first.flood_path.iloc[0])
+if len(df_first):
+    clipped = gdal.Open(df_first.flood_path.iloc[0])
     copy_srs = osr.SpatialReference(wkt=clipped.GetProjection())
     copy_ok = (
         copy_srs.GetAuthorityCode(None) == str(GFM_EPSG)
         and clipped.RasterXSize * clipped.RasterYSize > 0
-        and Path(first.likelihood_path.iloc[0]).exists()
-        and index[index.item_id == "GFM_TEST_B"].likelihood_path.eq("").all()
+        and Path(df_first.likelihood_path.iloc[0]).exists()
+        and df_idx[df_idx.item_id == "GFM_TEST_B"].likelihood_path.eq("").all()
     )
-results.append(
+list_res.append(
     (
         "clipped copies keep the GFM CRS; optional likelihood copied where the item has it",
         copy_ok,
@@ -582,7 +583,7 @@ proc = run(
     HINTS="1",
     DATE_FROM="2016-06-01",
 )
-unexcluded = (
+gdf_unexcl = (
     gpd.read_file(out / "missing_barrier_hints.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
@@ -592,72 +593,72 @@ proc = run(
     "processing.gfm_evidence", "gfm_evidence_1", HINTS="1", DATE_FROM="2016-06-01"
 )
 run1_ok = proc.returncode == 0
-table = pd.read_csv(out / "gfm_evidence.csv") if run1_ok else pd.DataFrame()
-if len(table):
-    results.append(
+df_ev = pd.read_csv(out / "gfm_evidence.csv") if run1_ok else pd.DataFrame()
+if len(df_ev):
+    list_res.append(
         (
             "scene A: all three rings held (dry inside, wet floodplain around)",
-            all(outcome(table, "A", k) == {"held"} for k in probes),
+            all(outcome(df_ev, "A", k) == {"held"} for k in probes),
         )
     )
-    results.append(
+    list_res.append(
         (
             "scene B: ring 2 flooded, rings 1 and 3 held",
-            outcome(table, "B", "R2") == {"flooded"}
-            and outcome(table, "B", "R1") == {"held"}
-            and outcome(table, "B", "R3") == {"held"},
+            outcome(df_ev, "B", "R2") == {"flooded"}
+            and outcome(df_ev, "B", "R1") == {"held"}
+            and outcome(df_ev, "B", "R3") == {"held"},
         )
     )
-    r2_b = table[
-        (table.item_id == "GFM_TEST_B") & (table.compartment_id == ids["R2"])
+    r2_b = df_ev[
+        (df_ev.item_id == "GFM_TEST_B") & (df_ev.compartment_id == ids["R2"])
     ].iloc[0]
-    results.append(
+    list_res.append(
         (
             f"GFM nodata (255 from the config) excluded: ring 2 valid cells in B {r2_b.inside_valid_px} "
             f"of {int(before['R2'].area_m2 / 4)}",
             r2_b.inside_valid_px < 0.6 * before["R2"].area_m2 / 4,
         )
     )
-    results.append(
+    list_res.append(
         (
             "scene D (all excluded): no_test everywhere",
-            all(outcome(table, "D", k) == {"no_test"} for k in probes),
+            all(outcome(df_ev, "D", k) == {"no_test"} for k in probes),
         )
     )
-    results.append(
+    list_res.append(
         (
             "date filter: scene E (February 2016) not tested",
-            not (table.item_id == "GFM_TEST_E").any(),
+            not (df_ev.item_id == "GFM_TEST_E").any(),
         )
     )
 else:
-    results.append(("gfm_evidence run 1 produced tests", False))
-layer = gpd.read_file(out / "gfm_evidence.gpkg") if run1_ok else gpd.GeoDataFrame()
-results.append(
+    list_res.append(("gfm_evidence run 1 produced tests", False))
+gdf_ev = gpd.read_file(out / "gfm_evidence.gpkg") if run1_ok else gpd.GeoDataFrame()
+list_res.append(
     (
         "gfm_evidence.gpkg: one compartment polygon per test, for QGIS",
-        len(layer) == len(table) > 0 and layer.crs.to_epsg() == EPSG,
+        len(gdf_ev) == len(df_ev) > 0 and gdf_ev.crs.to_epsg() == EPSG,
     )
 )
-hints = (
+gdf_hint = (
     gpd.read_file(out / "missing_barrier_hints.gpkg") if run1_ok else gpd.GeoDataFrame()
 )
 pocket_area = (POCKET[2] - POCKET[0]) * (POCKET[3] - POCKET[1])
-hint_area = float(hints.area.sum()) if len(hints) else 0.0
-results.append(
+hint_area = float(gdf_hint.area.sum()) if len(gdf_hint) else 0.0
+list_res.append(
     (
-        f"missing-barrier hints: one area at the dry pocket ({len(hints)} found, "
+        f"missing-barrier hints: one area at the dry pocket ({len(gdf_hint)} found, "
         f"{hint_area:.0f} m2 of {pocket_area} m2)",
-        len(hints) == 1
-        and bool(hints.covers(world(Point(900, 848))).iloc[0])
+        len(gdf_hint) == 1
+        and bool(gdf_hint.covers(world(Point(900, 848))).iloc[0])
         and 0.7 < hint_area / pocket_area < 1.3,
     )
 )
 
-results.append(
+list_res.append(
     (
-        f"without hint_exclusion_m the dry bands along the levees become hints too ({len(unexcluded)} areas)",
-        len(unexcluded) > len(hints),
+        f"without hint_exclusion_m the dry bands along the levees become hints too ({len(gdf_unexcl)} areas)",
+        len(gdf_unexcl) > len(gdf_hint),
     )
 )
 
@@ -669,7 +670,7 @@ if glofas is not None:
     main = int(np.flatnonzero(np.isclose(glofas["upstream_area_km2"], 5000.0))[0])
     a_day = int(np.flatnonzero(dates == np.datetime64("2016-11-15"))[0])
     e_day = int(np.flatnonzero(dates == np.datetime64("2016-02-01"))[0])
-    results.append(
+    list_res.append(
         (
             f"GloFAS NetCDF: days 1981-01-01..2021-12-31 attributed to their own day ({len(dates)} days)",
             dates[0] == np.datetime64("1981-01-01")
@@ -678,7 +679,7 @@ if glofas is not None:
             and glofas["discharge"][a_day, main] == np.float32(special["2016-11-15"]),
         )
     )
-    results.append(
+    list_res.append(
         (
             "upstream areas below glofas_min_upstream_area_km2 dropped",
             glofas["upstream_area_km2"].min() >= 5.0
@@ -692,7 +693,7 @@ if glofas is not None:
     rp_a = float(gis.Stats.gumbel_rp(glofas["discharge"][a_day, main], xi, alpha))
     rp_b_flooded = float(gis.Stats.gumbel_rp(1450.0, xi, alpha))
     rp_e = float(gis.Stats.gumbel_rp(glofas["discharge"][e_day, main], xi, alpha))
-    results.append(
+    list_res.append(
         (
             f"Gumbel fit of the GloFAS annual maxima: xi {xi:.0f}, alpha {alpha:.0f}; median annual maximum "
             f"has RP {rp_median:.2f}",
@@ -700,12 +701,12 @@ if glofas is not None:
         )
     )
 else:
-    results.append(("download_glofas (NetCDF) runs", False))
+    list_res.append(("download_glofas (NetCDF) runs", False))
 sample = np.random.default_rng(5).gumbel(1000.0, 300.0, 20000)
 fit = gis.Stats.gumbel_lmoments(sample)
 rp_sample = float(gis.Stats.gumbel_rp(np.median(sample), *fit))
 rp_100 = float(gis.Stats.gumbel_rp(1000.0 - 300.0 * np.log(-np.log(0.99)), *fit))
-results.append(
+list_res.append(
     (
         f"Gumbel sanity (20000 values): xi {fit[0]:.1f}, alpha {fit[1]:.1f}, RP(median) {rp_sample:.3f}, "
         f"RP(true 100-year value) {rp_100:.1f}",
@@ -731,18 +732,18 @@ if proc.returncode == 0 and glofas is not None:
         and np.array_equal(grib["lon"], glofas["lon"])
         and np.array_equal(grib["discharge"], glofas["discharge"][rows])
     )
-results.append(("GloFAS GRIB (GRIB_VALID_TIME) equals the NetCDF series", grib_ok))
+list_res.append(("GloFAS GRIB (GRIB_VALID_TIME) equals the NetCDF series", grib_ok))
 
 # --- rp_bounds.py, run 1 and an identical rerun ---
 proc = run("processing.rp_bounds", "rp_bounds_1")
-bounded = (
+gdf_bnd = (
     gpd.read_file(out / "compartments_rp.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
-if len(bounded) and glofas is not None:
-    after = {k: covering(bounded, k).iloc[0] for k in probes}
-    results.append(
+if len(gdf_bnd) and glofas is not None:
+    after = {k: covering(gdf_bnd, k).iloc[0] for k in probes}
+    list_res.append(
         (
             "matching: rings 1 and 2 matched to the main GloFAS cell (ratio 1), not the decoy (ratio 0.92)",
             all(
@@ -754,7 +755,7 @@ if len(bounded) and glofas is not None:
         )
     )
     r1 = after["R1"]
-    results.append(
+    list_res.append(
         (
             f"ring 1 combined: held at RP {rp_a:.1f} (A) raises rp_low within the model interval "
             f"[{before['R1'].rp_low:.0f}, {before['R1'].rp_high:.0f}]",
@@ -771,7 +772,7 @@ if len(bounded) and glofas is not None:
         )
     )
     r2 = after["R2"]
-    results.append(
+    list_res.append(
         (
             f"ring 2: held at RP {rp_a:.1f} but flooded at RP {rp_b_flooded:.1f} (window maximum) = obs_conflict, "
             "model values kept",
@@ -787,7 +788,7 @@ if len(bounded) and glofas is not None:
         )
     )
     r3 = after["R3"]
-    results.append(
+    list_res.append(
         (
             "ring 3: override kept despite observations",
             r3.n_held == 2
@@ -795,45 +796,45 @@ if len(bounded) and glofas is not None:
             and r3.rp == r3.rp_low == r3.rp_high == 100,
         )
     )
-    columns = ["rp", "rp_low", "rp_high", "rp_source", "obs_rp_low", "obs_rp_high"]
+    list_col = ["rp", "rp_low", "rp_high", "rp_source", "obs_rp_low", "obs_rp_high"]
     proc = run("processing.rp_bounds", "rp_bounds_2")
-    again = (
+    gdf_again = (
         gpd.read_file(out / "compartments_rp.gpkg") if proc.returncode == 0 else None
     )
-    results.append(
+    list_res.append(
         (
             "rp_bounds rerun gives identical results (model values kept in *_prior columns)",
-            again is not None
-            and again[columns].equals(bounded[columns])
-            and (again.rp_prior.to_numpy() == model.rp.to_numpy()).all(),
+            gdf_again is not None
+            and gdf_again[list_col].equals(gdf_bnd[list_col])
+            and (gdf_again.rp_prior.to_numpy() == gdf_model.rp.to_numpy()).all(),
         )
     )
 else:
-    results.append(("rp_bounds run 1", False))
+    list_res.append(("rp_bounds run 1", False))
 
 # --- gfm_evidence.py run 2 (all dates) and rp_bounds.py: a held test above the model interval ---
 proc = run("processing.gfm_evidence", "gfm_evidence_2")
-table2 = (
+df_ev2 = (
     pd.read_csv(out / "gfm_evidence.csv") if proc.returncode == 0 else pd.DataFrame()
 )
-results.append(
+list_res.append(
     (
         "scene E (only the area around ring 1 wet): ring 1 held, rings 2 and 3 no_test",
-        len(table2) > 0
-        and outcome(table2, "E", "R1") == {"held"}
-        and outcome(table2, "E", "R2") == {"no_test"}
-        and outcome(table2, "E", "R3") == {"no_test"},
+        len(df_ev2) > 0
+        and outcome(df_ev2, "E", "R1") == {"held"}
+        and outcome(df_ev2, "E", "R2") == {"no_test"}
+        and outcome(df_ev2, "E", "R3") == {"no_test"},
     )
 )
 proc = run("processing.rp_bounds", "rp_bounds_3")
-final = (
+gdf_final = (
     gpd.read_file(out / "compartments_rp.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
-if len(final) and glofas is not None:
-    r1 = covering(final, "R1").iloc[0]
-    results.append(
+if len(gdf_final) and glofas is not None:
+    r1 = covering(gdf_final, "R1").iloc[0]
+    list_res.append(
         (
             f"ring 1 held at RP {rp_e:.0f} (E) above its model interval: model_obs_conflict, rp = 200, "
             "interval from the observation up to the next class",
@@ -846,7 +847,7 @@ if len(final) and glofas is not None:
         )
     )
 else:
-    results.append(("rp_bounds run 3", False))
+    list_res.append(("rp_bounds run 3", False))
 
 # --- validate.py ---
 proc = run("processing.validate", "validate")
@@ -854,36 +855,36 @@ report = (
     json.loads((out / "validation.json").read_text()) if proc.returncode == 0 else {}
 )
 if report:
-    union_result = shapely.union_all(final.geometry.values)
-    union_reference = shapely.union_all(reference.geometry.values)
+    union_result = shapely.union_all(gdf_final.geometry.values)
+    union_reference = shapely.union_all(gdf_ref.geometry.values)
     overlap = union_result.intersection(union_reference).area
-    coverage = gpd.read_file(out / "validation_coverage.gpkg")
-    matrix = pd.read_csv(out / "validation_rp_confusion.csv", index_col=0)
-    matrix.columns = matrix.columns.astype(float)
-    expected = pd.DataFrame(0, index=matrix.index, columns=matrix.columns)
+    gdf_cov = gpd.read_file(out / "validation_coverage.gpkg")
+    df_cm = pd.read_csv(out / "validation_rp_confusion.csv", index_col=0)
+    df_cm.columns = df_cm.columns.astype(float)
+    df_exp = pd.DataFrame(0, index=df_cm.index, columns=df_cm.columns)
     for reference_class, rp in [(200.0, 200.0), (20.0, 100.0), (100.0, 100.0)]:
-        expected.loc[reference_class, rp] = 1
-    results.append(
+        df_exp.loc[reference_class, rp] = 1
+    list_res.append(
         (
             f"area recall {report['recall']:.3f} and precision {report['precision']:.3f}; one reference missed",
             abs(report["recall"] - overlap / union_reference.area) < 1e-9
             and abs(report["precision"] - overlap / union_result.area) < 1e-9
-            and int((coverage.covered_m2 == 0).sum()) == 1,
+            and int((gdf_cov.covered_m2 == 0).sum()) == 1,
         )
     )
-    results.append(
+    list_res.append(
         (
             "RP validation: 3 compartments compared, 2/3 within rp_low..rp_high and in the same class, "
             "confusion matrix",
             report["rp_compartments_compared"] == 3
             and abs(report["rp_share_within_interval"] - 2 / 3) < 1e-9
             and abs(report["rp_share_same_class"] - 2 / 3) < 1e-9
-            and list(matrix.index) == CLASSES
-            and matrix.equals(expected),
+            and list(df_cm.index) == CLASSES
+            and df_cm.equals(df_exp),
         )
     )
 else:
-    results.append(("validate runs", False))
+    list_res.append(("validate runs", False))
 server.shutdown()
 
 print("Timings (s): " + ", ".join(f"{k} {v:.1f}" for k, v in timings.items()))
@@ -891,6 +892,6 @@ for path in sorted((root / "output" / "T4" / "logs").glob("gfm_evidence_*.log"))
     for line in path.read_text().splitlines():
         if "scenes x" in line:
             print("  " + line.split(": ", 1)[-1])
-for label, ok in results:
+for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")
-sys.exit(0 if all(ok for _, ok in results) else 1)
+sys.exit(0 if all(ok for _, ok in list_res) else 1)

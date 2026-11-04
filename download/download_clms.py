@@ -53,7 +53,7 @@ if __name__ == "__main__":
             "corridor.gpkg or dtm.vrt is missing; run prepare_dtm.py and build_units.py first."
         )
     wkt = gdal.Open(str(vrt_path)).GetProjection()
-    corridor = gpd.read_file(corridor_path).to_crs(wkt)
+    gdf_corr = gpd.read_file(corridor_path).to_crs(wkt)
     record = {"corine": {}, "urban_atlas": {}}
 
     # --- CORINE: legend mapping, verified on known pixels, clipped to the corridor ---
@@ -65,15 +65,15 @@ if __name__ == "__main__":
                 "Set countries.<code>.corine_legend and its index and code fields: CORINE rasters store class "
                 "indices, not three-digit codes."
             )
-        legend = pd.read_csv(country["corine_legend"], sep=None, engine="python")
-        absent = [f for f in [index_field, code_field] if f not in legend.columns]
-        if absent:
+        df_leg = pd.read_csv(country["corine_legend"], sep=None, engine="python")
+        list_abs = [f for f in [index_field, code_field] if f not in df_leg.columns]
+        if list_abs:
             raise SystemExit(
-                f"Legend columns {absent} not found; columns: {list(legend.columns)}"
+                f"Legend columns {list_abs} not found; columns: {list(df_leg.columns)}"
             )
-        legend = legend[[index_field, code_field]].dropna()
+        df_leg = df_leg[[index_field, code_field]].dropna()
         mapping = dict(
-            zip(legend[index_field].astype(int), legend[code_field].astype(int))
+            zip(df_leg[index_field].astype(int), df_leg[code_field].astype(int))
         )
         vrt = gis.Raster.build_vrt(
             country["corine"], work_dir / "clms" / "corine_index.vrt"
@@ -85,7 +85,7 @@ if __name__ == "__main__":
                 "countries.<code>.corine_check is empty: give at least one pixel with a known CLC code "
                 "[[x, y, code]] in the raster CRS, so that the legend mapping can be verified."
             )
-        checks = []
+        list_chk = []
         for x, y, code in country["corine_check"]:
             col = int(np.floor((x - gt[0]) / gt[1]))
             row = int(np.floor((y - gt[3]) / gt[5]))
@@ -95,7 +95,7 @@ if __name__ == "__main__":
                 )
             value = int(band.ReadAsArray(col, row, 1, 1)[0, 0])
             mapped = mapping.get(value)
-            checks.append(
+            list_chk.append(
                 {"x": x, "y": y, "value": value, "mapped": mapped, "expected": code}
             )
             if mapped != int(code):
@@ -105,12 +105,12 @@ if __name__ == "__main__":
                 )
         log.info(
             "CORINE legend verified on %d known pixel(s): %s.",
-            len(checks),
-            ", ".join(f"{c['value']} -> {c['mapped']}" for c in checks),
+            len(list_chk),
+            ", ".join(f"{c['value']} -> {c['mapped']}" for c in list_chk),
         )
         # Corridor bounds in the raster CRS, one pixel of margin.
         area = gpd.GeoSeries(
-            [shapely.segmentize(corridor.union_all(), 1000.0)], crs=wkt
+            [shapely.segmentize(gdf_corr.union_all(), 1000.0)], crs=wkt
         ).to_crs(ds.GetProjection())
         xmin, ymin, xmax, ymax = area.total_bounds
         bounds = (xmin - gt[1], ymin + gt[5], xmax + gt[1], ymax - gt[5])
@@ -143,7 +143,7 @@ if __name__ == "__main__":
         record["corine"] = {
             "files": gis.Config.as_list(country["corine"]),
             "legend": country["corine_legend"],
-            "checks": checks,
+            "checks": list_chk,
             "output": str(out_dir / "corine_codes.tif"),
         }
 
@@ -152,13 +152,13 @@ if __name__ == "__main__":
         field = lulc["urban_atlas_class_field"]
         if not field:
             raise SystemExit("Set countries.<code>.lulc.urban_atlas_class_field.")
-        paths = []
+        list_path = []
         for path in gis.Config.as_list(lulc["urban_atlas"]):
-            names = gis.Vector.layer_names(path)
-            if len(names) == 1:
-                paths.append(path)
+            list_name = gis.Vector.layer_names(path)
+            if len(list_name) == 1:
+                list_path.append(path)
             elif lulc["urban_atlas_layer"]:
-                paths.append(
+                list_path.append(
                     gis.Vector.single_layer_copy(
                         path,
                         lulc["urban_atlas_layer"],
@@ -167,39 +167,39 @@ if __name__ == "__main__":
                 )
             else:
                 raise SystemExit(
-                    f"{path} has layers {names}; set countries.<code>.lulc.urban_atlas_layer."
+                    f"{path} has layers {list_name}; set countries.<code>.lulc.urban_atlas_layer."
                 )
-        polygons = gis.Vector.read_merged(
-            paths, wkt, bbox=tuple(corridor.total_bounds), keep_columns=[field]
+        gdf_ua = gis.Vector.read_merged(
+            list_path, wkt, bbox=tuple(gdf_corr.total_bounds), keep_columns=[field]
         )
-        if field not in polygons.columns:
+        if field not in gdf_ua.columns:
             raise SystemExit(f"Field {field!r} not found in the Urban Atlas files.")
-        touching, _ = corridor.sindex.query(
-            polygons.geometry.values, predicate="intersects"
+        touching, _ = gdf_corr.sindex.query(
+            gdf_ua.geometry.values, predicate="intersects"
         )
-        polygons = polygons.iloc[np.unique(touching)].reset_index(drop=True)
-        codes = pd.to_numeric(polygons[field].astype(str).str.strip(), errors="coerce")
+        gdf_ua = gdf_ua.iloc[np.unique(touching)].reset_index(drop=True)
+        codes = pd.to_numeric(gdf_ua[field].astype(str).str.strip(), errors="coerce")
         if codes.isna().any():
             log.warning(
                 "%d Urban Atlas polygons have a non-numeric class code; they are kept with code 0.",
                 int(codes.isna().sum()),
             )
-        polygons["ua_code"] = codes.fillna(0).astype(int)
+        gdf_ua["ua_code"] = codes.fillna(0).astype(int)
         gis.Vector.write_gpkg(
-            polygons[["ua_code", "source", "geometry"]], out_dir / "urban_atlas.gpkg"
+            gdf_ua[["ua_code", "source", "geometry"]], out_dir / "urban_atlas.gpkg"
         )
         log.info(
             "urban_atlas.gpkg: %d polygons touching the corridor; classes: %s.",
-            len(polygons),
+            len(gdf_ua),
             ", ".join(
                 f"{c} ({n})"
-                for c, n in polygons["ua_code"].value_counts().head(12).items()
+                for c, n in gdf_ua["ua_code"].value_counts().head(12).items()
             ),
         )
         record["urban_atlas"] = {
             "files": gis.Config.as_list(lulc["urban_atlas"]),
             "field": field,
-            "polygons": int(len(polygons)),
+            "polygons": int(len(gdf_ua)),
             "output": str(out_dir / "urban_atlas.gpkg"),
         }
     (out_dir / "clms_sources.json").write_text(

@@ -89,12 +89,12 @@ def exposure_unit(task):
     del classes, known
     ua_cells = 0
     if task["urban_atlas"]:
-        polygons = gpd.read_file(task["urban_atlas"], bbox=bounds)
-        if len(polygons):
+        gdf_poly = gpd.read_file(task["urban_atlas"], bbox=bounds)
+        if len(gdf_poly):
             covered = (
                 gis.Raster.rasterize_geometries(
-                    polygons.geometry,
-                    np.ones(len(polygons)),
+                    gdf_poly.geometry,
+                    np.ones(len(gdf_poly)),
                     labels.shape,
                     gt,
                     wkt,
@@ -104,8 +104,8 @@ def exposure_unit(task):
                 > 0
             )
             burnt = gis.Raster.rasterize_geometries(
-                polygons.geometry,
-                polygons["category_id"].to_numpy(),
+                gdf_poly.geometry,
+                gdf_poly["category_id"].to_numpy(),
                 labels.shape,
                 gt,
                 wkt,
@@ -120,10 +120,10 @@ def exposure_unit(task):
     n_labels = labels.max() + 1
     per_category = {}
     exposed = np.zeros(n_labels)
-    for k, (name, value_m2, fractions) in enumerate(task["categories"], start=1):
+    for k, (name, value_m2, list_frac) in enumerate(task["categories"], start=1):
         cells = inside & (category == k)
         damage = (
-            value_m2 * cell_area * np.interp(depth[cells], task["depth_m"], fractions)
+            value_m2 * cell_area * np.interp(depth[cells], task["depth_m"], list_frac)
         )
         per_category[name] = np.bincount(
             labels[cells], weights=damage, minlength=n_labels
@@ -131,16 +131,18 @@ def exposure_unit(task):
         exposed += np.bincount(
             labels[cells], weights=(damage > 0) * cell_area, minlength=n_labels
         )
-    ids = list(task["levels"])
-    result = pd.DataFrame(
+    list_id = list(task["levels"])
+    df_res = pd.DataFrame(
         {
-            "unit_label": ids,
-            "value_lulc": np.sum([v[ids] for v in per_category.values()], axis=0),
-            "lulc_exposed_area_m2": exposed[ids],
-            **{f"lulc_{name}": values[ids] for name, values in per_category.items()},
+            "unit_label": list_id,
+            "value_lulc": np.sum([v[list_id] for v in per_category.values()], axis=0),
+            "lulc_exposed_area_m2": exposed[list_id],
+            **{
+                f"lulc_{name}": values[list_id] for name, values in per_category.items()
+            },
         }
     )
-    result.to_csv(unit_dir / "hand_yz.csv", index=False)
+    df_res.to_csv(unit_dir / "hand_yz.csv", index=False)
     seconds = time.perf_counter() - start
     done = {
         "unit_id": task["unit_id"],
@@ -150,8 +152,8 @@ def exposure_unit(task):
         "cells": int(labels.size),
         "urban_atlas_cells": ua_cells,
         "summary": (
-            f"unit {task['unit_id']}: {len(result)} compartments, land cover value "
-            f"{result['value_lulc'].sum():.3g}, Urban Atlas cells {ua_cells}, {seconds:.1f} s"
+            f"unit {task['unit_id']}: {len(df_res)} compartments, land cover value "
+            f"{df_res['value_lulc'].sum():.3g}, Urban Atlas cells {ua_cells}, {seconds:.1f} s"
         ),
     }
     marker = unit_dir / "hand_yz.json.tmp"
@@ -192,38 +194,40 @@ if __name__ == "__main__":
         )
 
     # --- Categories, values per m2 of land and damage curves ---
-    categories = sorted(
+    list_cat = sorted(
         set(lulc["worldcover_categories"].values())
         | set(lulc["urban_atlas_categories"].values())
     )
-    if not categories:
+    if not list_cat:
         raise SystemExit(
             "No land cover categories: fill lulc.worldcover_categories or lulc.urban_atlas_categories."
         )
-    index = {name: k for k, name in enumerate(categories, start=1)}
-    max_damage = pd.read_csv(lulc["max_damage_csv"])
-    curves = pd.read_csv(lulc["depth_damage_csv"]).sort_values("depth_m")
-    missing = [c for c in ["country"] + categories if c not in max_damage.columns]
-    missing += [
-        f"{c} (curve)" for c in ["depth_m"] + categories if c not in curves.columns
+    index = {name: k for k, name in enumerate(list_cat, start=1)}
+    df_maxd = pd.read_csv(lulc["max_damage_csv"])
+    df_curve = pd.read_csv(lulc["depth_damage_csv"]).sort_values("depth_m")
+    list_miss = [c for c in ["country"] + list_cat if c not in df_maxd.columns]
+    list_miss += [
+        f"{c} (curve)" for c in ["depth_m"] + list_cat if c not in df_curve.columns
     ]
-    if missing:
-        raise SystemExit(f"Columns missing in the land cover damage tables: {missing}.")
-    row = max_damage[
-        max_damage["country"].astype(str).str.upper() == run["COUNTRY"].upper()
+    if list_miss:
+        raise SystemExit(
+            f"Columns missing in the land cover damage tables: {list_miss}."
+        )
+    df_row = df_maxd[
+        df_maxd["country"].astype(str).str.upper() == run["COUNTRY"].upper()
     ]
-    if len(row) != 1:
+    if len(df_row) != 1:
         raise SystemExit(
             f"{lulc['max_damage_csv']} needs exactly one row with country = {run['COUNTRY']}."
         )
     if (
-        not curves["depth_m"].is_unique
-        or ((curves[categories] < 0) | (curves[categories] > 1)).any().any()
+        not df_curve["depth_m"].is_unique
+        or ((df_curve[list_cat] < 0) | (df_curve[list_cat] > 1)).any().any()
     ):
         raise SystemExit(
             f"{lulc['depth_damage_csv']}: depths must be unique and fractions within 0..1."
         )
-    values = {name: float(row[name].iloc[0]) for name in categories}
+    values = {name: float(df_row[name].iloc[0]) for name in list_cat}
     lookup = np.zeros(256, np.int16)
     for code, name in lulc["worldcover_categories"].items():
         lookup[int(code)] = index[name]
@@ -233,18 +237,18 @@ if __name__ == "__main__":
     )
 
     # --- Urban Atlas: single-layer copies, class codes to category ids, only polygons touching compartments ---
-    compartments = gpd.read_file(out_dir / "compartments.gpkg")
-    wkt = compartments.crs.to_wkt()
-    urban_atlas, ua_sources = "", []
+    gdf_comp = gpd.read_file(out_dir / "compartments.gpkg")
+    wkt = gdf_comp.crs.to_wkt()
+    urban_atlas, list_ua = "", []
     if lulc["urban_atlas"]:
-        paths = []
+        list_path = []
         for path in gis.Config.as_list(lulc["urban_atlas"]):
-            ua_sources.append((str(path), os.path.getmtime(path)))
-            names = gis.Vector.layer_names(path)
-            if len(names) == 1:
-                paths.append(path)
+            list_ua.append((str(path), os.path.getmtime(path)))
+            list_name = gis.Vector.layer_names(path)
+            if len(list_name) == 1:
+                list_path.append(path)
             elif lulc["urban_atlas_layer"]:
-                paths.append(
+                list_path.append(
                     gis.Vector.single_layer_copy(
                         path,
                         lulc["urban_atlas_layer"],
@@ -255,119 +259,121 @@ if __name__ == "__main__":
                     "%s: layer %s copied (layers %s).",
                     Path(path).name,
                     lulc["urban_atlas_layer"],
-                    names,
+                    list_name,
                 )
             else:
                 raise SystemExit(
-                    f"{path} has layers {names}; set countries.<code>.lulc.urban_atlas_layer."
+                    f"{path} has layers {list_name}; set countries.<code>.lulc.urban_atlas_layer."
                 )
         field = lulc["urban_atlas_class_field"]
-        polygons = gis.Vector.read_merged(
-            paths, wkt, bbox=tuple(compartments.total_bounds), keep_columns=[field]
+        gdf_poly = gis.Vector.read_merged(
+            list_path, wkt, bbox=tuple(gdf_comp.total_bounds), keep_columns=[field]
         )
-        if field not in polygons.columns:
+        if field not in gdf_poly.columns:
             raise SystemExit(f"Field {field!r} not found in the Urban Atlas files.")
-        touching, _ = compartments.sindex.query(
-            polygons.geometry.values, predicate="intersects"
+        touching, _ = gdf_comp.sindex.query(
+            gdf_poly.geometry.values, predicate="intersects"
         )
-        polygons = polygons.iloc[np.unique(touching)].reset_index(drop=True)
+        gdf_poly = gdf_poly.iloc[np.unique(touching)].reset_index(drop=True)
         codes = (
-            polygons[field].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+            gdf_poly[field].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
         )
         mapping = {
             str(code): index[name]
             for code, name in lulc["urban_atlas_categories"].items()
         }
-        polygons["category_id"] = codes.map(mapping).fillna(0).astype(int)
-        unmapped = sorted(set(codes[polygons["category_id"] == 0]))
+        gdf_poly["category_id"] = codes.map(mapping).fillna(0).astype(int)
+        list_unmap = sorted(set(codes[gdf_poly["category_id"] == 0]))
         log.info(
             "Urban Atlas: %d polygons touch compartments; classes without a category (no value): %s.",
-            len(polygons),
-            ", ".join(unmapped) or "none",
+            len(gdf_poly),
+            ", ".join(list_unmap) or "none",
         )
         urban_atlas = str(work_dir / "lulc" / "urban_atlas_categories.gpkg")
-        gis.Vector.write_gpkg(polygons[["category_id", "geometry"]], urban_atlas)
+        gis.Vector.write_gpkg(gdf_poly[["category_id", "geometry"]], urban_atlas)
 
     # --- Exposure per unit (parallel, checkpointed with a hash of the inputs) ---
     parameters = {
         "worldcover": worldcover,
         "worldcover_lookup": lookup.tolist(),
         "urban_atlas": urban_atlas,
-        "categories": [(n, values[n], curves[n].tolist()) for n in categories],
-        "depth_m": curves["depth_m"].tolist(),
+        "categories": [(n, values[n], df_curve[n].tolist()) for n in list_cat],
+        "depth_m": df_curve["depth_m"].tolist(),
     }
     # The hash covers the parameters and the source files (VRT members, Urban Atlas files, class mapping).
     stamp = {
         "worldcover_files": [
             (f, os.path.getmtime(f)) for f in gdal.Open(worldcover).GetFileList()
         ],
-        "urban_atlas_files": ua_sources,
+        "urban_atlas_files": list_ua,
         "urban_atlas_categories": lulc["urban_atlas_categories"],
         "urban_atlas_field": lulc["urban_atlas_class_field"],
     }
-    parameters_hash = hashlib.sha256(
+    phash = hashlib.sha256(
         json.dumps([parameters, stamp], sort_keys=True, default=str).encode()
     ).hexdigest()
-    units = sorted(compartments["unit_id"].unique())
+    list_unit = sorted(gdf_comp["unit_id"].unique())
     if run["UNITS"]:
-        units = [u for u in units if u in run["UNITS"]]
-    tasks, skipped = [], []
-    for unit_id in units:
+        list_unit = [u for u in list_unit if u in run["UNITS"]]
+    list_task, list_skip = [], []
+    for unit_id in list_unit:
         unit_dir = work_dir / "units" / unit_id
         marker = unit_dir / "hand_yz.json"
         if (
             marker.exists()
             and not run["FORCE"]
-            and json.loads(marker.read_text()).get("parameters") == parameters_hash
+            and json.loads(marker.read_text()).get("parameters") == phash
             and marker.stat().st_mtime >= (unit_dir / "done.json").stat().st_mtime
         ):
-            skipped.append(unit_id)
+            list_skip.append(unit_id)
             continue
-        members = compartments[compartments["unit_id"] == unit_id]
-        tasks.append(
+        gdf_mem = gdf_comp[gdf_comp["unit_id"] == unit_id]
+        list_task.append(
             {
                 "unit_id": unit_id,
                 "unit_dir": str(unit_dir),
                 "levels": dict(
                     zip(
-                        members["unit_label"].astype(int),
-                        members["protection_level_m"].astype(float),
+                        gdf_mem["unit_label"].astype(int),
+                        gdf_mem["protection_level_m"].astype(float),
                     )
                 ),
                 "warp_memory_mb": general["warp_memory_limit_mb"],
-                "parameters_hash": parameters_hash,
+                "parameters_hash": phash,
                 **parameters,
             }
         )
     log.info(
         "Units with compartments: %d to process, %d up to date and skipped.",
-        len(tasks),
-        len(skipped),
+        len(list_task),
+        len(list_skip),
     )
-    results, failed = gis.Run.run_units(
+    list_res, list_fail = gis.Run.run_units(
         exposure_unit,
-        tasks,
+        list_task,
         general["n_workers"],
         general["gdal_cachemax_mb"],
         general["gdal_threads_per_worker"],
-        [1] * len(tasks),
+        [1] * len(list_task),
         log,
     )
-    if failed:
-        raise SystemExit(f"Units failed: {failed}; rerun to retry them.")
+    if list_fail:
+        raise SystemExit(f"Units failed: {list_fail}; rerun to retry them.")
 
-    tables = [
+    list_exp = [
         pd.read_csv(work_dir / "units" / u / "hand_yz.csv").assign(unit_id=u)
-        for u in units
+        for u in list_unit
         if (work_dir / "units" / u / "hand_yz.csv").exists()
     ]
-    table = compartments[["compartment_id", "unit_id", "unit_label"]].merge(
-        pd.concat(tables, ignore_index=True), on=["unit_id", "unit_label"], how="inner"
+    df_exp = gdf_comp[["compartment_id", "unit_id", "unit_label"]].merge(
+        pd.concat(list_exp, ignore_index=True),
+        on=["unit_id", "unit_label"],
+        how="inner",
     )
-    table.to_csv(out_dir / "exposure_lulc.csv", index=False)
+    df_exp.to_csv(out_dir / "exposure_lulc.csv", index=False)
     log.info(
         "exposure_lulc.csv: %d compartments, land cover value %.4g (%s).",
-        len(table),
-        table["value_lulc"].sum(),
-        ", ".join(f"{n} {table[f'lulc_{n}'].sum():.3g}" for n in categories),
+        len(df_exp),
+        df_exp["value_lulc"].sum(),
+        ", ".join(f"{n} {df_exp[f'lulc_{n}'].sum():.3g}" for n in list_cat),
     )

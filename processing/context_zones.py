@@ -53,7 +53,7 @@ if __name__ == "__main__":
 
     # --- Source polygons per context, in the DTM CRS ---
     pieces = {name: [] for name in context["order"]}
-    raster_sources = [
+    list_rsrc = [
         (
             "CORINE",
             out_dir / "corine_codes.tif",
@@ -74,8 +74,8 @@ if __name__ == "__main__":
         ),
         ("GHSL SMOD", out_dir / "ghsl_smod.vrt", "urban", context["ghsl_smod_urban"]),
     ]
-    for label, path, name, codes in raster_sources:
-        if not codes:
+    for label, path, name, list_code in list_rsrc:
+        if not list_code:
             continue
         if not path.exists():
             log.warning(
@@ -88,23 +88,23 @@ if __name__ == "__main__":
             raster_wkt
         )
         values, window_gt = gis.Raster.read_native(ds, tuple(area.total_bounds))
-        mask = np.isin(values, np.asarray(codes, np.float32))
+        mask = np.isin(values, np.asarray(list_code, np.float32))
         if not mask.any():
-            log.info("%s: no cell with codes %s in the corridor.", label, codes)
+            log.info("%s: no cell with codes %s in the corridor.", label, list_code)
             continue
-        polygons = gis.Raster.polygonize_labels(
+        gdf_poly = gis.Raster.polygonize_labels(
             mask.astype(np.int32), window_gt, raster_wkt
         )
-        polygons = polygons[polygons["label"] == 1].to_crs(wkt)
-        pieces[name].append((label, shapely.union_all(polygons.geometry.values)))
+        gdf_poly = gdf_poly[gdf_poly["label"] == 1].to_crs(wkt)
+        pieces[name].append((label, shapely.union_all(gdf_poly.geometry.values)))
         log.info(
             "%s codes %s -> %s: %.2f km2 in the raster window.",
             label,
-            codes,
+            list_code,
             name,
-            polygons.area.sum() / 1e6,
+            gdf_poly.area.sum() / 1e6,
         )
-    vector_sources = [
+    list_vsrc = [
         (
             "Urban Atlas",
             out_dir / "urban_atlas.gpkg",
@@ -119,8 +119,8 @@ if __name__ == "__main__":
         ),
         ("OSM", out_dir / "osm_industrial.gpkg", "industrial", None),
     ]
-    for label, path, name, codes in vector_sources:
-        if codes is not None and not codes:
+    for label, path, name, list_code in list_vsrc:
+        if list_code is not None and not list_code:
             continue
         if not path.exists():
             log.warning(
@@ -128,31 +128,31 @@ if __name__ == "__main__":
             )
             continue
         gis.Vector.check_single_layer(path)
-        frame = gpd.read_file(path).to_crs(wkt)
-        if codes is not None:
-            frame = frame[frame["ua_code"].isin(codes)]
-        frame = frame[frame.geometry.notna()]
+        gdf_vec = gpd.read_file(path).to_crs(wkt)
+        if list_code is not None:
+            gdf_vec = gdf_vec[gdf_vec["ua_code"].isin(list_code)]
+        gdf_vec = gdf_vec[gdf_vec.geometry.notna()]
         # OSM and Urban Atlas polygons can be invalid (self-touching rings); repair instead of dropping them.
-        frame = frame.set_geometry(shapely.make_valid(frame.geometry.values))
-        if frame.empty:
+        gdf_vec = gdf_vec.set_geometry(shapely.make_valid(gdf_vec.geometry.values))
+        if gdf_vec.empty:
             log.info("%s: no polygon for %s.", label, name)
             continue
-        pieces[name].append((label, shapely.union_all(frame.geometry.values)))
+        pieces[name].append((label, shapely.union_all(gdf_vec.geometry.values)))
         log.info(
             "%s -> %s: %d polygons, %.2f km2.",
             label,
             name,
-            len(frame),
-            frame.area.sum() / 1e6,
+            len(gdf_vec),
+            gdf_vec.area.sum() / 1e6,
         )
 
     # --- Zones in context order: earlier contexts win; small parts fall through to later contexts ---
-    rows, taken = [], shapely.Polygon()
+    list_rows, taken = [], shapely.Polygon()
     for name in context["order"]:
         if name == "rural":
             geometry = shapely.difference(corridor, taken)
             labels = "remainder of the corridor"
-            parts = [g for g in shapely.get_parts(geometry) if not g.is_empty]
+            list_part = [g for g in shapely.get_parts(geometry) if not g.is_empty]
         else:
             if not pieces[name]:
                 continue
@@ -163,12 +163,12 @@ if __name__ == "__main__":
                 taken,
             )
             labels = ", ".join(sorted({label for label, _ in pieces[name]}))
-            parts = [
+            list_part = [
                 g
                 for g in shapely.get_parts(geometry)
                 if not g.is_empty and g.area >= context["min_zone_area_m2"]
             ]
-            dropped = len(shapely.get_parts(geometry)) - len(parts)
+            dropped = len(shapely.get_parts(geometry)) - len(list_part)
             if dropped:
                 log.info(
                     "%s: %d parts smaller than %.0f m2 dropped; later contexts take their area.",
@@ -176,28 +176,30 @@ if __name__ == "__main__":
                     dropped,
                     context["min_zone_area_m2"],
                 )
-        kept = shapely.union_all(parts) if parts else shapely.Polygon()
+        kept = shapely.union_all(list_part) if list_part else shapely.Polygon()
         taken = shapely.union_all([taken, kept])
-        rows += [{"context": name, "sources": labels, "geometry": g} for g in parts]
-    zones = (
-        gpd.GeoDataFrame(rows, geometry="geometry", crs=wkt)
-        if rows
+        list_rows += [
+            {"context": name, "sources": labels, "geometry": g} for g in list_part
+        ]
+    gdf_zone = (
+        gpd.GeoDataFrame(list_rows, geometry="geometry", crs=wkt)
+        if list_rows
         else gpd.GeoDataFrame(
             {"context": pd.Series(dtype=str), "sources": pd.Series(dtype=str)},
             geometry=gpd.GeoSeries([], crs=wkt),
         )
     )
-    zones["area_m2"] = zones.area
-    zones.insert(0, "zone_id", np.arange(len(zones)))
-    gis.Vector.write_gpkg(zones, out_dir / "zones.gpkg")
-    summary = zones.groupby("context")["area_m2"].agg(["count", "sum"])
+    gdf_zone["area_m2"] = gdf_zone.area
+    gdf_zone.insert(0, "zone_id", np.arange(len(gdf_zone)))
+    gis.Vector.write_gpkg(gdf_zone, out_dir / "zones.gpkg")
+    df_sum = gdf_zone.groupby("context")["area_m2"].agg(["count", "sum"])
     log.info(
         "zones.gpkg in %.1f s: %s (corridor %.1f km2).",
         time.perf_counter() - start,
         "; ".join(
-            f"{name} {int(summary.loc[name, 'count'])} zones {summary.loc[name, 'sum'] / 1e6:.2f} km2"
+            f"{name} {int(df_sum.loc[name, 'count'])} zones {df_sum.loc[name, 'sum'] / 1e6:.2f} km2"
             for name in context["order"]
-            if name in summary.index
+            if name in df_sum.index
         ),
         corridor.area / 1e6,
     )

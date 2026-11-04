@@ -45,17 +45,17 @@ if __name__ == "__main__":
     log = gis.Run.logger("download_ghsl", out_dir / "logs", general["log_level"])
     gis.Config.warn_placeholders(cfg)
     templates = sources["ghsl_url_templates"]
-    missing = [p for p in PRODUCTS if not templates.get(p)]
-    if missing or not sources["ghsl_tile_schema"] or not sources["ghsl_tile_field"]:
+    list_miss = [p for p in PRODUCTS if not templates.get(p)]
+    if list_miss or not sources["ghsl_tile_schema"] or not sources["ghsl_tile_field"]:
         raise SystemExit(
-            f"GHSL sources are not configured (empty: {missing or ''} {'ghsl_tile_schema' if not sources['ghsl_tile_schema'] else ''} "
+            f"GHSL sources are not configured (empty: {list_miss or ''} {'ghsl_tile_schema' if not sources['ghsl_tile_schema'] else ''} "
             f"{'ghsl_tile_field' if not sources['ghsl_tile_field'] else ''}). The tile URLs and the tiling schema have not "
             "been verified against the JRC GHSL documentation; fill them in [sources]."
         )
-    footprint_path = out_dir / "dtm_footprint.gpkg"
-    if not footprint_path.exists():
+    fp_path = out_dir / "dtm_footprint.gpkg"
+    if not fp_path.exists():
         raise SystemExit("dtm_footprint.gpkg is missing; run prepare_dtm.py first.")
-    footprint = gpd.read_file(footprint_path)
+    gdf_fp = gpd.read_file(fp_path)
 
     # --- Tiling schema: tiles intersecting the DTM footprint ---
     schema_source = sources["ghsl_tile_schema"]
@@ -67,35 +67,35 @@ if __name__ == "__main__":
             sources["request_pause_s"],
         )
     if str(schema_source).endswith(".zip"):
-        shapefiles = [
+        list_shp = [
             n
             for n in gdal.ReadDir(f"/vsizip/{schema_source}") or []
             if n.endswith(".shp")
         ]
-        if len(shapefiles) != 1:
+        if len(list_shp) != 1:
             raise SystemExit(
-                f"Expected one shapefile in {schema_source}, found {shapefiles}."
+                f"Expected one shapefile in {schema_source}, found {list_shp}."
             )
-        schema_source = f"/vsizip/{schema_source}/{shapefiles[0]}"
+        schema_source = f"/vsizip/{schema_source}/{list_shp[0]}"
     gis.Vector.check_single_layer(schema_source)
-    schema = gpd.read_file(schema_source)
-    if sources["ghsl_tile_field"] not in schema.columns:
+    gdf_sch = gpd.read_file(schema_source)
+    if sources["ghsl_tile_field"] not in gdf_sch.columns:
         raise SystemExit(
-            f"Tile field {sources['ghsl_tile_field']!r} not in the tiling schema; columns: {list(schema.columns)}"
+            f"Tile field {sources['ghsl_tile_field']!r} not in the tiling schema; columns: {list(gdf_sch.columns)}"
         )
-    area = gpd.GeoSeries([box(*footprint.total_bounds)], crs=footprint.crs).to_crs(
-        schema.crs
+    area = gpd.GeoSeries([box(*gdf_fp.total_bounds)], crs=gdf_fp.crs).to_crs(
+        gdf_sch.crs
     )
     area = shapely.segmentize(area.iloc[0], max(area.iloc[0].length / 400, 1.0))
-    tiles = sorted(
-        schema.loc[schema.intersects(area), sources["ghsl_tile_field"]].astype(str)
+    list_tile = sorted(
+        gdf_sch.loc[gdf_sch.intersects(area), sources["ghsl_tile_field"]].astype(str)
     )
-    if not tiles:
+    if not list_tile:
         raise SystemExit("No GHSL tile intersects the DTM footprint.")
     log.info(
         "GHSL tiles intersecting the DTM footprint: %d (%s).",
-        len(tiles),
-        ", ".join(tiles),
+        len(list_tile),
+        ", ".join(list_tile),
     )
 
     # --- Epoch: configured, otherwise the latest one the server provides (not after the current year) ---
@@ -103,7 +103,7 @@ if __name__ == "__main__":
     if not epoch:
         year = datetime.date.today().year
         for candidate in range(year - year % 5, FIRST_EPOCH - 1, -5):
-            url = templates["total"].format(epoch=candidate, tile=tiles[0])
+            url = templates["total"].format(epoch=candidate, tile=list_tile[0])
             try:
                 with urllib.request.urlopen(
                     urllib.request.Request(url, method="HEAD"), timeout=60
@@ -124,45 +124,46 @@ if __name__ == "__main__":
         )
 
     # --- Tiles and VRT mosaics ---
-    record = {"epoch": epoch, "tiles": tiles, "products": {}}
-    optional = [p for p in OPTIONAL_PRODUCTS if templates.get(p)]
-    skipped = [p for p in OPTIONAL_PRODUCTS if not templates.get(p)]
-    if skipped:
+    record = {"epoch": epoch, "tiles": list_tile, "products": {}}
+    list_opt = [p for p in OPTIONAL_PRODUCTS if templates.get(p)]
+    list_skip = [p for p in OPTIONAL_PRODUCTS if not templates.get(p)]
+    if list_skip:
         log.info(
-            "GHSL products without a template (not downloaded): %s.", ", ".join(skipped)
+            "GHSL products without a template (not downloaded): %s.",
+            ", ".join(list_skip),
         )
-    for product in PRODUCTS + optional:
-        paths = []
-        for tile in tiles:
+    for product in PRODUCTS + list_opt:
+        list_path = []
+        for tile in list_tile:
             url = templates[product].format(epoch=epoch, tile=tile)
             target = work_dir / product / url.rsplit("/", 1)[-1]
             gis.Http.download(
                 url, target, sources["max_retries"], sources["request_pause_s"]
             )
             if target.suffix == ".zip":
-                rasters = [
+                list_ras = [
                     n
                     for n in gdal.ReadDir(f"/vsizip/{target}") or []
                     if n.lower().endswith(".tif")
                 ]
-                if len(rasters) != 1:
+                if len(list_ras) != 1:
                     raise SystemExit(
-                        f"Expected one GeoTIFF in {target}, found {rasters}."
+                        f"Expected one GeoTIFF in {target}, found {list_ras}."
                     )
-                paths.append(f"/vsizip/{target}/{rasters[0]}")
+                list_path.append(f"/vsizip/{target}/{list_ras[0]}")
             else:
-                paths.append(str(target))
-        vrt = gis.Raster.build_vrt(paths, out_dir / f"ghsl_{product}.vrt")
+                list_path.append(str(target))
+        vrt = gis.Raster.build_vrt(list_path, out_dir / f"ghsl_{product}.vrt")
         record["products"][product] = {
             "vrt": vrt,
-            "sources": paths,
+            "sources": list_path,
             "url_template": templates[product],
         }
         info = gis.Raster.inspect(vrt)
         log.info(
             "GHSL %s: %d tiles, %d x %d cells of %.0f m -> %s",
             product,
-            len(paths),
+            len(list_path),
             info["width"],
             info["height"],
             info["pixel_x"],

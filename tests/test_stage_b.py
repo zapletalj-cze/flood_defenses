@@ -112,40 +112,42 @@ gpd.GeoDataFrame(
 
 # --- OSM extract (synthetic .osm served through a file:// template) ---
 to_lonlat = Transformer.from_crs(EPSG, 4326, always_xy=True)
-nodes, ways = [], []
+list_node, list_way = [], []
 
 
 def node(x, y, tags=None):
     lon, lat = to_lonlat.transform(X0 + x, Y_TOP - HEIGHT_M + y)
-    nodes.append((len(nodes) + 1, lat, lon, tags or {}))
-    return len(nodes)
+    list_node.append((len(list_node) + 1, lat, lon, tags or {}))
+    return len(list_node)
 
 
 node(500, 953, {"waterway": "sluice_gate"})
 node(1300, 955, {"man_made": "pumping_station", "name": "PS ring 2"})
 node(2300, 1000, {"waterway": "weir"})
-far = [node(100, 1490), node(110, 1490), node(110, 1500), node(100, 1500)]
-ways.append((1000, far + [far[0]], {"man_made": "pumping_station", "building": "yes"}))
-ways.append((1001, [node(900, 1400), node(1000, 1400)], {"waterway": "ditch"}))
-xml = [
+list_far = [node(100, 1490), node(110, 1490), node(110, 1500), node(100, 1500)]
+list_way.append(
+    (1000, list_far + [list_far[0]], {"man_made": "pumping_station", "building": "yes"})
+)
+list_way.append((1001, [node(900, 1400), node(1000, 1400)], {"waterway": "ditch"}))
+list_xml = [
     "<?xml version='1.0' encoding='UTF-8'?>",
     '<osm version="0.6" generator="synthetic">',
 ]
-for nid, lat, lon, tags in nodes:
-    xml.append(
+for nid, lat, lon, tags in list_node:
+    list_xml.append(
         f'  <node id="{nid}" lat="{lat:.8f}" lon="{lon:.8f}" version="1">'
         + "".join(f'<tag k="{k}" v="{v}"/>' for k, v in tags.items())
         + "</node>"
     )
-for wid, refs, tags in ways:
-    xml.append(
+for wid, list_ref, tags in list_way:
+    list_xml.append(
         f'  <way id="{wid}" version="1">'
-        + "".join(f'<nd ref="{r}"/>' for r in refs)
+        + "".join(f'<nd ref="{r}"/>' for r in list_ref)
         + "".join(f'<tag k="{k}" v="{v}"/>' for k, v in tags.items())
         + "</way>"
     )
-xml.append("</osm>")
-(data / "test-region.osm").write_text("\n".join(xml))
+list_xml.append("</osm>")
+(data / "test-region.osm").write_text("\n".join(list_xml))
 
 # --- GHSL: two zipped Mollweide tiles for epoch 2020, zipped tiling schema ---
 to_moll = Transformer.from_crs(EPSG, MOLLWEIDE, always_xy=True)
@@ -184,12 +186,12 @@ for tile, (tx0, tx1) in tiles.items():
         with zipfile.ZipFile(data / f"{name}.zip", "w") as archive:
             archive.write(tif, tif.name)
         tif.unlink()
-schema = gpd.GeoDataFrame(
+gdf_sch = gpd.GeoDataFrame(
     {"tile_id": list(tiles)},
     geometry=[box(t0, my0, t1, my1) for t0, t1 in tiles.values()],
     crs=MOLLWEIDE,
 )
-schema.to_file(data / "tiling_schema.shp", driver="ESRI Shapefile")
+gdf_sch.to_file(data / "tiling_schema.shp", driver="ESRI Shapefile")
 with zipfile.ZipFile(data / "tiling_schema.zip", "w") as archive:
     for part in data.glob("tiling_schema.*"):
         if part.suffix != ".zip":
@@ -341,51 +343,51 @@ def hits(frame, label):
 
 
 out = root / "output" / "T4"
-results = []
+list_res = []
 for module in ["processing.prepare_dtm", "processing.build_units"]:
     proc = run(module, RUN_BENCHMARK="0")
-    results.append((f"{module} runs", proc.returncode == 0))
+    list_res.append((f"{module} runs", proc.returncode == 0))
 
 proc = run("processing.compartments")
-before = (
+gdf_before = (
     gpd.read_file(out / "compartments.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
-results.append(
+list_res.append(
     (
         "without OSM: tributaries inside rings 1 and 2 are water sources (no protection), ring 3 protected",
         proc.returncode == 0
-        and hits(before, "R1_gate") == 0
-        and hits(before, "R2_pump") == 0
-        and hits(before, "R3_plain") == 1,
+        and hits(gdf_before, "R1_gate") == 0
+        and hits(gdf_before, "R2_pump") == 0
+        and hits(gdf_before, "R3_plain") == 1,
     )
 )
 
 proc = run("download.download_osm")
-points = (
+gdf_pts = (
     gpd.read_file(out / "osm_hydraulic_points.gpkg")
     if proc.returncode == 0
     else pd.DataFrame()
 )
-drains = (
+gdf_drain = (
     gpd.read_file(out / "osm_drains.gpkg") if proc.returncode == 0 else pd.DataFrame()
 )
-results.append(
+list_res.append(
     (
-        f"download_osm: 4 hydraulic points (nodes and a way as point), 1 drain; found {len(points)}, {len(drains)}",
+        f"download_osm: 4 hydraulic points (nodes and a way as point), 1 drain; found {len(gdf_pts)}, {len(gdf_drain)}",
         proc.returncode == 0
-        and len(points) == 4
-        and len(drains) == 1
-        and set(points.get("osm_element", [])) == {"node", "area"},
+        and len(gdf_pts) == 4
+        and len(gdf_drain) == 1
+        and set(gdf_pts.get("osm_element", [])) == {"node", "area"},
     )
 )
-results.append(
+list_res.append(
     ("download_osm logs counts per tag value", "waterway=sluice_gate: 1" in proc.stderr)
 )
 
 proc = run("processing.osm_hydraulics")
-sources = (
+gdf_src = (
     gpd.read_file(out / "rivers_sources.gpkg").set_index("name")
     if proc.returncode == 0
     else None
@@ -396,57 +398,61 @@ expected_sources = {
     "trib_pump": False,
     "trib_free": True,
 }
-results.append(
+list_res.append(
     (
         f"osm_hydraulics: water sources {expected_sources}",
-        sources is not None
+        gdf_src is not None
         and all(
-            bool(sources.loc[k, "is_source"]) == v for k, v in expected_sources.items()
+            bool(gdf_src.loc[k, "is_source"]) == v for k, v in expected_sources.items()
         ),
     )
 )
-if sources is not None:
-    results.append(
+if gdf_src is not None:
+    list_res.append(
         (
             "closed by a gate at the levee crossing",
-            "closing structure" in sources.loc["trib_gate", "reason"],
+            "closing structure" in gdf_src.loc["trib_gate", "reason"],
         )
     )
     pump_end = shapely.Point(
-        sources.loc["trib_pump", "downstream_x"],
-        sources.loc["trib_pump", "downstream_y"],
+        gdf_src.loc["trib_pump", "downstream_x"],
+        gdf_src.loc["trib_pump", "downstream_y"],
     )
-    results.append(
+    list_res.append(
         (
             "downstream end from the DTM (line digitised against the flow) next to the pumping station",
-            "pumping station" in sources.loc["trib_pump", "reason"]
-            and sources.loc["trib_pump", "downstream_method"] == "dtm elevation"
+            "pumping station" in gdf_src.loc["trib_pump", "reason"]
+            and gdf_src.loc["trib_pump", "downstream_method"] == "dtm elevation"
             and pump_end.distance(world(Point(1300, 960))) < 1.0,
         )
     )
-pumping = (
+gdf_pump = (
     gpd.read_file(out / "osm_pumping.gpkg") if proc.returncode == 0 else pd.DataFrame()
 )
-results.append(
-    ("osm_pumping: only the pumping station next to a levee", len(pumping) == 1)
+list_res.append(
+    ("osm_pumping: only the pumping station next to a levee", len(gdf_pump) == 1)
 )
 
 proc = run("processing.compartments", FORCE="1")
-after = (
+gdf_after = (
     gpd.read_file(out / "compartments.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
-results.append(
+list_res.append(
     (
         "with closed tributaries all three rings are protected; ring 2 has pumping",
         proc.returncode == 0
-        and all(hits(after, k) == 1 for k in probes)
+        and all(hits(gdf_after, k) == 1 for k in probes)
         and bool(
-            after[after.covers(world(Point(*probes["R2_pump"])))].has_pumping.iloc[0]
+            gdf_after[
+                gdf_after.covers(world(Point(*probes["R2_pump"])))
+            ].has_pumping.iloc[0]
         )
         and not bool(
-            after[after.covers(world(Point(*probes["R1_gate"])))].has_pumping.iloc[0]
+            gdf_after[
+                gdf_after.covers(world(Point(*probes["R1_gate"])))
+            ].has_pumping.iloc[0]
         ),
     )
 )
@@ -455,7 +461,7 @@ proc = run("download.download_ghsl")
 record = (
     json.loads((out / "ghsl_sources.json").read_text()) if proc.returncode == 0 else {}
 )
-results.append(
+list_res.append(
     (
         f"download_ghsl: latest available epoch found ({record.get('epoch')}), two tiles per product mosaicked",
         proc.returncode == 0
@@ -465,29 +471,33 @@ results.append(
 )
 
 proc = run("processing.rp_index")
-ratios = [
+list_ratio = [
     r
     for d in (root / "work" / "T4" / "units").iterdir()
     if (d / "rp_index.json").exists()
     for r in json.loads((d / "rp_index.json").read_text())["total_ratio"].values()
 ]
-results.append(
+list_res.append(
     (
-        f"value warp preserves totals within 1 % (ratios {', '.join(f'{r:.4f}' for r in ratios)})",
-        proc.returncode == 0 and ratios and all(abs(r - 1) <= 0.01 for r in ratios),
+        f"value warp preserves totals within 1 % (ratios {', '.join(f'{r:.4f}' for r in list_ratio)})",
+        proc.returncode == 0
+        and list_ratio
+        and all(abs(r - 1) <= 0.01 for r in list_ratio),
     )
 )
-rp = (
+gdf_rp = (
     gpd.read_file(out / "compartments_rp.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
-if len(rp) and all(
-    int(rp.covers(world(Point(*xy))).sum()) == 1 for xy in probes.values()
+if len(gdf_rp) and all(
+    int(gdf_rp.covers(world(Point(*xy))).sum()) == 1 for xy in probes.values()
 ):
-    classes = [10, 20, 50, 100, 200, 500]
-    by_probe = {k: rp[rp.covers(world(Point(*xy)))].iloc[0] for k, xy in probes.items()}
-    columns = [
+    list_cls = [10, 20, 50, 100, 200, 500]
+    by_probe = {
+        k: gdf_rp[gdf_rp.covers(world(Point(*xy)))].iloc[0] for k, xy in probes.items()
+    }
+    list_col = [
         "v_rel",
         "levee_length_m",
         "upstream_area_km2",
@@ -505,10 +515,10 @@ if len(rp) and all(
         "obs_conflict",
         "model_obs_conflict",
     ]
-    results.append(
-        ("compartments_rp has all columns", all(c in rp.columns for c in columns))
+    list_res.append(
+        ("compartments_rp has all columns", all(c in gdf_rp.columns for c in list_col))
     )
-    results.append(
+    list_res.append(
         (
             "rings 1 and 2 lie in the town (exposed value > 0), ring 3 has none",
             by_probe["R1_gate"].value_exposed > 0
@@ -516,35 +526,38 @@ if len(rp) and all(
             and by_probe["R3_plain"].value_exposed == 0,
         )
     )
-    model = rp[rp.rp_source != "override"]
-    expected_cap = [
+    gdf_model = gdf_rp[gdf_rp.rp_source != "override"]
+    list_cap = [
         np.nan if i >= 3 else [10, 50, 100][i]
         for i in np.searchsorted(
-            [0.5, 1.0, 5.6], model.protection_level_m, side="right"
+            [0.5, 1.0, 5.6], gdf_model.protection_level_m, side="right"
         )
     ]
-    results.append(
+    list_res.append(
         (
             "cap from protection level; rp = min(model, cap, max_rp) and a class value",
-            np.allclose(model.rp_cap.to_numpy(), expected_cap, equal_nan=True)
-            and all(r in classes for r in model.rp)
+            np.allclose(gdf_model.rp_cap.to_numpy(), list_cap, equal_nan=True)
+            and all(r in list_cls for r in gdf_model.rp)
             and (
-                model.rp
+                gdf_model.rp
                 <= np.fmin(
-                    np.fmin(model.rp_model.fillna(1e9), model.rp_cap.fillna(1e9)), 200
+                    np.fmin(
+                        gdf_model.rp_model.fillna(1e9), gdf_model.rp_cap.fillna(1e9)
+                    ),
+                    200,
                 )
             ).all(),
         )
     )
-    results.append(
+    list_res.append(
         (
             "interval rp_low <= rp <= rp_high, bounded by cap and max_rp",
-            (model.rp_low <= model.rp).all()
-            and (model.rp <= model.rp_high).all()
-            and (model.rp_high <= 200).all(),
+            (gdf_model.rp_low <= gdf_model.rp).all()
+            and (gdf_model.rp <= gdf_model.rp_high).all()
+            and (gdf_model.rp_high <= 200).all(),
         )
     )
-    results.append(
+    list_res.append(
         (
             "override sets rp, rp_low and rp_high of ring 3",
             by_probe["R3_plain"].rp_source == "override"
@@ -554,31 +567,33 @@ if len(rp) and all(
             == 100,
         )
     )
-    results.append(
+    list_res.append(
         (
             "v_rel = value / levee length",
-            np.allclose(model.v_rel, model.value_exposed / model.levee_length_m),
+            np.allclose(
+                gdf_model.v_rel, gdf_model.value_exposed / gdf_model.levee_length_m
+            ),
         )
     )
 
 # Quantile mapping and percentile ranks on many scores.
 scores = np.random.default_rng(3).random(997)
 mapped = gis.Stats.quantile_classes(scores, [20, 50, 100, 200], [0.2, 0.3, 0.4, 0.1])
-shares = [float(np.mean(mapped == c)) for c in [20, 50, 100, 200]]
-results.append(
+list_share = [float(np.mean(mapped == c)) for c in [20, 50, 100, 200]]
+list_res.append(
     (
-        f"quantile mapping reproduces the shares within rounding ({shares})",
-        all(abs(s - t) <= 1 / 997 for s, t in zip(shares, [0.2, 0.3, 0.4, 0.1])),
+        f"quantile mapping reproduces the shares within rounding ({list_share})",
+        all(abs(s - t) <= 1 / 997 for s, t in zip(list_share, [0.2, 0.3, 0.4, 0.1])),
     )
 )
 ties = gis.Stats.quantile_classes([1.0, 1.0, 2.0, 3.0], [20, 50], [0.5, 0.5])
-results.append(("ties get the same class", ties[0] == ties[1]))
+list_res.append(("ties get the same class", ties[0] == ties[1]))
 
 if not (
-    len(rp)
-    and all(int(rp.covers(world(Point(*xy))).sum()) == 1 for xy in probes.values())
+    len(gdf_rp)
+    and all(int(gdf_rp.covers(world(Point(*xy))).sum()) == 1 for xy in probes.values())
 ):
-    results.append(("compartments_rp contains the three rings", False))
-for label, ok in results:
+    list_res.append(("compartments_rp contains the three rings", False))
+for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")
-sys.exit(0 if all(ok for _, ok in results) else 1)
+sys.exit(0 if all(ok for _, ok in list_res) else 1)

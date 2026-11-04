@@ -1019,7 +1019,7 @@ class Raster:
         block_x, block_y = band.GetBlockSize()
         structure = ds.GetMetadata("IMAGE_STRUCTURE") or {}
         bytes_per_pixel = gdal.GetDataTypeSize(band.DataType) // 8
-        files = ds.GetFileList() or [str(in_raster)]
+        list_file = ds.GetFileList() or [str(in_raster)]
         return {
             "path": str(in_raster),
             "driver": ds.GetDriver().ShortName,
@@ -1042,7 +1042,8 @@ class Raster:
             "overview_widths": [
                 band.GetOverview(i).XSize for i in range(band.GetOverviewCount())
             ],
-            "file_size_gb": sum(os.path.getsize(f) for f in files if exists(f)) / 1e9,
+            "file_size_gb": sum(os.path.getsize(f) for f in list_file if exists(f))
+            / 1e9,
             "raw_size_gb": ds.RasterXSize * ds.RasterYSize * bytes_per_pixel / 1e9,
             "crs_wkt": ds.GetProjection(),
         }
@@ -1215,7 +1216,7 @@ class Raster:
         os.makedirs(os.path.dirname(str(path)) or ".", exist_ok=True)
         mem = Raster.array_to_mem(array, geotransform, wkt, nodata)
         is_float = np.issubdtype(array.dtype, np.floating)
-        options = [
+        list_opt = [
             "TILED=YES",
             "BLOCKXSIZE=256",
             "BLOCKYSIZE=256",
@@ -1224,7 +1225,7 @@ class Raster:
             "BIGTIFF=IF_SAFER",
             "NUM_THREADS=ALL_CPUS",
         ]
-        gdal.Translate(str(path), mem, format="GTiff", creationOptions=options)
+        gdal.Translate(str(path), mem, format="GTiff", creationOptions=list_opt)
 
     @staticmethod
     def rasterize_geometries(
@@ -1293,11 +1294,11 @@ class Raster:
             mask_ds = Raster.array_to_mem(
                 (labels > 0).astype(np.uint8), geotransform, wkt
             )
-            options = ["8CONNECTED=8"] if connectedness == 8 else []
+            list_opt = ["8CONNECTED=8"] if connectedness == 8 else []
             gdal.Polygonize(
-                label_ds.GetRasterBand(1), mask_ds.GetRasterBand(1), layer, 0, options
+                label_ds.GetRasterBand(1), mask_ds.GetRasterBand(1), layer, 0, list_opt
             )
-        features = [
+        list_feat = [
             (
                 f.GetField("label"),
                 shapely.from_wkb(bytes(f.GetGeometryRef().ExportToWkb())),
@@ -1305,8 +1306,8 @@ class Raster:
             for f in layer
         ]
         gdf = gpd.GeoDataFrame(
-            {"label": pd.Series([f[0] for f in features], dtype="int64")},
-            geometry=gpd.GeoSeries([f[1] for f in features], crs=wkt),
+            {"label": pd.Series([f[0] for f in list_feat], dtype="int64")},
+            geometry=gpd.GeoSeries([f[1] for f in list_feat], crs=wkt),
         )
         if gdf.empty:
             return gdf
@@ -1393,11 +1394,11 @@ class Raster:
             0.0,
             gt[5] * ds.RasterYSize / out_h,
         )
-        polygons = Raster.polygonize_labels(
+        gdf_poly = Raster.polygonize_labels(
             valid.astype(np.int32), coarse_gt, ds.GetProjection()
         )
         return gpd.GeoDataFrame(
-            geometry=[shapely.union_all(polygons.geometry.values)],
+            geometry=[shapely.union_all(gdf_poly.geometry.values)],
             crs=ds.GetProjection(),
         )
 
@@ -1449,10 +1450,10 @@ class Raster:
             200 * n_windows,
         )
         inside = shapely.contains_xy(polygon, xs, ys)
-        centres = list(zip(xs[inside], ys[inside]))[:n_windows]
-        messages, records = [], []
+        list_ctr = list(zip(xs[inside], ys[inside]))[:n_windows]
+        list_msg, list_rec = [], []
         sample_window = (0, 0)
-        for k, (x, y) in enumerate(centres):
+        for k, (x, y) in enumerate(list_ctr):
             col0 = int(
                 np.clip((x - gt[0]) / gt[1] - win_x / 2, 0, info["width"] - win_x)
             )
@@ -1479,7 +1480,7 @@ class Raster:
             if k == 0:
                 gdal.SetConfigOption("CPL_DEBUG", "ON")
                 gdal.PushErrorHandler(
-                    lambda err_class, err_no, msg: messages.append(msg)
+                    lambda err_class, err_no, msg: list_msg.append(msg)
                 )
                 try:
                     Raster.read_window(
@@ -1498,7 +1499,7 @@ class Raster:
                 info["path"], bounds, resolution, "average", warp_memory_mb
             )
             t_warp = time.perf_counter() - start
-            records.append(
+            list_rec.append(
                 {
                     "raster": name,
                     "window": k,
@@ -1512,9 +1513,9 @@ class Raster:
                     "warp_output_cells": warped.size,
                 }
             )
-        source_widths = [
+        list_sw = [
             int(m.group(1))
-            for m in map(re.compile(r"Src=\d+,\d+,(\d+)x(\d+)").search, messages)
+            for m in map(re.compile(r"Src=\d+,\d+,(\d+)x(\d+)").search, list_msg)
             if m
         ]
         # Sequential full-width read (pattern of a conversion pass).
@@ -1548,26 +1549,28 @@ class Raster:
         t_compress = time.perf_counter() - start
         ratio = gdal.VSIStatL("/vsimem/compression_sample.tif").size / bytes_window
         gdal.Unlink("/vsimem/compression_sample.tif")
-        table = pd.DataFrame(records)
+        df_rec = pd.DataFrame(list_rec)
         summary = {
             "path": info["path"],
-            "windows": len(records),
+            "windows": len(list_rec),
             "native_s_median": (
-                float(table["native_s"].median()) if len(table) else np.nan
+                float(df_rec["native_s"].median()) if len(df_rec) else np.nan
             ),
             "native_s_p90": (
-                float(table["native_s"].quantile(0.9)) if len(table) else np.nan
+                float(df_rec["native_s"].quantile(0.9)) if len(df_rec) else np.nan
             ),
             "native_mb_s_median": (
-                float(table["native_mb_s"].median()) if len(table) else np.nan
+                float(df_rec["native_mb_s"].median()) if len(df_rec) else np.nan
             ),
-            "warp_s_median": float(table["warp_s"].median()) if len(table) else np.nan,
+            "warp_s_median": (
+                float(df_rec["warp_s"].median()) if len(df_rec) else np.nan
+            ),
             "warp_s_p90": (
-                float(table["warp_s"].quantile(0.9)) if len(table) else np.nan
+                float(df_rec["warp_s"].quantile(0.9)) if len(df_rec) else np.nan
             ),
             "warp_native_equivalent_mb_s_median": (
-                float(table["warp_native_equivalent_mb_s"].median())
-                if len(table)
+                float(df_rec["warp_native_equivalent_mb_s"].median())
+                if len(df_rec)
                 else np.nan
             ),
             "window_ground_km2": win_x * win_y * abs(gt[1] * gt[5]) / 1e6,
@@ -1577,7 +1580,7 @@ class Raster:
             "raw_gb": info["raw_size_gb"],
             "window_px": win_x,
         }
-        return records, summary, source_widths
+        return list_rec, summary, list_sw
 
     @staticmethod
     def map_codes(values, mapping, default=0):
@@ -2058,9 +2061,9 @@ class Vector:
         if ds is None:
             raise SystemExit(f"Cannot open vector file: {path}")
         if ds.GetLayerCount() != 1:
-            names = [ds.GetLayer(i).GetName() for i in range(ds.GetLayerCount())]
+            list_name = [ds.GetLayer(i).GetName() for i in range(ds.GetLayerCount())]
             raise SystemExit(
-                f"{path} contains {ds.GetLayerCount()} layers {names}; every vector input "
+                f"{path} contains {ds.GetLayerCount()} layers {list_name}; every vector input "
                 "must contain exactly one layer (convert it with gdal.VectorTranslate)."
             )
 
@@ -2076,7 +2079,7 @@ class Vector:
         :param keep_columns: attribute columns to keep when present; True keeps all
         :return: gpd.GeoDataFrame with keep_columns, source and geometry
         """
-        frames = []
+        list_gdf = []
         for path in Config.as_list(paths):
             Vector.check_single_layer(path)
             kwargs = {}
@@ -2091,12 +2094,12 @@ class Vector:
             gdf = gdf.to_crs(wkt)
             gdf["source"] = os.path.splitext(os.path.basename(str(path)))[0]
             if keep_columns is True:
-                columns = [c for c in gdf.columns if c not in ("source", "geometry")]
+                list_col = [c for c in gdf.columns if c not in ("source", "geometry")]
             else:
-                columns = [c for c in (keep_columns or []) if c in gdf.columns]
-            frames.append(gdf[columns + ["source", "geometry"]])
+                list_col = [c for c in (keep_columns or []) if c in gdf.columns]
+            list_gdf.append(gdf[list_col + ["source", "geometry"]])
         gdf = gpd.GeoDataFrame(
-            pd.concat(frames, ignore_index=True), geometry="geometry", crs=wkt
+            pd.concat(list_gdf, ignore_index=True), geometry="geometry", crs=wkt
         )
         return gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].reset_index(drop=True)
 
@@ -2151,11 +2154,17 @@ class Vector:
                 f"expected {list(order)}."
             )
         # Later contexts are burnt first, so earlier ones win if polygons ever overlap.
-        ranked = zones.assign(value=values.astype(int)).sort_values(
+        gdf_rank = zones.assign(value=values.astype(int)).sort_values(
             "value", ascending=False
         )
         return Raster.rasterize_geometries(
-            ranked.geometry, ranked["value"], shape, geotransform, wkt, False, np.uint8
+            gdf_rank.geometry,
+            gdf_rank["value"],
+            shape,
+            geotransform,
+            wkt,
+            False,
+            np.uint8,
         )
 
     @staticmethod
@@ -3437,36 +3446,36 @@ class Config:
         cfg["country"] = countries[country]
         cfg["country_code"] = country
         cfg["used_keys"] = list(keys)
-        errors = []
+        list_err = []
         for key in keys:
             kind = Config.SCHEMA.get(key)
             if kind is None:
-                errors.append(f"{key}: not a known configuration key")
+                list_err.append(f"{key}: not a known configuration key")
                 continue
             try:
                 value = Config.get(cfg, key)
             except (KeyError, TypeError):
-                errors.append(f"{key}: missing")
+                list_err.append(f"{key}: missing")
                 continue
             checked, problem = Config._check_value(kind, value)
             if problem:
-                errors.append(f"{key}: {problem}")
+                list_err.append(f"{key}: {problem}")
                 continue
             if key in Config.ALLOWED and checked not in Config.ALLOWED[key]:
-                errors.append(
+                list_err.append(
                     f"{key}: {checked!r} not in {sorted(Config.ALLOWED[key])}"
                 )
             node = cfg
-            parts = key.split(".")
-            for part in parts[:-1]:
+            list_part = key.split(".")
+            for part in list_part[:-1]:
                 node = node[part]
-            node[parts[-1]] = checked
-        if not errors:
-            errors = Config._check_consistency(cfg, set(keys))
-        if errors:
+            node[list_part[-1]] = checked
+        if not list_err:
+            list_err = Config._check_consistency(cfg, set(keys))
+        if list_err:
             raise SystemExit(
                 f"Invalid configuration {path} (country {country}):\n  - "
-                + "\n  - ".join(errors)
+                + "\n  - ".join(list_err)
             )
         return cfg
 
@@ -3504,11 +3513,11 @@ class Config:
         if kind in ("paths", "opt_paths"):
             if not isinstance(value, (str, list)):
                 return value, "expected a path or a list of paths"
-            paths = Config.as_list(value)
-            if not paths and kind == "paths":
-                return paths, "at least one path is required"
-            missing = [p for p in paths if not exists(p)]
-            return paths, f"file(s) not found: {missing}" if missing else None
+            list_path = Config.as_list(value)
+            if not list_path and kind == "paths":
+                return list_path, "at least one path is required"
+            list_miss = [p for p in list_path if not exists(p)]
+            return list_path, f"file(s) not found: {list_miss}" if list_miss else None
         if kind in ("int_list", "float_list"):
             if not isinstance(value, list) or not all(
                 isinstance(v, numeric) and not isinstance(v, bool) for v in value
@@ -3531,61 +3540,63 @@ class Config:
 
     @staticmethod
     def _check_consistency(cfg, keys):
-        errors = []
+        list_err = []
         c = cfg["country"]
         if "country.working_resolution_m" in keys and c["working_resolution_m"] <= 0:
-            errors.append("country.working_resolution_m must be positive")
+            list_err.append("country.working_resolution_m must be positive")
         if {"country.unit_core_size_m", "country.working_resolution_m"} <= keys:
             if c["unit_core_size_m"] < 2 * c["working_resolution_m"]:
-                errors.append(
+                list_err.append(
                     "country.unit_core_size_m must be at least two working cells"
                 )
         if {"country.unit_halo_m", "country.corridor_buffer_m"} <= keys:
             if c["unit_halo_m"] < c["corridor_buffer_m"]:
                 # A core cell may lie corridor_buffer_m from its river; HAND needs that river inside the window.
-                errors.append(
+                list_err.append(
                     "country.unit_halo_m must be at least country.corridor_buffer_m, otherwise "
                     "cells of a core can have their river outside the unit window"
                 )
         if "general.n_workers" in keys and cfg["general"]["n_workers"] < 1:
-            errors.append("general.n_workers must be at least 1")
+            list_err.append("general.n_workers must be at least 1")
         if (
             "country.merge_overlap_ratio" in keys
             and not 0 < c["merge_overlap_ratio"] <= 1
         ):
-            errors.append("country.merge_overlap_ratio must be in (0, 1]")
+            list_err.append("country.merge_overlap_ratio must be in (0, 1]")
         if "benchmark.window_px" in keys and cfg["benchmark"]["window_px"] < 1:
-            errors.append("benchmark.window_px must be positive")
+            list_err.append("benchmark.window_px must be positive")
         rp = c.get("rp", {})
         if {
             "country.rp.distribution_classes",
             "country.rp.distribution_shares",
         } <= keys:
             if len(rp["distribution_classes"]) != len(rp["distribution_shares"]):
-                errors.append(
+                list_err.append(
                     "rp.distribution_classes and rp.distribution_shares differ in length"
                 )
             elif abs(sum(rp["distribution_shares"]) - 1.0) > 1e-6:
-                errors.append("rp.distribution_shares must sum to 1")
+                list_err.append("rp.distribution_shares must sum to 1")
         if {"country.rp.cap_levels_m", "country.rp.cap_rp"} <= keys:
             if len(rp["cap_levels_m"]) != len(rp["cap_rp"]):
-                errors.append("rp.cap_levels_m and rp.cap_rp differ in length")
+                list_err.append("rp.cap_levels_m and rp.cap_rp differ in length")
             elif list(rp["cap_levels_m"]) != sorted(rp["cap_levels_m"]):
-                errors.append("rp.cap_levels_m must be ascending")
+                list_err.append("rp.cap_levels_m must be ascending")
         if "country.rp.classes" in keys and list(rp["classes"]) != sorted(
             set(rp["classes"])
         ):
-            errors.append("rp.classes must be strictly ascending")
+            list_err.append("rp.classes must be strictly ascending")
         if {"country.rp.classes", "country.rp.distribution_classes"} <= keys:
             if not set(rp["distribution_classes"]) <= set(rp["classes"]):
-                errors.append("rp.distribution_classes must be values of rp.classes")
+                list_err.append("rp.distribution_classes must be values of rp.classes")
         if {"country.rp.classes", "country.rp.cap_rp", "country.rp.max_rp"} <= keys:
             if not set(rp["cap_rp"]) | {rp["max_rp"]} <= set(rp["classes"]):
-                errors.append("rp.cap_rp and rp.max_rp must be values of rp.classes")
+                list_err.append("rp.cap_rp and rp.max_rp must be values of rp.classes")
         evidence = cfg.get("evidence", {})
         if {"evidence.f_dry_inside", "evidence.f_wet_inside"} <= keys:
             if not evidence["f_dry_inside"] < evidence["f_wet_inside"] <= 1:
-                errors.append("evidence: f_dry_inside < f_wet_inside <= 1 is required")
+                list_err.append(
+                    "evidence: f_dry_inside < f_wet_inside <= 1 is required"
+                )
         if {"evidence.upstream_ratio_min", "evidence.upstream_ratio_max"} <= keys:
             if (
                 not 0
@@ -3593,37 +3604,37 @@ class Config:
                 <= 1
                 <= evidence["upstream_ratio_max"]
             ):
-                errors.append(
+                list_err.append(
                     "evidence: upstream_ratio_min <= 1 <= upstream_ratio_max is required"
                 )
         if "evidence.river_level_percentile" in keys:
             if not 0 < evidence["river_level_percentile"] <= 100:
-                errors.append("evidence.river_level_percentile must be in (0, 100]")
+                list_err.append("evidence.river_level_percentile must be in (0, 100]")
         if (
             "evidence.hint_dry_share" in keys
             and not 0 < evidence["hint_dry_share"] <= 1
         ):
-            errors.append("evidence.hint_dry_share must be in (0, 1]")
+            list_err.append("evidence.hint_dry_share must be in (0, 1]")
         if "evidence.hint_exclusion_m" in keys and evidence["hint_exclusion_m"] < 0:
-            errors.append("evidence.hint_exclusion_m must not be negative")
+            list_err.append("evidence.hint_exclusion_m must not be negative")
         if (
             "sources.gfm_download_threads" in keys
             and cfg["sources"]["gfm_download_threads"] < 1
         ):
-            errors.append("sources.gfm_download_threads must be at least 1")
+            list_err.append("sources.gfm_download_threads must be at least 1")
         if (
             "sources.gfm_screen_resolution_m" in keys
             and cfg["sources"]["gfm_screen_resolution_m"] <= 0
         ):
-            errors.append("sources.gfm_screen_resolution_m must be positive")
+            list_err.append("sources.gfm_screen_resolution_m must be positive")
         if "country.context.order" in keys:
-            order = c["context"]["order"]
-            if sorted(order) != sorted(Config.CONTEXTS):
-                errors.append(
+            list_order = c["context"]["order"]
+            if sorted(list_order) != sorted(Config.CONTEXTS):
+                list_err.append(
                     f"context.order must list each of {list(Config.CONTEXTS)} exactly once"
                 )
-            elif order[-1] != "rural":
-                errors.append(
+            elif list_order[-1] != "rural":
+                list_err.append(
                     "context.order must end with rural (rural is the rest of the corridor)"
                 )
         lulc = c.get("lulc", {})
@@ -3634,7 +3645,7 @@ class Config:
                 if table == "worldcover_categories" and not (
                     str(code).isdigit() and 0 < int(code) < 256
                 ):
-                    errors.append(
+                    list_err.append(
                         f"lulc.worldcover_categories: class {code!r} is not a raster value 1-255"
                     )
                 if not (
@@ -3642,12 +3653,12 @@ class Config:
                     and category.replace("_", "").isalnum()
                     and category.isascii()
                 ):
-                    errors.append(
+                    list_err.append(
                         f"lulc.{table}: category {category!r} must be a name of letters, digits and _"
                     )
         if {"country.lulc.urban_atlas", "country.lulc.urban_atlas_class_field"} <= keys:
             if lulc["urban_atlas"] and not lulc["urban_atlas_class_field"]:
-                errors.append(
+                list_err.append(
                     "lulc.urban_atlas is set but lulc.urban_atlas_class_field is empty"
                 )
         for date_key in ["sources.gfm_date_from", "sources.gfm_date_to"]:
@@ -3656,23 +3667,23 @@ class Config:
                 try:
                     datetime.date.fromisoformat(value)
                 except ValueError:
-                    errors.append(f"{date_key} must be YYYY-MM-DD or empty")
+                    list_err.append(f"{date_key} must be YYYY-MM-DD or empty")
         if {"sources.glofas_first_year", "sources.glofas_last_year"} <= keys:
             if cfg["sources"]["glofas_first_year"] > cfg["sources"]["glofas_last_year"]:
-                errors.append(
+                list_err.append(
                     "sources.glofas_first_year must not exceed glofas_last_year"
                 )
         sources = cfg.get("sources", {})
         for subset in ["sources.osm_tags_closing", "sources.osm_tags_pumping"]:
             if {subset, "sources.osm_tags_hydraulic"} <= keys:
-                for key, values in sources[subset.split(".")[1]].items():
-                    known = sources["osm_tags_hydraulic"].get(key, [])
-                    if not set(values) <= set(known):
-                        errors.append(
-                            f"{subset}.{key} values {sorted(set(values) - set(known))} "
+                for key, list_val in sources[subset.split(".")[1]].items():
+                    list_known = sources["osm_tags_hydraulic"].get(key, [])
+                    if not set(list_val) <= set(list_known):
+                        list_err.append(
+                            f"{subset}.{key} values {sorted(set(list_val) - set(list_known))} "
                             "are not in sources.osm_tags_hydraulic"
                         )
-        return errors
+        return list_err
 
     @staticmethod
     def warn_placeholders(cfg, keys=None):
@@ -3803,9 +3814,9 @@ class Run:
         :param weights: relative cost per task, used for the ETA
         :return: (list of results, list of failed unit ids)
         """
-        results, failed = [], []
+        list_res, list_fail = [], []
         if not tasks:
-            return results, failed
+            return list_res, list_fail
         total = float(sum(weights)) or 1.0
         finished = 0.0
         start = time.perf_counter()
@@ -3825,14 +3836,14 @@ class Run:
                 finished += weight
                 try:
                     result = future.result()
-                    results.append(result)
+                    list_res.append(result)
                     message = result.get("summary", "")
                 except BrokenProcessPool as error:
-                    failed.append(task["unit_id"])
+                    list_fail.append(task["unit_id"])
                     message = f"worker process died ({error}); possibly out of memory"
                     logger.error("Unit %s: %s", task["unit_id"], message)
                 except Exception:
-                    failed.append(task["unit_id"])
+                    list_fail.append(task["unit_id"])
                     logger.exception("Unit %s failed", task["unit_id"])
                     message = "failed"
                 elapsed = time.perf_counter() - start
@@ -3843,13 +3854,13 @@ class Run:
                 )
                 logger.info(
                     "[%d/%d] %s | elapsed %s, ETA %s",
-                    len(results) + len(failed),
+                    len(list_res) + len(list_fail),
                     len(tasks),
                     message,
                     Run.format_seconds(elapsed),
                     Run.format_seconds(eta),
                 )
-        return results, failed
+        return list_res, list_fail
 
 
 class Http:
