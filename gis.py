@@ -1,6 +1,8 @@
 # Standard library imports
 import ctypes
+import datetime
 import heapq
+import json
 import logging
 import multiprocessing
 import os
@@ -9,6 +11,7 @@ import sys
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
@@ -1078,6 +1081,7 @@ class Raster:
         overview="AUTO",
         multithread=True,
         dst_wkt=None,
+        src_nodata=None,
     ):
         """
         Reads a map window resampled to a grid aligned with bounds (gdal.Warp to MEM).
@@ -1085,13 +1089,15 @@ class Raster:
         resolution; use "NONE" for resampling methods such as max that overviews
         built with AVERAGE cannot reproduce.
         :param in_raster: raster path or open dataset
-        :param bounds: (xmin, ymin, xmax, ymax) in the raster CRS, multiples of resolution
+        :param bounds: (xmin, ymin, xmax, ymax) in the output CRS (dst_wkt, else the
+                       raster CRS), multiples of resolution
         :param resolution: output cell size
         :param resample: GDAL resampling algorithm
         :param warp_memory_mb: warp working buffer in MB
         :param overview: "AUTO", "NONE" or overview index
         :param multithread: warp with a worker thread (GDAL_NUM_THREADS)
         :param dst_wkt: target CRS as WKT when it differs from the source CRS
+        :param src_nodata: source nodata value overriding the band's own
         :return: (float32 array with NaN as nodata, geotransform)
         """
         ds = (
@@ -1112,7 +1118,9 @@ class Raster:
             "warpMemoryLimit": warp_memory_mb,
             "overviewLevel": overview,
         }
-        if band.GetNoDataValue() is not None:
+        if src_nodata is not None:
+            kwargs["srcNodata"] = src_nodata
+        elif band.GetNoDataValue() is not None:
             kwargs["srcNodata"] = band.GetNoDataValue()
         if dst_wkt:
             kwargs["dstSRS"] = dst_wkt
@@ -2973,6 +2981,51 @@ class Config:
         "sources.ghsl_tile_field": "str",
         "sources.ghsl_epoch": "int",
         "sources.ghsl_nodata_as_zero": "bool",
+        "country.validation_extent": "opt_paths",
+        "sources.gfm_stac_url": "str",
+        "sources.gfm_collection": "str",
+        "sources.gfm_assets": "table",
+        "sources.gfm_date_from": "str",
+        "sources.gfm_date_to": "str",
+        "sources.gfm_page_limit": "int",
+        "sources.gfm_token_env": "str",
+        "sources.gfm_screen_resolution_m": "float",
+        "sources.gfm_download_threads": "int",
+        "sources.gfm_flood_values": "int_list",
+        "sources.gfm_exclusion_values": "int_list",
+        "sources.gfm_reference_water_values": "int_list",
+        "sources.gfm_nodata_values": "int_list",
+        "sources.glofas_enabled": "bool",
+        "sources.glofas_dataset_id": "str",
+        "sources.glofas_request": "table",
+        "sources.glofas_time_keys": "table",
+        "sources.glofas_area_key": "str",
+        "sources.glofas_first_year": "int",
+        "sources.glofas_last_year": "int",
+        "sources.glofas_file_extension": "str",
+        "sources.glofas_files": "opt_paths",
+        "sources.glofas_discharge_variable": "str",
+        "sources.glofas_upstream_area_file": "opt_path",
+        "sources.glofas_upstream_area_url": "str",
+        "sources.glofas_upstream_area_variable": "str",
+        "sources.glofas_upstream_area_to_km2": "float",
+        "sources.glofas_min_upstream_area_km2": "float",
+        "sources.glofas_min_days_per_year": "int",
+        "sources.glofas_valid_time_ends_day": "bool",
+        "evidence.comparison_distance_m": "float",
+        "evidence.min_valid_pixels": "int",
+        "evidence.f_wet_comparison": "float",
+        "evidence.f_dry_inside": "float",
+        "evidence.f_wet_inside": "float",
+        "evidence.flooded_window_days": "int",
+        "evidence.glofas_search_radius_km": "float",
+        "evidence.upstream_ratio_min": "float",
+        "evidence.upstream_ratio_max": "float",
+        "evidence.river_level_percentile": "float",
+        "evidence.hint_margin_m": "float",
+        "evidence.hint_dry_share": "float",
+        "evidence.hint_min_scenes": "int",
+        "evidence.hint_exclusion_m": "float",
     }
     ALLOWED = {
         "country.dtm_conversion": {"A", "B"},
@@ -3167,6 +3220,52 @@ class Config:
         if {"country.rp.classes", "country.rp.cap_rp", "country.rp.max_rp"} <= keys:
             if not set(rp["cap_rp"]) | {rp["max_rp"]} <= set(rp["classes"]):
                 errors.append("rp.cap_rp and rp.max_rp must be values of rp.classes")
+        evidence = cfg.get("evidence", {})
+        if {"evidence.f_dry_inside", "evidence.f_wet_inside"} <= keys:
+            if not evidence["f_dry_inside"] < evidence["f_wet_inside"] <= 1:
+                errors.append("evidence: f_dry_inside < f_wet_inside <= 1 is required")
+        if {"evidence.upstream_ratio_min", "evidence.upstream_ratio_max"} <= keys:
+            if (
+                not 0
+                < evidence["upstream_ratio_min"]
+                <= 1
+                <= evidence["upstream_ratio_max"]
+            ):
+                errors.append(
+                    "evidence: upstream_ratio_min <= 1 <= upstream_ratio_max is required"
+                )
+        if "evidence.river_level_percentile" in keys:
+            if not 0 < evidence["river_level_percentile"] <= 100:
+                errors.append("evidence.river_level_percentile must be in (0, 100]")
+        if (
+            "evidence.hint_dry_share" in keys
+            and not 0 < evidence["hint_dry_share"] <= 1
+        ):
+            errors.append("evidence.hint_dry_share must be in (0, 1]")
+        if "evidence.hint_exclusion_m" in keys and evidence["hint_exclusion_m"] < 0:
+            errors.append("evidence.hint_exclusion_m must not be negative")
+        if (
+            "sources.gfm_download_threads" in keys
+            and cfg["sources"]["gfm_download_threads"] < 1
+        ):
+            errors.append("sources.gfm_download_threads must be at least 1")
+        if (
+            "sources.gfm_screen_resolution_m" in keys
+            and cfg["sources"]["gfm_screen_resolution_m"] <= 0
+        ):
+            errors.append("sources.gfm_screen_resolution_m must be positive")
+        for date_key in ["sources.gfm_date_from", "sources.gfm_date_to"]:
+            value = cfg.get("sources", {}).get(date_key.split(".")[1], "")
+            if date_key in keys and value:
+                try:
+                    datetime.date.fromisoformat(value)
+                except ValueError:
+                    errors.append(f"{date_key} must be YYYY-MM-DD or empty")
+        if {"sources.glofas_first_year", "sources.glofas_last_year"} <= keys:
+            if cfg["sources"]["glofas_first_year"] > cfg["sources"]["glofas_last_year"]:
+                errors.append(
+                    "sources.glofas_first_year must not exceed glofas_last_year"
+                )
         sources = cfg.get("sources", {})
         for subset in ["sources.osm_tags_closing", "sources.osm_tags_pumping"]:
             if {subset, "sources.osm_tags_hydraulic"} <= keys:
@@ -3359,6 +3458,46 @@ class Run:
 
 class Http:
     @staticmethod
+    def get_json(
+        url, params=None, body=None, retries=4, pause_s=1.0, headers=None, timeout_s=120
+    ):
+        """
+        JSON request with retries and exponential backoff: GET with query parameters, or
+        POST of a JSON body (e.g. STAC item search and its "next" links)
+        :param url: endpoint
+        :param params: query parameters for GET (lists are joined with commas)
+        :param body: JSON body; sent with POST when given
+        :return: decoded JSON
+        """
+        headers = dict(headers or {})
+        if params:
+            query = urllib.parse.urlencode(
+                {
+                    k: ",".join(map(str, v)) if isinstance(v, (list, tuple)) else v
+                    for k, v in params.items()
+                }
+            )
+            url = f"{url}{'&' if '?' in url else '?'}{query}"
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers.setdefault("Content-Type", "application/json")
+        for attempt in range(retries + 1):
+            try:
+                request = urllib.request.Request(url, data=data, headers=headers)
+                with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                    return json.loads(response.read().decode())
+            except (urllib.error.URLError, OSError, ValueError) as error:
+                if attempt == retries:
+                    raise RuntimeError(f"Request to {url} failed: {error}") from error
+                wait = pause_s * 2**attempt
+                log.warning(
+                    "Request to %s failed (%s); retry in %.0f s.", url, error, wait
+                )
+                time.sleep(wait)
+        return None
+
+    @staticmethod
     def download(url, path, retries=4, pause_s=1.0, headers=None, timeout_s=120):
         """
         Downloads url to path through a temporary file. Skipped when path exists with
@@ -3415,6 +3554,34 @@ class Http:
 
 
 class Stats:
+    @staticmethod
+    def gumbel_lmoments(sample):
+        """
+        Gumbel (EV1) parameters from L-moments: alpha = l2 / ln 2, xi = l1 - gamma * alpha
+        (gamma = Euler-Mascheroni constant, 0.5772...)
+        :param sample: annual maxima
+        :return: (xi, alpha); NaN when fewer than two finite values
+        """
+        x = np.sort(np.asarray(sample, dtype=float)[np.isfinite(sample)])
+        n = len(x)
+        if n < 2:
+            return float("nan"), float("nan")
+        b0 = x.mean()
+        b1 = np.sum(np.arange(n) / (n - 1) * x) / n
+        l2 = 2 * b1 - b0
+        alpha = l2 / np.log(2.0)
+        return float(b0 - np.euler_gamma * alpha), float(alpha)
+
+    @staticmethod
+    def gumbel_rp(q, xi, alpha):
+        """
+        Return period of q under a Gumbel distribution: 1 / (1 - exp(-exp(-(q - xi) / alpha)))
+        :return: float or array (inf where the non-exceedance probability rounds to 1)
+        """
+        with np.errstate(over="ignore", divide="ignore"):
+            exceedance = -np.expm1(-np.exp(-(np.asarray(q, dtype=float) - xi) / alpha))
+            return 1.0 / exceedance
+
     @staticmethod
     def percentile_rank(values):
         """

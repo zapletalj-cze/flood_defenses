@@ -7,10 +7,15 @@ platforms = ["win-64"]
 [dependencies]
 python = ">=3.11"
 gdal = ">=3.11"
+# GDAL drivers packaged as plugins on conda-forge: NetCDF and GRIB (GloFAS discharge and upstream area)
+libgdal-netcdf = "*"
+libgdal-grib = "*"
 numpy = "*"
 scipy = "*"
 numba = "*"
 geopandas = ">=1.0"
+# already used by gis.py; 2.0 or newer for ISO 8601 date parsing
+pandas = ">=2.0"
 shapely = ">=2.0"
 pyproj = "*"
 # required by the existing import in gis.py (depends on affine, numba, numpy, scipy; no rasterio)
@@ -26,6 +31,12 @@ download-osm = "python -m download.download_osm"
 osm-hydraulics = "python -m processing.osm_hydraulics"
 download-ghsl = "python -m download.download_ghsl"
 rp-index = "python -m processing.rp_index"
+download-gfm = "python -m download.download_gfm"
+gfm-evidence = "python -m processing.gfm_evidence"
+download-glofas = "python -m download.download_glofas"
+rp-bounds = "python -m processing.rp_bounds"
+validate = "python -m processing.validate"
 test-pipeline = "python -m tests.test_pipeline"
 test-stage-b = "python -m tests.test_stage_b"
+test-stage-c = "python -m tests.test_stage_c"
 make-benchmark-world = "python -m tests.make_benchmark_world"

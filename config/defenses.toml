@@ -17,6 +17,15 @@ placeholders = [
     "evidence.f_wet_inside",
     "evidence.upstream_ratio_min",
     "evidence.upstream_ratio_max",
+    "evidence.hint_margin_m",
+    "evidence.hint_dry_share",
+    "evidence.hint_min_scenes",
+    "evidence.hint_exclusion_m",
+    "sources.gfm_flood_values",
+    "sources.gfm_exclusion_values",
+    "sources.gfm_reference_water_values",
+    "sources.gfm_nodata_values",
+    "sources.glofas_valid_time_ends_day",
 ]
 
 [general]
@@ -43,6 +52,7 @@ river_upstream_area_field = ""  # column with upstream area in km2, or ""
 upstream_area_raster = ""       # alternative upstream area source, or ""
 reference_protected_areas = []  # optional, validation only
 reference_rp_field = ""         # optional
+validation_extent = []          # optional polygons; validate.py clips both layers to them
 overrides = ""                  # optional point file with columns rp and note
 working_resolution_m = 5.0      # processing grid; terrain is averaged from the native DTM
 corridor_buffer_m = 3000.0      # river buffer defining the processed corridor
@@ -107,12 +117,45 @@ ghsl_tile_schema = ""
 ghsl_tile_field = ""
 ghsl_epoch = 0                  # 0 = latest epoch not after the current year that the server provides
 ghsl_nodata_as_zero = true      # GHSL nodata (ocean, outside coverage) counts as no building volume
-gfm_stac_url = ""               # NOT VERIFIED: GFM STAC API endpoint
+# Copernicus GFM through its STAC API (plain HTTP + JSON). NOT VERIFIED: the EODC documentation found by search
+# names https://stac.eodc.eu/api/v1 and the collection "GFM", and assets such as "ensemble_flood_extent",
+# "reference_water_mask", "ensemble_likelihood"; the exclusion-mask asset name was not confirmed. The service
+# could not be reached from the development session; confirm all names before filling them in.
+gfm_stac_url = ""
+gfm_collection = ""
+gfm_assets = { flood = "", exclusion = "", reference_water = "", likelihood = "" }
 gfm_date_from = "2015-01-01"
-gfm_date_to = ""
+gfm_date_to = ""                # empty = until today
+gfm_page_limit = 100            # items per STAC page
+gfm_token_env = ""              # environment variable holding a bearer token, if the service requires one
+gfm_screen_resolution_m = 100.0 # flood extent screened at this resolution before a scene is downloaded
+gfm_download_threads = 4        # scenes screened and copied at the same time (network-bound)
+# Pixel conventions of the GFM layers (placeholders: confirm in the GFM Product User Manual).
+gfm_flood_values = [1]
+gfm_exclusion_values = [1]
+gfm_reference_water_values = [1]
+gfm_nodata_values = [255]
+# GloFAS historical discharge from the CEMS Early Warning Data Store (EWDS). The dataset id is from the EWDS
+# catalogue page. The request (all keys except time and area) is pasted from the "Show API request" button of the
+# EWDS form; downloading needs the cdsapi client (not part of the environment; see README). Alternatively list
+# downloaded files in glofas_files.
 glofas_enabled = true
-glofas_dataset_id = ""          # NOT VERIFIED: EWDS dataset identifier
+glofas_dataset_id = "cems-glofas-historical"
+glofas_request = {}
+glofas_time_keys = { year = "hyear", month = "hmonth", day = "hday" }   # to confirm against the EWDS form
+glofas_area_key = "area"        # bounding box as [north, west, south, east]
+glofas_first_year = 1979
+glofas_last_year = 2024
+glofas_file_extension = "grib"  # extension of the downloaded files (grib or nc)
+glofas_files = []               # local discharge files (GRIB or NetCDF) instead of the download
+glofas_discharge_variable = ""  # NetCDF variable of daily discharge (empty for GRIB); NOT VERIFIED
+glofas_upstream_area_file = ""  # local upstream area file (static map)
+glofas_upstream_area_url = ""   # NOT VERIFIED: URL of the static upstream area map
+glofas_upstream_area_variable = ""   # NetCDF variable of the upstream area; NOT VERIFIED
+glofas_upstream_area_to_km2 = 1e-6   # m2 -> km2; check the units attribute of your upstream area file
 glofas_min_upstream_area_km2 = 0   # placeholder
+glofas_min_days_per_year = 330  # annual maxima only from years with at least this many days
+glofas_valid_time_ends_day = true   # placeholder: a 24 h value stamped at 00 UTC belongs to the previous day
 osm_tags_hydraulic = { waterway = ["sluice_gate", "lock_gate", "weir", "dam"], man_made = ["pumping_station"] }
 osm_tags_drains = { waterway = ["drain", "ditch", "canal"] }
 osm_tags_closing = { waterway = ["sluice_gate", "lock_gate"] }   # structures that close a river at a levee crossing
@@ -128,3 +171,8 @@ flooded_window_days = 3
 glofas_search_radius_km = 5.0
 upstream_ratio_min = 0.7        # placeholder
 upstream_ratio_max = 1.3        # placeholder
+river_level_percentile = 90.0   # scene water level in HAND for missing-barrier hints
+hint_margin_m = 0.5             # placeholder: a cell is clearly below the scene level by this margin
+hint_dry_share = 0.8            # placeholder: share of tested scenes in which a hint cell stays dry
+hint_min_scenes = 3             # placeholder: minimum number of tested scenes per hint cell
+hint_exclusion_m = 40.0         # placeholder: cells this close to a barrier line or compartment are not tested

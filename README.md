@@ -3,8 +3,10 @@
 The package derives **compartments**: areas protected by flood levees. Each compartment
 gets a return period (RP) of protection. The layer clips fluvial hazard maps in
 post-processing, so it is built **only from terrain, levee lines, the river network and
-free open data** (OpenStreetMap, GHSL; GFM and GloFAS in Stage C). No hazard map, hydraulic
-model output, local hazard dataset or FABDEM is used anywhere.
+free open data** (OpenStreetMap, GHSL, Copernicus GFM and GloFAS). No hazard map, hydraulic
+model output, local hazard dataset or FABDEM is used anywhere. Satellite flood extents
+(GFM) and reanalysed discharge (GloFAS) enter only as *observations* that bound the
+modelled return period; they never draw a compartment.
 
 **Error priority: recall.** When the evidence is ambiguous, a compartment is kept rather
 than dropped. Every design choice below that trades precision for recall says so
@@ -15,7 +17,7 @@ explicitly.
 | A | `gis.py` additions, `prepare_dtm.py`, `build_units.py`, `compartments.py` | done, tested, benchmarked |
 | A+ | faster kernels; fixes B1–B4; gap filling for water surfaces | done, tested, benchmarked |
 | B | `download_osm.py`, `osm_hydraulics.py`, `download_ghsl.py`, `rp_index.py` | done, tested on synthetic data; download URLs not verified |
-| C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | not started |
+| C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (25 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
 
 ---
 
@@ -30,10 +32,13 @@ explicitly.
 7. [Parallel processing, checkpoints, merging](#7-parallel-processing-checkpoints-merging)
 8. [Water sources and pumping stations from OpenStreetMap](#8-water-sources-and-pumping-stations-from-openstreetmap)
 9. [Return period index](#9-return-period-index)
-10. [Measured performance](#10-measured-performance)
-11. [Tests](#11-tests)
-12. [Bugs, fixes, limitations, open decisions](#12-bugs-fixes-limitations-open-decisions)
-13. [Data sources and licences](#13-data-sources-and-licences)
+10. [Observational evidence: Copernicus GFM](#10-observational-evidence-copernicus-gfm)
+11. [Observed bounds of the return period: GloFAS](#11-observed-bounds-of-the-return-period-glofas)
+12. [Validation](#12-validation)
+13. [Measured performance](#13-measured-performance)
+14. [Tests](#14-tests)
+15. [Bugs, fixes, limitations, open decisions](#15-bugs-fixes-limitations-open-decisions)
+16. [Data sources and licences](#16-data-sources-and-licences)
 
 ---
 
@@ -45,8 +50,11 @@ explicitly.
 CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
 FORCE = False   # recompute finished units / footprint / conversion / extraction
-UNITS = []      # compartments.py, rp_index.py: selected unit ids, empty = all
+UNITS = []      # compartments.py, rp_index.py, download_gfm.py, gfm_evidence.py: selected units, empty = all
 ```
+
+`gfm_evidence.py` has three more: `HINTS` (missing-barrier hints, §10.3) and `DATE_FROM`,
+`DATE_TO` (restrict the run to the scenes of one flood event).
 
 Everything else comes from the TOML configuration: data paths, thresholds, resolutions,
 URLs and tag lists. Code holds no paths, CRS, URLs or thresholds.
@@ -60,10 +68,11 @@ working directory on `sys.path`, so `import gis` works without `sys.path` manipu
 packaging:
 
 ```
-pixi run prepare-dtm        pixi run download-osm       pixi run test-kernels
-pixi run build-units        pixi run osm-hydraulics     pixi run test-pipeline
-pixi run compartments       pixi run download-ghsl      pixi run test-stage-b
-                            pixi run rp-index
+pixi run prepare-dtm        pixi run download-osm       pixi run download-gfm       pixi run test-kernels
+pixi run build-units        pixi run osm-hydraulics     pixi run gfm-evidence       pixi run test-pipeline
+pixi run compartments       pixi run download-ghsl      pixi run download-glofas    pixi run test-stage-b
+                            pixi run rp-index           pixi run rp-bounds          pixi run test-stage-c
+                                                        pixi run validate
 ```
 
 `pixi run python -m processing.compartments` works the same way. Running a script by its
@@ -74,11 +83,16 @@ instead of the root.
 - `python ≥ 3.11` (for `tomllib` and `ProcessPoolExecutor(max_tasks_per_child)`),
 - `gdal ≥ 3.11` (`MEM` vector datasets; the OSM driver; SpatiaLite SQL for the OSM
   extraction),
+- `libgdal-netcdf`, `libgdal-grib`: GDAL's NetCDF and GRIB drivers, which conda-forge
+  ships as separate plugin packages (GloFAS files),
 - `numpy`, `scipy`, `numba`, `geopandas ≥ 1.0`, `shapely ≥ 2.0`, `pyproj`,
+- `pandas ≥ 2.0` (already used by `gis.py`; 2.0 for ISO 8601 date parsing),
 - `pyflwdir`, only because the existing `gis.py` imports it (it depends on affine,
   numba, numpy and scipy, not on rasterio).
 
-Downloads use the standard library (`urllib`). No rasterio-based library is used.
+Downloads and the STAC search use the standard library (`urllib`). No rasterio-based
+library is used. `cdsapi` is **not** part of the environment: `download_glofas.py` uses it
+only if you install it (§11.1); otherwise it reads files downloaded through the EWDS form.
 
 ## 2. Repository layout
 
@@ -89,18 +103,23 @@ config/osmconf.ini         OSM driver configuration exposing the tag keys used
 download/
   download_osm.py          Geofabrik extract -> hydraulic points, drains (single-layer GeoPackages)
   download_ghsl.py         GHSL building volume tiles -> VRT mosaics
+  download_gfm.py          GFM scene search (STAC), screening, clipped layers per unit
+  download_glofas.py       GloFAS daily discharge and upstream area -> compact cell series
 processing/
   prepare_dtm.py           DTM inspection, footprint, benchmark, estimates, optional conversion
   build_units.py           river corridor, processing units, memory estimate
   osm_hydraulics.py        water sources (closed streams), pumping stations
   compartments.py          per-unit compartments in parallel, checkpoints, merging
   rp_index.py              exposure, score, RP per compartment
+  gfm_evidence.py          held / flooded tests per compartment and scene; missing-barrier hints
+  rp_bounds.py             event return periods, observed bounds, combination with the model
+  validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
 tests/
   test_kernels.py          numba kernels on small grids (16 checks)
   test_pipeline.py         end-to-end synthetic countries for Stage A (40 checks)
   test_stage_b.py          end-to-end synthetic country for Stage B (20 checks)
+  test_stage_c.py          end-to-end Stage C on the Stage B country (25 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
-validate_defenses.py       existing validation script (moves to processing/validate.py in Stage C)
 download_nld.py            US National Levee Database download (optional)
 ```
 
@@ -112,7 +131,7 @@ function was modified. The only change to existing lines is the import block.
 | Class | Function | Purpose |
 |---|---|---|
 | `Raster` | `inspect`, `build_vrt` | Storage properties of a raster; VRT over several DTMs (stops on a CRS mismatch) |
-| `Raster` | `read_window(src, bounds, res, resample, warp_mb, overview, multithread, dst_wkt)` | `gdal.Warp` of a map window to MEM, optionally reprojected |
+| `Raster` | `read_window(src, bounds, res, resample, warp_mb, overview, multithread, dst_wkt, src_nodata)` | `gdal.Warp` of a map window to MEM, optionally reprojected; `src_nodata` overrides the file's nodata (GFM layers) |
 | `Raster` | `read_native(src, bounds)` | Direct read of native pixels |
 | `Raster` | `array_to_mem`, `write_array`, `best_compression` | Array ↔ GDAL; tiled compressed GeoTIFF; ZSTD → DEFLATE fallback |
 | `Raster` | `rasterize_geometries`, `polygonize_labels`, `fill_nodata_cells`, `footprint` | Burn geometries; label raster → polygons; `gdal.FillNodata` on selected cells; valid-data footprint |
@@ -123,7 +142,9 @@ function was modified. The only change to existing lines is the import block.
 | `Config` | `load`, `get`, `as_list`, `warn_placeholders` | TOML reading and validation |
 | `Run` | `env_overrides`, `logger`, `peak_rss_mb`, `configure_gdal`, `run_units`, `format_seconds` | Run variables, run logs, memory measurement (Linux/macOS/Windows), process pool |
 | `Http` | `download(url, path, retries, pause_s, headers)` | urllib download with size check, skip and backoff; `file://` supported |
+| `Http` | `get_json(url, params, body, retries, pause_s, headers)` | JSON GET with query parameters or POST of a JSON body, with backoff (STAC search and its `next` links) |
 | `Stats` | `percentile_rank`, `quantile_classes` | Ranks and quantile mapping for the RP score |
+| `Stats` | `gumbel_lmoments(sample)`, `gumbel_rp(q, xi, alpha)` | Gumbel fit by L-moments; return period of a discharge |
 
 ## 3. Configuration
 
@@ -165,13 +186,22 @@ Keys beyond the original schema, with the reason for each:
 | `country.geofabrik_region`, `osm_pbf`, `endpoint_elevation_radius_m` | OSM extract and downstream-end detection (§8) |
 | `compartments.touch_tolerance_m`, `self_close_min_length_factor` | Former code constants of the bridging |
 | `compartments.gated_crossings`, `fill_nodata_holes` | Former command-line switches |
-| `compartments.stream_burn_m`, `stream_burn_buffer_m` | B1 fix (§12.1) |
+| `compartments.stream_burn_m`, `stream_burn_buffer_m` | B1 fix (§15.1) |
 | `compartments.preserve_river_cells` | B2 fix |
 | `compartments.cap_river_holes`, `max_fill_distance_m` | Gap filling for water surfaces (§5.5) |
 | `rp.value_total_tolerance` | Tolerance of the value-warp totals check (spec: 1 %) |
 | `sources.request_pause_s`, `max_retries` | Polite downloads with backoff |
 | `sources.osm_tags_closing`, `osm_tags_pumping` | Which hydraulic structures close a river or pump water |
 | `sources.ghsl_url_templates` (table `total`, `non_residential`), `ghsl_tile_schema`, `ghsl_tile_field`, `ghsl_nodata_as_zero` | GHSL tiles; a table instead of the list in the original schema, so that products cannot be swapped |
+| `country.validation_extent` | Optional area where the reference is complete; recall and precision outside it are meaningless |
+| `sources.gfm_collection`, `gfm_assets` (table `flood`, `exclusion`, `reference_water`, `likelihood`), `gfm_page_limit`, `gfm_token_env` | STAC collection, asset keys per role, page size, name of the environment variable holding an access token (never the token itself) |
+| `sources.gfm_screen_resolution_m`, `gfm_download_threads` | Resolution of the screening read; scenes screened at the same time (§10.1) |
+| `sources.gfm_flood_values`, `gfm_exclusion_values`, `gfm_reference_water_values`, `gfm_nodata_values` | Pixel codes of the GFM layers; placeholders until checked against the product description |
+| `sources.glofas_request` (table), `glofas_time_keys`, `glofas_area_key`, `glofas_first_year`, `glofas_last_year`, `glofas_file_extension` | The request pasted from the EWDS form; the script only adds time and area |
+| `sources.glofas_files`, `glofas_discharge_variable`, `glofas_upstream_area_file`, `glofas_upstream_area_url`, `glofas_upstream_area_variable`, `glofas_upstream_area_to_km2` | Local GRIB or NetCDF files; the upstream area map and its unit |
+| `sources.glofas_min_days_per_year` | A year enters the annual maxima only if it is nearly complete |
+| `sources.glofas_valid_time_ends_day` | Day attribution of daily values stamped at the end of their period (§11.1) |
+| `evidence.river_level_percentile`, `hint_margin_m`, `hint_dry_share`, `hint_min_scenes`, `hint_exclusion_m` | Missing-barrier hints (§10.3); the specification fixed 90 % and "most scenes" in words |
 
 ## 4. Run order and outputs
 
@@ -185,6 +215,11 @@ Keys beyond the original schema, with the reason for each:
 | 6 | `compartments.py` (first two units, then all) | per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `compartments.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `compartments.gpkg`, `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
 | 7 | `download_ghsl.py` | `ghsl_total.vrt`, `ghsl_non_residential.vrt`, `ghsl_sources.json` |
 | 8 | `rp_index.py` | per unit `rp_index.csv`, `rp_index.json`; merged `compartments_rp.gpkg` |
+| 9 | `download_gfm.py` | `work/<c>/gfm/screening.csv` (checkpoint), clipped layers in `work/<c>/gfm/<unit>/`, `gfm_index.csv` |
+| 10 | `gfm_evidence.py` | per unit `gfm_evidence.csv` (and `missing_barrier_hints.gpkg`); merged `gfm_evidence.csv`, `gfm_evidence.gpkg`, `missing_barrier_hints.gpkg` |
+| 11 | `download_glofas.py` | `glofas_discharge.npz`; yearly downloads in `work/<c>/glofas/` |
+| 12 | `rp_bounds.py` | `compartments_rp.gpkg` updated: `glofas_*` match, observed bounds, combined `rp`, `*_prior` model values |
+| 13 | `validate.py` | `validation.json`, `validation_coverage.gpkg`, `validation_rp_confusion.csv` |
 
 Run logs go to `output_dir/<country>/logs/<script>_<timestamp>.log`.
 
@@ -277,7 +312,7 @@ that cross a levee are interpolated, because there the DTM shows the levee body.
    - **Tapered stream burning** (B1): river cells are lowered by `stream_burn_m`,
      decreasing linearly to 0 at `stream_burn_buffer_m` (chamfer distance). This gives
      every channel cell a gradient towards the rasterized river; without it, D8 paths
-     run along the channel and reach the river only at its lowest point (§12.1).
+     run along the channel and reach the river only at its lowest point (§15.1).
    - **Complete breaching:** a priority flood from the river cells. A pit is carved back
      towards the outlet and then processed through a plain queue, because it lies below
      every queued cell. Flats get an ε gradient (1e-5 m).
@@ -387,7 +422,7 @@ handlers are separate per thread.
 
 **Why layout matters.** In a strip layout (block height below 64, or block width equal
 to the raster width) without overviews, every warp decodes every native pixel. Measured
-per 30 M-cell unit (§10): terrain read **8–9 s** in strip layout, **1.7–2.3 s** after
+per 30 M-cell unit (§13): terrain read **8–9 s** in strip layout, **1.7–2.3 s** after
 conversion option A.
 
 Conversion only runs with `convert_dtm = true`. Both options read the source once,
@@ -582,7 +617,7 @@ should be split at confluences.
    - `rp_source = "cap"` when the cap or `max_rp` lowered the model value, or when there
      is no model value (`no_levee`); otherwise `"model"`.
    - A `no_levee` compartment without an applicable cap therefore gets `max_rp`, as the
-     specification says ("from the cap only"). See the open decisions (§12.4).
+     specification says ("from the cap only"). See the open decisions (§15.4).
 7. **Interval:**
    - `rp_low` = the previous value in `classes` (the same value if `rp` is the lowest);
    - `rp_high` = the next value in `classes`, bounded by `rp_cap` and `max_rp`, never
@@ -591,12 +626,310 @@ should be split at confluences.
    with `rp_low = rp_high = rp` and `rp_source = "override"`. If points disagree, the
    first is used and a warning is logged.
 9. **Stage C columns.** `obs_rp_low`, `obs_rp_high`, `n_held`, `n_flooded`,
-   `obs_conflict` and `model_obs_conflict` are present and empty, to be filled by
-   `rp_bounds.py`. `value_exposed` is an added column.
+   `obs_conflict` and `model_obs_conflict` are present and empty; `rp_bounds.py` fills
+   them (§11). `value_exposed` is an added column.
 
-## 10. Measured performance
+## 10. Observational evidence: Copernicus GFM
 
-### 10.1 Where the numbers come from
+The model RP of §9 is an *a priori* estimate built from exposure and topography. Stage C
+adds what was actually observed: whether a compartment stayed dry while its surroundings
+were flooded (Global Flood Monitoring, GFM, Sentinel-1 SAR flood extents since 2015), and
+how rare the discharge was on that day (GloFAS, §11). Observations bound the RP; they never
+create, move or delete a compartment.
+
+### 10.1 Scene search and screening (`download_gfm.py`)
+
+1. **One search for all units.** The densified unit cores are transformed to WGS84. Their
+   common box goes to the STAC item search `GET {gfm_stac_url}/search` with `collections`,
+   `bbox`, `datetime` (`gfm_date_from` to `gfm_date_to`; today when empty) and
+   `limit = gfm_page_limit`.
+   - The script follows `rel="next"` links to the last page.
+   - A link that declares `method: POST` is sent as POST with its JSON `body`, because STAC
+     APIs page either way.
+   - Requests go through `gis.Http.get_json` (urllib, retries, exponential backoff); no STAC
+     client library is needed.
+2. **Token.** If `gfm_token_env` names an environment variable, its value is sent as
+   `Authorization: Bearer …` with the search and with GDAL's HTTP reads
+   (`GDAL_HTTP_HEADERS`). The token never appears in the configuration or the logs.
+3. **Scenes to units.** Each item is assigned to the units whose core its footprint
+   (`geometry`, else `bbox`) touches.
+4. **Screening: one read per scene, at `gfm_screen_resolution_m` (100 m).** The flood layer
+   is read once through `/vsicurl/`, with `average` resampling, over the union of the
+   windows of all units the scene covers.
+   - **Shared grid.** All unit windows are snapped to one grid of screening cells, so each
+     unit's part is a plain slice of the scene's array.
+   - **Cost.** A cloud-optimised GeoTIFF serves the read from its overviews: kilobytes
+     instead of the 20 m data.
+   - **Flooded share.** The mean of the 0/1 layer per screening cell is the flooded share;
+     cells with a `gfm_nodata_values` code are left out of the mean.
+   - **Flooded area.** The shares are summed over each unit's domain and converted to
+     working cells.
+   - **Skip rule.** A unit window with at most `min_valid_pixels` flooded working cells
+     cannot produce a valid test, so it is skipped. Most acquisitions over a river are dry,
+     so only the few scenes that matter get copied.
+   - **Why one read per scene, not per unit and scene.** A country has hundreds of units
+     and each unit about a thousand Sentinel-1 acquisitions since 2015. Reading per unit
+     would mean hundreds of thousands of latency-bound requests; reading per scene cuts that
+     by the number of units a scene covers.
+5. **Clipped copies.** For each kept pair of scene and unit, the flood, exclusion and
+   reference water layers are cut to the unit window with
+   `gdal.Translate(projWin, projWinSRS)`. The optional likelihood layer is cut too when the
+   item has it.
+   - **Format.** Tiled, compressed GeoTIFFs in `work/<c>/gfm/<unit>/`.
+   - **Grid.** The copies stay in the GFM grid and CRS. Reprojection happens once, in
+     `gfm_evidence.py`, directly onto the unit grid; resampling twice would shift the 20 m
+     pixel edges.
+6. **Threads.** `gfm_download_threads` scenes are screened and copied at the same time.
+   The work waits on the network, and GDAL releases the GIL while it waits, so threads are
+   enough; no processes are needed.
+7. **Checkpoint and incremental updates.**
+   - Every screened pair of scene and unit, kept or not, is appended to
+     `work/<c>/gfm/screening.csv`.
+   - A rerun screens only new pairs, so running the script again a year later fetches only
+     the new acquisitions. `FORCE` screens the selected units again.
+   - A scene that cannot be read is logged and retried in the next run.
+8. **Index.** `gfm_index.csv` lists the kept pairs: `unit_id`, `item_id`, `datetime`,
+   `flooded_pixels` and the layer paths.
+
+### 10.2 Tests per compartment and scene (`gfm_evidence.py`)
+
+A dry compartment on a dry day proves nothing. Each scene therefore answers a comparative
+question: **was the compartment dry while the undefended floodplain at the same height next
+to it was wet?** Only that comparison, made within the same scene, turns a dry compartment
+into evidence.
+
+1. **Reading.** The three layers are warped with nearest neighbour onto the unit's working
+   grid, which is the exact grid of `labels.tif` and `hand_undef.tif`.
+   - **Valid cell:** it has data (`gfm_nodata_values` count as nodata even if the file
+     declares none), is not excluded, is not reference (permanent) water, and has a HAND
+     value.
+   - **Wet cell:** valid and carrying one of the `gfm_flood_values`.
+2. **Inside:** the valid cells of the compartment (its `unit_label` in `labels.tif`), giving
+   `inside_valid_px` and `inside_wet_frac`.
+3. **Comparison zone,** giving `comp_valid_px` and `comp_wet_frac`. It holds valid cells that
+   meet all of these:
+   - outside all compartments;
+   - within `comparison_distance_m` (chamfer distance from the compartment);
+   - `hand_undef` at most the median `hand_undef` inside the compartment;
+   - `hand_undef` at most `max_level_m`.
+
+   **Why the HAND condition.** It restricts the comparison to terrain that an undefended
+   flood up to the compartment's median level would also reach. If those cells are wet,
+   water stood at least that high next to the levee.
+4. **Outcome:**
+   - `no_test` unless both pixel counts reach `min_valid_pixels` and
+     `comp_wet_frac ≥ f_wet_comparison`;
+   - `held` if `inside_wet_frac ≤ f_dry_inside`;
+   - `flooded` if `inside_wet_frac ≥ f_wet_inside`;
+   - otherwise `inconclusive`.
+5. **Efficiency.**
+   - **Read extent.** Without hints, each scene is read only over the bounding box of the
+     unit's kept compartments plus the comparison distance.
+   - **Zones.** Each compartment's zone is computed once, in its own bounding box, and
+     reused for every scene.
+   - **Parallelism.** Units run in parallel with the same pool as `compartments.py`.
+6. **Outputs:**
+   - **`gfm_evidence.csv`:** one row per compartment and scene.
+   - **`gfm_evidence.gpkg`:** the same rows with the compartment polygon, for QGIS. Filter
+     by `item_id` or `datetime` and symbolise by `outcome`.
+7. **Checking a named flood event.** Restrict the run to the event's dates:
+
+   ```python
+   DATE_FROM = "2024-09-12"   # first and last day of the event
+   DATE_TO = "2024-09-25"
+   ```
+
+   The result is the event's evidence table plus a GeoPackage for visual inspection.
+   Without the filter, all scenes in the index are tested.
+8. **Consistency.**
+   - The unit rasters must come from the same `compartments.py` run as `compartments.gpkg`,
+     because `unit_label` points into them. After rerunning `compartments.py`, rerun this
+     script.
+   - Thresholds `f_*` are placeholders. With 0.05 and 0.3, "dry" tolerates 5 % wet cells
+     (SAR noise, local ponding), and "flooded" requires 30 % of the valid area to be wet.
+
+### 10.3 Missing-barrier hints (`HINTS = True`)
+
+1. **Scene water level in HAND.** It is the `river_level_percentile` (90 %) of `hand_undef`
+   among wet valid cells **connected to the river**.
+   - **Connectivity** runs through wet cells, reference water and the rasterized river
+     lines.
+   - **Why reference water counts.** The river is permanent water and never "wet" in the
+     flood layer. Labelling wet cells alone would cut the flood off from its own river.
+2. **Tested cells.** A cell is tested if it meets all of these:
+   - valid and outside compartments;
+   - at least `hint_exclusion_m` from barrier lines and compartments;
+   - `hand_undef < level − hint_margin_m`.
+
+   Each scene adds to the cell's `test_count`, and also to its `dry_count` where the cell
+   stays dry.
+3. **Hints.**
+   - **Selection:** cells with `test_count ≥ hint_min_scenes` and
+     `dry_count / test_count ≥ hint_dry_share`.
+   - **Clusters:** the selected cells are clustered, clusters of at least `min_area_m2`
+     are kept, and they are polygonised into `missing_barrier_hints.gpkg` with `area_m2`,
+     `scenes_tested_mean` and `dry_share_mean`.
+   - **Units:** as with compartments, each hint is taken from the unit whose core holds its
+     representative point.
+4. **`hint_exclusion_m` (an addition to the specification).** A levee that holds is itself
+   dry, and so are its toes and the 20 m GFM pixels that mix the levee with the floodplain.
+   - **The problem.** These cells lie below the water level in `hand_undef`, because the
+     levee was removed from that surface. Without the exclusion, every levee that held
+     would show up as a "missing barrier" along its own body.
+   - **The test shows it.** Without the exclusion, the levee bands of two rings become
+     hints (3 areas instead of 1).
+   - **Default.** 40 m = two GFM pixels.
+5. **Limitation: HAND is relative to the drainage cell.**
+   - **Backwater.** When a large river backs up into a tributary valley, cells along the
+     tributary have low HAND relative to the tributary, while the main river sets the
+     flood level. Such cells can stay dry legitimately and still appear as hints.
+   - **Consequence.** Hints are candidates for inspection, not results, and they change no
+     compartment.
+   - **Better level, not implemented.** A level per drainage target would need the
+     `breach_to_streams` target index stored per unit, which `compartments.py` does not keep.
+
+## 11. Observed bounds of the return period: GloFAS
+
+### 11.1 Discharge data (`download_glofas.py`)
+
+1. **Source.** GloFAS historical river discharge (reanalysis), dataset
+   `cems-glofas-historical` of the CEMS Early Warning Data Store. The identifier was
+   checked on the dataset page.
+   - **Data.** Daily `dis24` on a 0.05° grid from 1979.
+   - **Upstream area.** The static upstream area map on the same grid comes from the GloFAS
+     auxiliary data; check its units attribute against `glofas_upstream_area_to_km2`
+     (1e-6 for m²). Its URL is not verified, so give a local file.
+2. **Two ways in:**
+   - **Local files** (`glofas_files`): GRIB or NetCDF files downloaded through the EWDS form.
+     This needs nothing beyond the environment.
+   - **Yearly download through `cdsapi`.** Paste the request shown by the EWDS form
+     ("Show API request") into `glofas_request`, without the time and area keys.
+     - **What the script adds:** the year, all months and days (`glofas_time_keys`) and the
+       area (`glofas_area_key`: north, west, south, east, rounded outward to 0.01°).
+     - **Approval needed.** `cdsapi` is not installed. Without it, the script stops and
+       explains both options.
+3. **Area.** The box of the DTM footprint in WGS84, extended by `glofas_search_radius_km`,
+   so that river cells next to the footprint stay available for matching.
+4. **Cells kept.** Every cell of the upstream area map with at least
+   `glofas_min_upstream_area_km2` (after `glofas_upstream_area_to_km2`). Their daily series
+   are read with GDAL alone (no xarray):
+   - **GRIB:** each band's time is `GRIB_VALID_TIME`.
+   - **NetCDF:** the band's `NETCDF_DIM_<time>` value with the `<time>#units` attribute
+     (days, hours or seconds since a reference).
+   - **Day attribution.** A daily mean stamped at the end of its 24 h period belongs to the
+     day that ends. With `glofas_valid_time_ends_day = true`, one second is subtracted
+     before the date is taken.
+     - **Status:** a placeholder. Check one real file against the EWDS documentation.
+     - **Why it matters:** one day of shift barely changes event discharges on large rivers,
+       but it does matter on flashy small ones.
+5. **Output `glofas_discharge.npz`:** cell coordinates, upstream areas, dates, and discharge
+   (days × cells, float32). With the default minimum area of 0 km², every cell of the box is
+   kept. A box of about 80 000 km² holds about 4000 cells: 46 years × 4000 cells ≈ 270 MB in
+   memory, compressed on disk.
+
+### 11.2 Matching compartments to GloFAS cells (`rp_bounds.py`)
+
+1. **Candidates.** For each compartment with a source cell and an upstream area A (§9.2):
+   GloFAS cells within `glofas_search_radius_km` of the source cell (KD-tree in the
+   country's CRS).
+2. **Ratio filter.** The candidate's upstream area divided by A must lie within
+   [`upstream_ratio_min`, `upstream_ratio_max`].
+3. **Choice.** Among the remaining cells, the one with the ratio closest to 1 (log scale)
+   wins.
+4. **Stored:** `glofas_cell`, `glofas_distance_km`, `glofas_area_ratio`.
+5. **No match:** no event RP.
+
+**Why the ratio and not the distance.** On a 0.05° grid, the nearest cell is often on
+another river. The ratio test selects the cell that represents the same reach. The test
+puts a second cell with a ratio of 0.92 within the radius; the cell with ratio 1 wins.
+
+### 11.3 Frequency analysis
+
+Annual maxima of each matched cell are taken over the full series, using years with at
+least `glofas_min_days_per_year` days. A Gumbel distribution is fitted by L-moments:
+
+- b0 = mean, b1 = Σ (i−1)/(n−1) · x(i) / n over the ascending sample, l1 = b0,
+  l2 = 2 b1 − b0;
+- α = l2 / ln 2, ξ = l1 − 0.5772 α;
+- RP(Q) = 1 / (1 − exp(−exp(−(Q − ξ)/α))).
+
+**Why Gumbel with L-moments.** It is stable for about 40 annual maxima and has no shape
+parameter to over-fit.
+
+**Known weakness: heavy-tailed rivers.** The Gumbel tail is lighter than theirs, so a large
+discharge receives a higher RP than it really has.
+- **Held tests** then give lower bounds that are too high, the unsafe direction for a lower
+  bound.
+- **Flooded tests** give upper bounds that are too high, which only loosens them.
+
+A three-parameter GEV would capture the tail but is unstable for single cells with about 40
+maxima; regional pooling of cells would be the next step. Cells with fewer than 10 complete
+years are logged.
+
+### 11.4 Event return periods and bounds
+
+- **held:** discharge on the acquisition day. Its RP is a **lower bound** of the protection,
+  because the levee withstood at least that.
+- **flooded:** the maximum discharge over `flooded_window_days` up to and including the
+  acquisition day. Its RP is an **upper bound**: the compartment flooded during an event of
+  at most that RP, and the window covers a peak that may have passed before the overpass.
+- **Per compartment:**
+  - `n_held`, `n_flooded`;
+  - `obs_rp_low` = maximum over held tests;
+  - `obs_rp_high` = minimum over flooded tests;
+  - `obs_conflict` if `obs_rp_low > obs_rp_high`.
+
+The SAR image says *whether* the compartment was wet. The matched discharge series says
+*how rare* the day was at the same river reach.
+
+### 11.5 Combination with the model interval
+
+| Case | Condition | Result |
+|---|---|---|
+| `override_kept` | the compartment has an override | observations counted; RP unchanged |
+| `obs_conflict` | `obs_rp_low > obs_rp_high` | flag only; RP unchanged |
+| `combined` | low = max(`rp_low`, `obs_rp_low`) ≤ high = min(`rp_high`, `obs_rp_high`) | `rp` clamped into [low, high], then snapped to the class inside [low, high] closest to it (log scale) |
+| `model_obs_conflict` | low > high: the observations contradict the model interval | the observed interval alone is used; `rp` = the class inside it closest to the model value |
+
+- **Open side.** An open side of the interval becomes the neighbouring class of the result,
+  mirroring the ±1 class interval of the model. Two cases:
+  - only held tests: rp is the smallest class at or above the observation, and the upper
+    side is the next class;
+  - only flooded tests: the mirror image.
+- **No class in the interval.** This happens with a narrow interval between two classes.
+  The closest class is taken and the reported interval is widened to include it, so
+  `rp_low ≤ rp ≤ rp_high` always holds. The observed values stay in `obs_rp_low` and
+  `obs_rp_high`.
+- **Source tag.** `rp_source` gets `+obs` (e.g. `cap+obs`).
+- **Rerunnable.** The model values are stored once as `rp_prior`, `rp_low_prior`,
+  `rp_high_prior` and `rp_source_prior`, and every run starts from them. A rerun with new
+  evidence therefore gives the same result as a first run (tested). After rerunning
+  `rp_index.py`, rerun `rp_bounds.py`.
+- **Log.** Counts per case are logged.
+
+## 12. Validation
+
+`validate.py` compares the compartments with reference protected areas.
+
+1. **Areas,** as in the original script:
+   - recall = |result ∩ reference| / |reference| and precision = |result ∩ reference| /
+     |result|, both on the unions;
+   - per reference polygon: covered area and covered share (`validation_coverage.gpkg`),
+     plus the counts of fully missed polygons and polygons covered above 50 %;
+   - `validation_extent` optionally restricts both layers to an area where the reference
+     is complete.
+2. **Return periods,** when `reference_rp_field` is set:
+   - **Pairing.** Each compartment is compared with the reference polygon it overlaps most.
+     Reference RPs are snapped to the classes on a log scale.
+   - **Confusion matrix:** `validation_rp_confusion.csv`, reference class × assigned class.
+   - **Interval share:** compartments whose reference RP lies within `rp_low`…`rp_high`.
+   - **Class share:** compartments with the same class.
+3. **Inputs and report.** `compartments_rp.gpkg` is used when it exists, otherwise
+   `compartments.gpkg`. All numbers go to `validation.json`.
+
+## 13. Measured performance
+
+### 13.1 Where the numbers come from
 
 All numbers are from this cloud container: 4 vCPUs, 15 GB RAM, virtual disk. The OS page
 cache was dropped before timed runs. The synthetic benchmark DTM comes from
@@ -609,7 +942,7 @@ Working resolution 2 m, cores 7 km, halo 2 km. That gives windows of
 
 **Disk and decompression speeds on your machines will differ.**
 
-### 10.2 DTM reads (20 windows per file)
+### 13.2 DTM reads (20 windows per file)
 
 | Layout | Native 4096² window | `gdal.Warp` to 2 m (same ground) | Sequential | Overview used |
 |---|---|---|---|---|
@@ -620,7 +953,7 @@ Conversion results:
 - **Size.** ZSTD with predictor 3 compressed the synthetic DTM to 0.47 of its raw size.
 - **Time.** Option A took 8–11 s per 1.15 GB file plus 5–6 s for overviews.
 
-### 10.3 Kernels on one unit (30.25 M cells)
+### 13.3 Kernels on one unit (30.25 M cells)
 
 | Kernel | Stage A | Now | Change |
 |---|---|---|---|
@@ -635,7 +968,7 @@ Remaining potential:
 - **Radix heap.** A radix heap could save part of the remaining ~6 s per flood; it is
   not implemented.
 
-### 10.4 `compartments.py` per unit (30.25 M window cells, 24.4 M domain cells, cold cache, option A source)
+### 13.4 `compartments.py` per unit (30.25 M window cells, 24.4 M domain cells, cold cache, option A source)
 
 | Step | Stage A | Now |
 |---|---|---|
@@ -652,12 +985,49 @@ Worker time is **2.4 µs per domain cell**. At 5 m, 1000 km² of domain (40 M ce
 about 1.6 worker-minutes. `compartments.py` logs the extrapolation from your own test
 units (`performance.json`).
 
-### 10.5 `rp_index.py` per unit
+### 13.5 `rp_index.py` per unit
 
 With synthetic GHSL over the benchmark world it takes **1.6–4.6 s** with 0.6–0.9 GB peak.
 Warped and source volume agree within 0.05 %.
 
-## 11. Tests
+### 13.6 Stage C
+
+**`gfm_evidence.py`** was measured on a synthetic unit of production size:
+- 6000 × 5000 = 30 M cells at 5 m;
+- 32 compartments;
+- GFM scenes at 20 m in EPSG:3035, warped onto the unit grid.
+
+| Run | Time | Peak RSS |
+|---|---|---|
+| 1 scene, no hints | 5.4 s | 1.45 GB |
+| 3 scenes, no hints | 6.4 s | 1.32 GB (45 B/cell) |
+| 3 scenes, hints | 22.8 s | 2.85 GB (95 B/cell) |
+| 6 scenes, hints | 27.7 s | 2.87 GB |
+
+- **Without hints:** about 5 s per unit (labels, HAND, comparison zones) plus 0.5 s per
+  scene. With 20 kept scenes per unit that is 15 s; 300 units take 75 worker-minutes, about
+  20 minutes with 4 workers.
+- **With hints:** about 18 s plus 1.6 s per scene, since each scene is read over the whole
+  window. 300 units with 20 scenes take about 4 worker-hours.
+- **Memory.** With hints, a worker needs about as much memory per cell as
+  `compartments.py`; without hints, half. The worker count chosen for `compartments.py`
+  therefore fits.
+
+**`download_gfm.py`** depends on the service, which was not reachable from this environment.
+Its cost is one screening read per scene plus the copies of the kept unit windows, with
+`gfm_download_threads` requests at a time. On local files the test needs 5 s for 5 scenes,
+4 units and 16 copied windows.
+
+**`download_glofas.py`:**
+- **Test.** 41 years × 63 cells from NetCDF take 3 s; 3 years from GRIB take 1.3 s.
+- **Real data.** 46 yearly files of 365 bands with one small window per band take minutes.
+  The EWDS queue, not the reading, sets the pace of a download.
+
+**`rp_bounds.py` and `validate.py`** take about 1 s on the test country. Their loops run
+over compartments and tests (KD-tree queries, one Gumbel fit per matched cell), so 10 000
+compartments take seconds.
+
+## 14. Tests
 
 - **`pixi run test-kernels`, 16 checks:**
   - closed ring, gap, diagonal barrier;
@@ -688,12 +1058,49 @@ Warped and source volume agree within 0.05 %.
   - **RP:** exposure inside and outside a town; cap, `min` rule and class values;
     interval; override; `v_rel`.
   - **Quantile mapping:** shares within 1/N; ties.
+- **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
+  first in the same folder if its outputs are missing.
+  - **Synthetic inputs:**
+    - **GFM:** five scenes at 20 m in EPSG:3035, with flood extents drawn from the
+      undefended HAND of the units;
+    - **STAC:** a local mock API with token check and GET and POST paging;
+    - **GloFAS:** discharge as NetCDF (1981–2021) and GRIB (2019–2021), plus an upstream
+      area map;
+    - **references:** reference polygons with RPs.
+  - **`download_gfm`:**
+    - one search;
+    - a scene with a few wet pixels screened out;
+    - copies in the GFM CRS, the optional likelihood layer included;
+    - a rerun screens nothing twice.
+  - **Evidence:**
+    - held, flooded and `no_test` (all excluded);
+    - GFM nodata from the configuration (the file declares none);
+    - the date filter;
+    - the QGIS GeoPackage.
+  - **Hints:**
+    - an unmapped dry pocket found;
+    - without `hint_exclusion_m`, the levee bands appear as well.
+  - **GloFAS:**
+    - day attribution;
+    - the minimum upstream area;
+    - GRIB equal to NetCDF;
+    - Gumbel sanity: a fitted sample of 20 000 values gives RP(median) = 2.003, and the
+      GloFAS series gives RP(median annual maximum) = 2.00.
+  - **Bounds:**
+    - matching by upstream area ratio rather than distance;
+    - a combined interval;
+    - `obs_conflict`;
+    - an override kept;
+    - an identical rerun;
+    - `model_obs_conflict` with rp = 200.
+  - **Validation:** recall and precision against an independent computation; the
+    confusion matrix and both shares.
 
 `DEFENSES_TEST_DIR` keeps a test folder for inspection.
 
-## 12. Bugs, fixes, limitations, open decisions
+## 15. Bugs, fixes, limitations, open decisions
 
-### 12.1 Bugs in the original method: reported in Stage A, fixed now (switchable)
+### 15.1 Bugs in the original method: reported in Stage A, fixed now (switchable)
 
 **B1. HAND drainage paths ran parallel to the rasterized river.**
 - **Effect.** The whole window took the most downstream river elevation as
@@ -712,7 +1119,7 @@ Warped and source volume agree within 0.05 %.
 from outside.**
 - **Fix.** River cells next to nodata now count like river cells on the window edge.
 
-### 12.2 Problems found and fixed in the new code
+### 15.2 Problems found and fixed in the new code
 
 - **Option B** clipped the copy to the corridor without the halo; it now clips to
   corridor + halo.
@@ -728,7 +1135,25 @@ from outside.**
 - **`rp_index` totals check** first estimated cell coverage by rasterization (up to 3 %
   off on small windows); it now uses exact areas.
 
-### 12.3 Limitations
+**Stage C, found while testing:**
+- **Hint connectivity.** The river is reference water, never "wet", so wet cells alone did
+  not touch the river lines. Connectivity now runs through wet cells, reference water and
+  river cells.
+- **Levee bodies as hints.** Levee bodies and mixed pixels turned into hints along every
+  levee that held. Fixed with `hint_exclusion_m`.
+- **`model_obs_conflict` with one-sided observations.**
+  - **Bug.** The open side fell back to the model bound, so a held test above the model
+    interval could end with an RP *below* the observation.
+  - **Fix.** The open side now stays open while the class is chosen, and then becomes the
+    neighbouring class.
+- **`download_gfm` request count.** It read every scene once per unit, i.e. scenes × units
+  requests. It now reads each scene once for all its units, in threads, with a checkpoint.
+- **Matching columns.** The GloFAS matching wrote integers into a float frame row by row;
+  it now fills arrays.
+- **Dates.** Dates are parsed as ISO 8601 explicitly, which is why `pandas ≥ 2.0` is now
+  required.
+
+### 15.3 Limitations
 
 - **L2. Mixed river references.** HAND levels of cells draining to different rivers are
   compared in one flood. Near confluences, a tributary's drainage area can look
@@ -746,8 +1171,28 @@ from outside.**
 - **L6. River features are closed as a whole** (§8.2).
 - **L7. GHSL resolution.** At 100 m, buildings are spread over the cell, so exposure
   inside small compartments is approximate.
+- **L8. What SAR sees.**
+  - **Hidden water.** Water under dense vegetation and in built-up areas is hard to detect.
+    GFM's exclusion mask removes such cells from the tests, so compartments in towns are
+    tested less often.
+  - **Wet but not failed.** Water inside a compartment can come from rain, seepage or
+    ponding behind a levee that held. `flooded` then overstates failure. The thresholds
+    `f_*` are placeholders.
+- **L9. Hints use one HAND level per scene** (§10.3). Backwater into tributary valleys can
+  create false hints.
+- **L10. GloFAS resolution.** At 0.05°, rivers with catchments below a few hundred km² are
+  poorly resolved. Their compartments often stay unmatched (`glofas_cell = −1`) and keep
+  the model RP.
+- **L11. Discharge is not water level.**
+  - **Stage.** Overtopping depends on stage. Backwater from confluences, ice jams, changes
+    of the channel and hysteresis break the link between discharge RP and stage RP.
+  - **Tail.** The Gumbel tail is light (§11.3).
+- **L12. Acquisition time.** A held test uses the mean discharge of the acquisition day.
+  If the peak arrived *after* the overpass, that mean exceeds the flow the levee had faced
+  so far, and the lower bound is too high. The specification accepts this convention.
+- **L13. Day attribution of GloFAS values** is configurable but unverified (§11.1).
 
-### 12.4 Open decisions (assumptions taken, please confirm)
+### 15.4 Open decisions (assumptions taken, please confirm)
 
 1. **Download URLs.** The Geofabrik template, GHSL tile templates and GHSL tiling schema
    are **not verified**: this session's network blocked the official hosts and the web
@@ -760,8 +1205,36 @@ from outside.**
 4. **`rp_source`.** `"cap"` covers both `rp_cap` and `max_rp` lowering the model value.
 5. **Maximum damage table format:** columns `country`, `residential`,
    `non_residential`, matched on the country code.
+6. **GFM source.** The STAC endpoint, collection and asset keys are **not verified**, and
+   the host was not reachable from this environment.
+   - **What a search showed.** EODC documentation names `https://stac.eodc.eu/api/v1`,
+     collection `GFM` and the assets `ensemble_flood_extent`, `reference_water_mask` and
+     `ensemble_likelihood`.
+   - **Missing.** No asset name for the exclusion mask was found.
+   - The configuration entries are empty; please confirm them.
+7. **GFM pixel codes.** Flood 1, exclusion 1, reference water 1 and nodata 255 are
+   placeholders.
+8. **GloFAS:**
+   - the request to paste from the EWDS form;
+   - the day attribution (`glofas_valid_time_ends_day`);
+   - the URL of the upstream area map;
+   - approval of `cdsapi` if downloads should run from the script.
+9. **Combination rules** (§11.5). The specification leaves these open; the following
+   readings were taken:
+   - rp snaps to a class *inside* the combined interval;
+   - with `model_obs_conflict`, only the observed interval is used and rp is the class
+     inside it closest to the model value; an open side becomes the neighbouring class;
+   - overrides are never changed;
+   - `obs_conflict` leaves the model values unchanged.
+10. **`hint_exclusion_m`:** a new key (default 40 m, two GFM pixels), §10.3.
+11. **Flood event for the QGIS check.** Please name one. The steps are:
+    1. run `download_gfm.py`;
+    2. run `gfm_evidence.py` with `DATE_FROM` and `DATE_TO` around the event;
+    3. open `gfm_evidence.gpkg` in QGIS.
+12. **Evidence thresholds.** `f_wet_comparison` 0.5, `f_dry_inside` 0.05, `f_wet_inside`
+    0.3 and the upstream ratio range 0.7–1.3 are placeholders, as in the specification.
 
-### 12.5 Issues in the existing `gis.py` (reported, not changed)
+### 15.5 Issues in the existing `gis.py` (reported, not changed)
 
 | Function | Issue |
 |---|---|
@@ -774,14 +1247,15 @@ from outside.**
 | `Vector.extract_intersection` | Creates an exception without `raise` |
 | Several functions | Assume EPSG codes; the new functions use WKT |
 
-## 13. Data sources and licences
+## 16. Data sources and licences
 
 | Data | Use | Source (to be verified) | Licence |
 |---|---|---|---|
 | OpenStreetMap | Gates, weirs, pumping stations, drains | Geofabrik country extracts (`.osm.pbf`) | ODbL 1.0; © OpenStreetMap contributors |
 | GHSL built-up volume, total and non-residential, R2023A, 100 m | Exposure value | JRC GHSL data package 2023 | to be confirmed from the data package |
 | JRC global depth-damage functions | Maximum damage and damage curves | provided by the user as CSV | per the JRC publication |
-| CEMS GFM, GloFAS | Stage C | — | — |
+| Copernicus Emergency Management Service, Global Flood Monitoring (GFM) | held / flooded tests, missing-barrier hints | STAC API, endpoint to be confirmed (§15.4) | Copernicus data policy (free and open); confirm the attribution text on the product page |
+| GloFAS historical river discharge, `cems-glofas-historical` | event return periods | CEMS Early Warning Data Store (dataset page checked) | licence shown on the EWDS dataset page, accepted with the download |
 
 For GHSL, record the release, epoch and the citation of the GHSL Data Package 2023 with
 the outputs: `ghsl_sources.json` lists the epoch, tiles and URLs used.
