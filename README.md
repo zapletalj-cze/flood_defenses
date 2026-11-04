@@ -8,8 +8,9 @@ model output, local hazard dataset or FABDEM is used anywhere. Satellite flood e
 (GFM) and reanalysed discharge (GloFAS) enter only as *observations* that bound the
 modelled return period; they never draw a compartment.
 
-**Czech explanation:** [docs/vysvetleni_cs.md](docs/vysvetleni_cs.md) describes how the
-method works and the reasoning behind every step, in Czech.
+**Czech explanation:** [docs/vysvetleni_cs.md](docs/vysvetleni_cs.md) starts with a simple
+step-by-step guide to running the package, then describes how the method works and the
+reasoning behind every step, in Czech.
 
 **Error priority: recall.** When the evidence is ambiguous, a compartment is kept rather
 than dropped. Every design choice below that trades precision for recall says so

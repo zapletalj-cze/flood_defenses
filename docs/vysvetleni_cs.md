@@ -6,13 +6,15 @@
 
 Tento dokument podrobně vysvětluje, jak balík `flood_defenses` odvozuje území chráněná
 hrázemi a jejich dobu opakování ochrany, a především **proč** je každý krok navržen právě
-takto. Spouštění, konfigurační klíče a výstupní soubory podrobně popisuje anglické
-`README.md`; zde jsou zmíněny jen tam, kde pomáhají pochopit metodu. Čísla v textu jsou
-naměřená v tomto vývojovém prostředí na syntetických datech (oddíl 13).
+takto. Začíná jednoduchým praktickým návodem, jak s balíkem pracovat. Všechny
+konfigurační klíče a výstupní soubory podrobně popisuje anglické `README.md`. Čísla v
+textu jsou naměřená v tomto vývojovém prostředí na syntetických datech (oddíl 13).
 
 ---
 
 ## Obsah
+
+- [Rychlý návod: jak s tím pracovat](#rychlý-návod-jak-s-tím-pracovat)
 
 1. [Účel, vstupy a zásady](#1-účel-vstupy-a-zásady)
 2. [Hlavní myšlenka: ochrana jako rozdíl dvou zaplavení](#2-hlavní-myšlenka-ochrana-jako-rozdíl-dvou-zaplavení)
@@ -30,6 +32,148 @@ naměřená v tomto vývojovém prostředí na syntetických datech (oddíl 13).
 14. [Co dokazují testy](#14-co-dokazují-testy)
 15. [Omezení a otevřené otázky](#15-omezení-a-otevřené-otázky)
 16. [Slovníček](#16-slovníček)
+
+---
+
+## Rychlý návod: jak s tím pracovat
+
+Tento oddíl je čistě praktický: co připravit, co v jakém pořadí spustit a co po každém
+kroku zkontrolovat. Proč je co navržené tak, jak je, vysvětlují další oddíly.
+
+### A. Jednorázová příprava
+
+1. **Prostředí.** Balík běží v prostředí pixi podle `pixi.toml`; prostředí připravujete
+   vy. Že vše funguje, ověří krátký test:
+
+   ```powershell
+   pixi run test-kernels
+   ```
+
+   Všechny řádky výstupu musí začínat `PASS`.
+2. **Data.**
+   - **DTM:** jeden nebo více GeoTIFFů ve stejném CRS.
+   - **Linie hrází:** vektorové soubory s **jedinou vrstvou**. Více souborů se zadá
+     seznamem.
+   - **Říční síť:** s plochou povodí v km², buď jako atribut, nebo jako rastr ploch
+     povodí.
+   - **Tabulky škod:** `max_damage_csv` (sloupce `country`, `residential`,
+     `non_residential`) a `depth_damage_csv` (`depth_m`, `res`, `nonres`).
+   - **Volitelně:** body ručních zásahů `overrides` (sloupce `rp`, `note`) a referenční
+     chráněná území pro validaci.
+3. **Konfigurace `config/defenses.toml`.**
+   - **`[general]`:**
+     - `work_dir` je rychlý lokální disk pro mezivýsledky, `output_dir` je složka pro
+       výsledky;
+     - `n_workers` je počet souběžných jednotek: počet pracovníků × paměť jedné
+       jednotky se musí vejít do RAM.
+   - **Tabulky země.** Zkopírujte tabulky `[countries.XX]`, `[countries.XX.compartments]`,
+     `[countries.XX.rp]` a `[countries.XX.lulc]` a v jejich názvech nahraďte `XX` kódem
+     země, např. `CZ`.
+   - **Cesty a atributy.** Vyplňte cesty k datům a název atributu s plochou povodí.
+     - **Cesty ve Windows** pište s lomítky (`"D:/data/dtm.tif"`) nebo v apostrofech
+       (`'D:\data\dtm.tif'`).
+     - **Zpětná lomítka v uvozovkách** TOML nepřijme.
+   - **Nepotvrzené hodnoty.** Klíče v seznamu `placeholders` mají nepotvrzené hodnoty a
+     skripty je hlásí jako varování. Jakmile hodnotu potvrdíte, klíč ze seznamu smažte.
+
+### B. Jak se skripty spouštějí
+
+- **Odkud.** Vždy z kořenové složky repozitáře, příkazem `pixi run <úloha>`.
+- **Proměnné běhu.** Zemi a další proměnné nastavíte jednou v terminálu.
+  - **PowerShell:**
+
+    ```powershell
+    $env:DEFENSES_COUNTRY = "CZ"
+    pixi run prepare-dtm
+    ```
+
+  - **Příkazový řádek cmd:** `set DEFENSES_COUNTRY=CZ`.
+  - **Zrušení:** v PowerShellu `Remove-Item Env:\DEFENSES_COUNTRY`, v cmd
+    `set DEFENSES_COUNTRY=`.
+- **Další proměnné.** Stejně fungují `DEFENSES_FORCE`, `DEFENSES_UNITS` a
+  `DEFENSES_CONFIG_PATH`. Seznam proměnných každého skriptu je na jeho začátku.
+- **Proměnná zůstává nastavená.** Platí, dokud ji nezrušíte. Hlavně `DEFENSES_FORCE`
+  po použití vždy zrušte, jinak se při každém dalším běhu přepočítá vše znovu.
+- **Logy** jsou v `output_dir/<země>/logs/`.
+- **Chybná konfigurace.** Skript vypíše všechny problémy najednou a skončí dřív, než
+  cokoli počítá.
+
+### C. Postup krok za krokem
+
+| # | Příkaz | Co udělá | Co zkontrolovat |
+|---|---|---|---|
+| 1 | `pixi run prepare-dtm` | prověří DTM, stopu dat a rychlost čtení | `dtm_inspection.csv`, `dtm_benchmark.csv` |
+| 2 | `pixi run build-units` | koridor kolem řek a výpočetní jednotky | `corridor.gpkg`, `units_core.gpkg` v QGIS |
+| 3 | `pixi run download-osm`, pak `pixi run osm-hydraulics` | stavidla a čerpací stanice z OSM; určí, které toky nejsou zdrojem vody | `rivers_sources.gpkg` (sloupce `is_source`, `reason`) |
+| 4 | `pixi run compartments` | kompartmenty | nejdřív zkušební běh (níže); pak `compartments.gpkg` a `barriers.gpkg` v QGIS |
+| 5 | `pixi run download-ghsl`, pak `pixi run rp-index` | hodnota zástavby a doba opakování | `compartments_rp.gpkg`: `rp`, `rp_low`, `rp_high`, `rp_source` |
+| 6 (volitelně) | `pixi run download-worldcover`, `pixi run hand-yz`, pak znovu `pixi run rp-index` | doplnění hodnoty z land cover | `exposure_lulc.csv`; sloupce `value_ghsl`, `value_lulc` |
+| 7 (volitelně) | `pixi run download-gfm`, `pixi run gfm-evidence`, `pixi run download-glofas`, `pixi run rp-bounds` | satelitní pozorování a průtoky | `gfm_evidence.gpkg`; `obs_rp_low`, `obs_rp_high`, `rp_source` s `+obs` |
+| 8 (volitelně) | `pixi run validate` | srovnání s referencí | `validation.json`, `validation_rp_confusion.csv` |
+
+**Poznámky k jednotlivým krokům:**
+
+- **Krok 1, pomalé čtení DTM.** Ukáže-li výsledek pásové uložení bez overviews, zapněte
+  `convert_dtm = true` a krok spusťte znovu. Skript předem spočítá potřebné místo na
+  disku a čas. Varianta A zrychlila čtení terénu zhruba čtyřikrát.
+- **Krok 2, paměť.** Když skript hlásí, že jednotka přesáhne `max_ram_gb_per_worker`,
+  zmenšete `unit_core_size_m`.
+- **Krok 6:** napřed vyplňte převodník tříd na kategorie a tabulky hodnot a křivek
+  (oddíl 9.6) a v `[countries.<země>.lulc]` nastavte `enabled = true`.
+- **Krok 7:** potřebuje ověřené zdroje GFM a soubory GloFAS (oddíl 15.2).
+
+**Zkušební běh na dvou jednotkách (krok 4).** Ids jednotek najdete v `units.csv`:
+
+```powershell
+$env:DEFENSES_UNITS = "012_034,012_035"
+pixi run compartments
+Remove-Item Env:\DEFENSES_UNITS
+```
+
+- **Co log ukáže.** Čas a paměť na jednotku a odhad pro celou zemi (také v
+  `performance.json`).
+- **Kalibrace paměti.** Naměřenou hodnotu bajtů na buňku zapište do `bytes_per_cell` a
+  znovu spusťte `build-units`.
+- **Celá země.** Pak spusťte `pixi run compartments` bez `DEFENSES_UNITS`. Hotové
+  jednotky se přeskočí.
+
+### D. Co spustit znovu po změně
+
+| Co se změnilo | Co spustit znovu |
+|---|---|
+| hráze, řeky, parametry kompartmentů, výsledek kroku OSM | `compartments` s `DEFENSES_FORCE = "1"`, pak `rp-index` (případně `hand-yz`, `gfm-evidence` a `rp-bounds`) |
+| tabulky škod nebo výška podlaží | `rp-index` s `DEFENSES_FORCE = "1"`, aby se přepočítaly hodnoty jednotek; pak `rp-bounds` |
+| rozdělení tříd, strop, váhy skóre, ruční zásahy | `rp-index` (bez FORCE), pak `rp-bounds` |
+| hodnoty nebo převodníky land cover | `hand-yz` (změnu pozná sám), pak `rp-index` a `rp-bounds` |
+| nové satelitní scény | `download-gfm` (stáhne jen nové), pak `gfm-evidence` a `rp-bounds` |
+
+Pravidlo: `rp-index` přepíše `compartments_rp.gpkg`, a proto po něm vždy znovu spusťte
+`rp-bounds`, pokud pozorování používáte.
+
+### E. Kontrola výsledků v QGIS
+
+- **`compartments_rp.gpkg`:** obarvěte podle `rp`. Projděte příznaky `truncated`,
+  `touches_dtm_edge` a `no_levee` a sloupec `rp_source` (model, strop, ruční zásah,
+  pozorování).
+- **`barriers.gpkg`:** přemostěné mezery (`bridged`) a výšky korun.
+- **`gfm_evidence.gpkg`:** filtrujte podle `item_id` nebo data a obarvěte podle
+  `outcome`.
+- **`missing_barrier_hints.gpkg`:** místa ke kontrole. Žádný kompartment nemění.
+
+### F. Časté problémy
+
+- **`Invalid configuration …`:** výpis všech problémů v konfiguraci. Opravte je a spusťte
+  znovu.
+- **`… contains N layers`:** vektorový vstup má více vrstev. Uložte potřebnou vrstvu do
+  samostatné GeoPackage, např. exportem v QGIS nebo `ogr2ogr`.
+- **Nedostatek paměti:** snižte `n_workers` nebo `unit_core_size_m` (pak znovu
+  `build-units`).
+- **Neověřené URL (Geofabrik, GHSL):** stáhněte data ručně.
+  - **OSM:** výřez zadejte do `osm_pbf`.
+  - **GHSL:** šablona `file://…` ukazující na místní soubory.
+  - **GloFAS:** soubory zadejte do `glofas_files`.
+- **Ověření prostředí:** `pixi run test-pipeline`, `test-stage-b`, `test-stage-c` a
+  `test-hand-yz` projdou celý řetězec na syntetických datech.
 
 ---
 
