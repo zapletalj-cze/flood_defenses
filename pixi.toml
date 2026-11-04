@@ -12,3 +12,15 @@ scipy = "*"
 numba = "*"
 geopandas = ">=1.0"
 shapely = ">=2.0"
+pyproj = "*"
+# required by the existing import in gis.py (depends on affine, numba, numpy, scipy; no rasterio)
+pyflwdir = "*"
+
+# Scripts run as modules from the repository root, so `import gis` resolves without sys.path changes.
+[tasks]
+prepare-dtm = "python -m processing.prepare_dtm"
+build-units = "python -m processing.build_units"
+compartments = "python -m processing.compartments"
+test-kernels = "python -m tests.test_kernels"
+test-pipeline = "python -m tests.test_pipeline"
+make-benchmark-world = "python -m tests.make_benchmark_world"

@@ -1,0 +1,1110 @@
+# Author: Jakub Zapletal
+# Date: 2026-11-03
+# Derives areas protected by flood levees (compartments) per processing unit and merges the units: priority-flood
+# spill levels above the river (HAND on the undefended DTM) with and without barriers; margin = difference.
+
+import json
+import logging
+import math
+import os
+import time
+from pathlib import Path
+
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import shapely
+from osgeo import gdal
+from scipy import ndimage
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
+from shapely.geometry import LineString, box
+
+import gis
+
+# --- Run variables (no command-line parameters; DEFENSES_<NAME> environment variables override them) ---
+CONFIG_PATH = "config/defenses.toml"
+COUNTRY = "XX"
+FORCE = False  # recompute units that already have a done marker
+UNITS = []  # unit ids to process, e.g. ["012_034", "012_035"]; empty = all units
+
+KEYS = [
+    "general.work_dir",
+    "general.output_dir",
+    "general.n_workers",
+    "general.max_ram_gb_per_worker",
+    "general.gdal_cachemax_mb",
+    "general.warp_memory_limit_mb",
+    "general.gdal_threads_per_worker",
+    "general.log_level",
+    "country.levees",
+    "country.rivers",
+    "country.working_resolution_m",
+    "country.bytes_per_cell",
+    "country.crest_box_size_m",
+    "country.merge_overlap_ratio",
+    "country.drop_contradicted_truncated",
+    "country.contradiction_ratio",
+    "country.id_rounding_m",
+    "country.keep_intermediate",
+    "country.compartments.gap_tolerance_m",
+    "country.compartments.touch_tolerance_m",
+    "country.compartments.self_close_min_length_factor",
+    "country.compartments.crest_search_radius_m",
+    "country.compartments.barrier_removal_width_m",
+    "country.compartments.min_margin_m",
+    "country.compartments.max_level_m",
+    "country.compartments.min_area_m2",
+    "country.compartments.gated_crossings",
+    "country.compartments.fill_nodata_holes",
+    "country.compartments.stream_burn_m",
+    "country.compartments.stream_burn_buffer_m",
+    "country.rp.levee_adjacent_distance_m",
+]
+UNIT_COLUMNS = {
+    "unit_label": "int64",
+    "area_m2": "float64",
+    "protection_level_m": "float64",
+    "margin_median_m": "float64",
+    "margin_max_m": "float64",
+    "river_ref_median_m": "float64",
+    "entry_x": "float64",
+    "entry_y": "float64",
+    "source_x": "float64",
+    "source_y": "float64",
+    "truncated": "bool",
+    "touches_corridor_edge": "bool",
+}
+OUTPUT_COLUMNS = [
+    "compartment_id",
+    "area_m2",
+    "protection_level_m",
+    "margin_median_m",
+    "margin_max_m",
+    "river_ref_median_m",
+    "entry_x",
+    "entry_y",
+    "source_x",
+    "source_y",
+    "truncated",
+    "touches_corridor_edge",
+    "has_pumping",
+    "no_levee",
+    "unit_id",
+    "unit_label",
+    "geometry",
+]
+
+
+def process_unit(task):
+    start = time.perf_counter()
+    times, counts = {}, {}
+    unit_id, p = task["unit_id"], task["params"]
+    unit_dir = Path(task["unit_dir"])
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    (unit_dir / "done.json").unlink(missing_ok=True)
+    log = logging.getLogger(f"unit.{unit_id}")
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    handler = logging.FileHandler(unit_dir / "unit.log", mode="w", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+    res, wkt = task["resolution"], task["wkt"]
+    cell_area = res * res
+    bounds = (task["win_xmin"], task["win_ymin"], task["win_xmax"], task["win_ymax"])
+    core = box(
+        task["core_xmin"], task["core_ymin"], task["core_xmax"], task["core_ymax"]
+    )
+
+    # --- Terrain at working resolution and processing domain ---
+    t = time.perf_counter()
+    dtm, gt = gis.Raster.read_window(
+        task["dtm_vrt"], bounds, res, "average", task["warp_memory_mb"]
+    )
+    times["read_terrain"] = time.perf_counter() - t
+    shape = dtm.shape
+    t = time.perf_counter()
+    domain_gdf = gpd.read_file(task["domain_path"], where=f"unit_id = '{unit_id}'")
+    domain = (
+        gis.Raster.rasterize_geometries(
+            domain_gdf.geometry,
+            np.ones(len(domain_gdf)),
+            shape,
+            gt,
+            wkt,
+            True,
+            np.uint8,
+        )
+        > 0
+    )
+    dtm[~domain] = np.nan
+    counts["domain_cells"] = int(domain.sum())
+    if p["fill_nodata_holes"]:
+        # DTM nodata enclosed by data inside the domain (e.g. lidar water surfaces) would act as a wall.
+        nan_parts, _ = ndimage.label(np.isnan(dtm))
+        open_parts = np.unique(
+            np.concatenate(
+                [
+                    nan_parts[0],
+                    nan_parts[-1],
+                    nan_parts[:, 0],
+                    nan_parts[:, -1],
+                    nan_parts[~domain],
+                ]
+            )
+        )
+        holes = (nan_parts > 0) & ~np.isin(nan_parts, open_parts)
+        if holes.any():
+            slices = ndimage.find_objects(np.where(holes, nan_parts, 0))
+            size = max(
+                max(s.stop - s.start for s in obj) for obj in slices if obj is not None
+            )
+            dtm, unfilled = gis.Raster.fill_nodata_cells(dtm, holes, gt, wkt, size)
+            counts["filled_hole_cells"] = int(holes.sum()) - unfilled
+        del nan_parts
+    valid = ~np.isnan(dtm)
+    times["domain"] = time.perf_counter() - t
+
+    # --- Barrier cells and crest elevations ---
+    t = time.perf_counter()
+    lines = gpd.read_file(task["barrier_lines"], bbox=bounds)
+    bridged = (
+        lines["bridged"].astype(bool).to_numpy() if len(lines) else np.zeros(0, bool)
+    )
+    levee_lines, bridge_lines = lines[~bridged], lines[bridged]
+    levee_cells = np.zeros(shape, bool)
+    crest_full = np.full(shape, np.nan, np.float32)
+    counts["crest_boxes"] = 0
+    if len(levee_lines):
+        levee_cells = (
+            gis.Raster.rasterize_geometries(
+                levee_lines.geometry,
+                np.ones(len(levee_lines)),
+                shape,
+                gt,
+                wkt,
+                True,
+                np.uint8,
+            )
+            > 0
+        )
+        # Crest = maximum of the native DTM near the line. Native pixels are read only in boxes around levees:
+        # gdal.Warp with "max" per working cell (overviews disabled), then a maximum filter of the search radius.
+        box_cells = max(1, int(round(p["crest_box_size_m"] / res)))
+        radius_cells = max(1, int(math.ceil(p["crest_search_radius_m"] / res)))
+        yy, xx = np.mgrid[
+            -radius_cells : radius_cells + 1, -radius_cells : radius_cells + 1
+        ]
+        footprint = np.hypot(yy, xx) * res <= p["crest_search_radius_m"] + 1e-9
+        footprint[radius_cells, radius_cells] = True
+        box_shape = (-(-shape[0] // box_cells), -(-shape[1] // box_cells))
+        box_gt = (gt[0], gt[1] * box_cells, 0.0, gt[3], 0.0, gt[5] * box_cells)
+        needed = (
+            gis.Raster.rasterize_geometries(
+                shapely.buffer(
+                    levee_lines.geometry.values, p["crest_search_radius_m"] + res
+                ),
+                np.ones(len(levee_lines)),
+                box_shape,
+                box_gt,
+                wkt,
+                True,
+                np.uint8,
+            )
+            > 0
+        )
+        for box_row in range(box_shape[0]):
+            on = np.flatnonzero(needed[box_row])
+            # Boxes in a row separated by at most one empty box are read together.
+            for run_cols in (
+                np.split(on, np.flatnonzero(np.diff(on) > 2) + 1) if len(on) else []
+            ):
+                r0, r1 = box_row * box_cells, min((box_row + 1) * box_cells, shape[0])
+                c0, c1 = run_cols[0] * box_cells, min(
+                    (run_cols[-1] + 1) * box_cells, shape[1]
+                )
+                read_bounds = (
+                    gt[0] + (c0 - radius_cells) * res,
+                    gt[3] - (r1 + radius_cells) * res,
+                    gt[0] + (c1 + radius_cells) * res,
+                    gt[3] - (r0 - radius_cells) * res,
+                )
+                cell_max, _ = gis.Raster.read_window(
+                    task["dtm_vrt"],
+                    read_bounds,
+                    res,
+                    "max",
+                    task["warp_memory_mb"],
+                    overview="NONE",
+                )
+                cell_max = ndimage.maximum_filter(
+                    np.where(np.isnan(cell_max), -np.inf, cell_max),
+                    footprint=footprint,
+                    mode="constant",
+                    cval=-np.inf,
+                )
+                block = cell_max[
+                    radius_cells : radius_cells + r1 - r0,
+                    radius_cells : radius_cells + c1 - c0,
+                ]
+                crest_full[r0:r1, c0:c1] = np.where(np.isfinite(block), block, np.nan)
+                counts["crest_boxes"] += 1
+    times["crest_read"] = time.perf_counter() - t
+
+    t = time.perf_counter()
+    crest = np.where(levee_cells, crest_full, np.nan).astype(np.float32)
+    bridge_cells = np.zeros(shape, bool)
+    if len(bridge_lines):
+        bridge_id = gis.Raster.rasterize_geometries(
+            bridge_lines.geometry,
+            np.arange(1, len(bridge_lines) + 1),
+            shape,
+            gt,
+            wkt,
+            True,
+            np.int32,
+        )
+        bridge_cells = (bridge_id > 0) & ~levee_cells
+        ends = np.array([[g.coords[0], g.coords[-1]] for g in bridge_lines.geometry])
+        end_cols = np.floor((ends[..., 0] - gt[0]) / res).astype(np.int64)
+        end_rows = np.floor((gt[3] - ends[..., 1]) / res).astype(np.int64)
+        inside = (
+            (end_rows >= 0)
+            & (end_rows < shape[0])
+            & (end_cols >= 0)
+            & (end_cols < shape[1])
+        )
+        end_crest = np.full(end_cols.shape, np.nan, np.float32)
+        end_crest[inside] = crest_full[end_rows[inside], end_cols[inside]]
+        # A missing crest at one end takes the value of the other end.
+        end_crest = np.where(np.isnan(end_crest), end_crest[:, ::-1], end_crest)
+        rows, cols = np.nonzero(bridge_cells)
+        seg = bridge_id[rows, cols] - 1
+        a = ends[seg, 0]
+        ab = ends[seg, 1] - a
+        along = np.clip(
+            (
+                (gt[0] + (cols + 0.5) * res - a[:, 0]) * ab[:, 0]
+                + (gt[3] - (rows + 0.5) * res - a[:, 1]) * ab[:, 1]
+            )
+            / np.maximum((ab**2).sum(axis=1), 1e-12),
+            0,
+            1,
+        )
+        crest[rows, cols] = end_crest[seg, 0] + along * (
+            end_crest[seg, 1] - end_crest[seg, 0]
+        )
+    barrier = levee_cells | bridge_cells
+    # Close diagonal-only contacts so that water cannot pass between two barrier cells touching at a corner.
+    height = np.where(valid, dtm, -np.inf)
+    counts["added_4conn"] = 0
+    while True:
+        diag = (
+            barrier[:-1, :-1] & barrier[1:, 1:] & ~barrier[:-1, 1:] & ~barrier[1:, :-1]
+        )
+        anti = (
+            barrier[:-1, 1:] & barrier[1:, :-1] & ~barrier[:-1, :-1] & ~barrier[1:, 1:]
+        )
+        if not diag.any() and not anti.any():
+            break
+        i, j = np.nonzero(diag)
+        first = height[i, j + 1] >= height[i + 1, j]
+        barrier[np.where(first, i, i + 1), np.where(first, j + 1, j)] = True
+        i, j = np.nonzero(anti)
+        first = height[i, j] >= height[i + 1, j + 1]
+        barrier[np.where(first, i, i + 1), np.where(first, j, j + 1)] = True
+        counts["added_4conn"] += int(diag.sum() + anti.sum())
+    del height
+    gaps = barrier & np.isnan(crest)
+    crest[gaps] = crest_full[gaps]
+    gaps = barrier & np.isnan(crest)
+    if gaps.any() and (barrier & ~np.isnan(crest)).any():
+        nearest = ndimage.distance_transform_edt(
+            np.isnan(crest), return_distances=False, return_indices=True
+        )
+        crest[gaps] = crest[nearest[0][gaps], nearest[1][gaps]]
+        del nearest
+    gaps = barrier & np.isnan(crest)
+    crest[gaps] = dtm[gaps]
+    times["barriers"] = time.perf_counter() - t
+
+    # --- Rivers, enclosed streams, water sources ---
+    t = time.perf_counter()
+    rivers = gpd.read_file(task["rivers_used"], bbox=bounds)
+    stream = (
+        gis.Raster.rasterize_geometries(
+            rivers.geometry, np.ones(len(rivers)), shape, gt, wkt, False, np.uint8
+        )
+        > 0
+    ) & valid
+    barrier_full = barrier.copy()
+    counts.update(
+        {
+            "stream_cells": int(stream.sum()),
+            "barrier_cells": int(barrier.sum()),
+            "crossing_cells": int((barrier & stream).sum()),
+        }
+    )
+    # Zones separated by barriers (crossings counted as barrier). Streams entering the window edge belong to the
+    # main network; streams in other zones are enclosed by levees (e.g. tributaries with flap gates).
+    zones, _ = ndimage.label(~barrier_full & valid)
+    stream_edge = np.zeros(shape, bool)
+    stream_edge[[0, -1], :] = stream[[0, -1], :]
+    stream_edge[:, [0, -1]] |= stream[:, [0, -1]]
+    outer_zones = np.setdiff1d(np.unique(zones[stream_edge]), [0])
+    stream_zones = np.setdiff1d(np.unique(zones[stream]), [0])
+    if not len(outer_zones) and len(stream_zones):
+        outer_zones = stream_zones[
+            [
+                np.argmax(
+                    np.bincount(zones[stream], minlength=zones.max() + 1)[stream_zones]
+                )
+            ]
+        ]
+    inner_zones = np.setdiff1d(stream_zones, outer_zones)
+    if p["gated_crossings"]:
+        seeds = stream & np.isin(zones, outer_zones)
+    else:
+        barrier &= ~stream
+        seeds = stream
+    inner_labels = np.zeros(shape, np.int32)
+    for k, zone in enumerate(inner_zones, start=1):
+        inner_labels[zones == zone] = k
+    del zones
+    enclosed = gis.Raster.polygonize_labels(inner_labels, gt, wkt).rename(
+        columns={"label": "zone"}
+    )
+    enclosed["area_m2"] = (
+        np.bincount(inner_labels.ravel())[enclosed["zone"]] * cell_area
+    )
+    enclosed["stream_cells"] = np.bincount(
+        inner_labels[stream], minlength=len(inner_zones) + 1
+    )[enclosed["zone"]]
+    enclosed["gated"] = p["gated_crossings"]
+    enclosed["unit_id"] = unit_id
+    counts["enclosed_stream_zones"] = len(inner_zones)
+    if len(inner_zones):
+        log.warning(
+            "%d levee-enclosed areas contain river cells; treated as %s.",
+            len(inner_zones),
+            (
+                "gated (not water sources)"
+                if p["gated_crossings"]
+                else "unprotected (river wins)"
+            ),
+        )
+    times["rivers"] = time.perf_counter() - t
+
+    if stream.any():
+        # --- Undefended DTM: barrier cells and their surroundings removed and interpolated ---
+        t = time.perf_counter()
+        dtm_undef = dtm
+        if barrier_full.any():
+            reach = int(math.ceil(p["barrier_removal_width_m"] / res)) + 1
+            rows_any = np.flatnonzero(barrier_full.any(axis=1))
+            cols_any = np.flatnonzero(barrier_full.any(axis=0))
+            r0, r1 = max(rows_any[0] - reach, 0), min(
+                rows_any[-1] + 1 + reach, shape[0]
+            )
+            c0, c1 = max(cols_any[0] - reach, 0), min(
+                cols_any[-1] + 1 + reach, shape[1]
+            )
+            removal = np.zeros(shape, bool)
+            removal[r0:r1, c0:c1] = (
+                ndimage.distance_transform_edt(
+                    ~barrier_full[r0:r1, c0:c1], sampling=res
+                )
+                <= p["barrier_removal_width_m"]
+            )
+            removal &= valid
+            dtm_undef, unfilled = gis.Raster.fill_nodata_cells(
+                dtm,
+                removal,
+                gt,
+                wkt,
+                math.ceil(4 * p["barrier_removal_width_m"] / res) + 10,
+            )
+            counts["removal_cells"], counts["removal_unfilled"] = (
+                int(removal.sum()),
+                unfilled,
+            )
+            del removal
+        times["undefended"] = time.perf_counter() - t
+
+        # --- HAND on the undefended DTM ---
+        t = time.perf_counter()
+        reached = gis.Hydro.breach_to_streams(
+            dtm_undef, stream, p["stream_burn_m"], p["stream_burn_buffer_m"] / res
+        )
+        unreached = valid & (reached < 0)
+        if unreached.any():
+            log.warning(
+                "%d cells are not connected to any stream cell; using the nearest stream cell.",
+                unreached.sum(),
+            )
+            nearest = ndimage.distance_transform_edt(
+                ~stream, return_distances=False, return_indices=True
+            )
+            reached[unreached] = (nearest[0].astype(np.int64) * shape[1] + nearest[1])[
+                unreached
+            ]
+            del nearest
+        counts["unreached_cells"] = int(unreached.sum())
+        river_ref = np.where(
+            valid, dtm_undef.ravel()[np.maximum(reached, 0)].reshape(shape), np.nan
+        ).astype(np.float32)
+        del reached, unreached
+        hand_undef = dtm_undef - river_ref
+        times["hand"] = time.perf_counter() - t
+
+        # --- Spill levels with and without barriers ---
+        t = time.perf_counter()
+        surface_def = hand_undef.copy()
+        surface_def[barrier] = np.maximum(
+            crest[barrier] - river_ref[barrier], hand_undef[barrier]
+        )
+        spill_undef, _, _ = gis.Hydro.priority_flood(hand_undef, seeds)
+        spill_def, seed_def, order_def = gis.Hydro.priority_flood(surface_def, seeds)
+        del surface_def
+        margin = spill_def - spill_undef
+        times["flood"] = time.perf_counter() - t
+    else:
+        log.warning("No river cells in the window; no compartments.")
+        dtm_undef = dtm
+        river_ref = hand_undef = spill_undef = spill_def = margin = np.full(
+            shape, np.nan, np.float32
+        )
+        seed_def = order_def = np.full(shape, -1, np.int64)
+
+    # --- Protected compartments ---
+    t = time.perf_counter()
+    protected = (
+        (margin >= p["min_margin_m"]) & (spill_undef <= p["max_level_m"]) & ~barrier
+    )
+    labels, n_candidates = ndimage.label(protected)
+    sizes = np.bincount(labels.ravel())
+    keep = np.flatnonzero(sizes * cell_area >= p["min_area_m2"])
+    keep = keep[keep > 0]
+    relabel = np.zeros(n_candidates + 1, np.int32)
+    relabel[keep] = np.arange(1, len(keep) + 1)
+    labels = relabel[labels]
+    ids = np.arange(1, len(keep) + 1)
+    if len(ids):
+        # Statistics over compartment cells only (scipy.ndimage label statistics scan the whole window).
+        cells = np.flatnonzero(labels.ravel())
+        frame = pd.DataFrame(
+            {
+                "label": labels.ravel()[cells],
+                "spill": spill_def.ravel()[cells],
+                "margin": margin.ravel()[cells],
+                "river_ref": river_ref.ravel()[cells],
+                "order": order_def.ravel()[cells],
+                "cell": cells,
+            }
+        )
+        grouped = frame.groupby("label")
+        # Entry = first compartment cell reached by the defended flood; source = seed river cell of its path.
+        entry_rows, entry_cols = np.divmod(
+            frame["cell"].to_numpy()[grouped["order"].idxmin().reindex(ids).to_numpy()],
+            shape[1],
+        )
+        seed_rows, seed_cols = np.divmod(seed_def[entry_rows, entry_cols], shape[1])
+        del frame["order"], frame["cell"]
+        border = np.unique(
+            np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
+        )
+        touching = np.unique(labels[ndimage.binary_dilation(~domain) & (labels > 0)])
+        stats = pd.DataFrame(
+            {
+                "unit_label": ids,
+                "area_m2": sizes[keep] * cell_area,
+                "protection_level_m": grouped["spill"].min().reindex(ids).to_numpy(),
+                "margin_median_m": grouped["margin"].median().reindex(ids).to_numpy(),
+                "margin_max_m": grouped["margin"].max().reindex(ids).to_numpy(),
+                "river_ref_median_m": grouped["river_ref"]
+                .median()
+                .reindex(ids)
+                .to_numpy(),
+                "entry_x": gt[0] + (entry_cols + 0.5) * res,
+                "entry_y": gt[3] - (entry_rows + 0.5) * res,
+                "source_x": gt[0] + (seed_cols + 0.5) * res,
+                "source_y": gt[3] - (seed_rows + 0.5) * res,
+                "truncated": np.isin(ids, border),
+                "touches_corridor_edge": np.isin(ids, touching),
+            }
+        ).astype(UNIT_COLUMNS)
+        del frame, grouped
+    else:
+        stats = pd.DataFrame({c: pd.Series(dtype=d) for c, d in UNIT_COLUMNS.items()})
+    polygons = gis.Raster.polygonize_labels(labels, gt, wkt).rename(
+        columns={"label": "unit_label"}
+    )
+    compartments = polygons.merge(stats, on="unit_label", how="inner")
+    compartments["unit_id"] = unit_id
+    counts["compartments"] = len(compartments)
+    times["compartments"] = time.perf_counter() - t
+
+    # --- Crest statistics of barrier lines inside the core ---
+    t = time.perf_counter()
+    crest_attr = np.where(barrier, crest, np.nan)
+    crest_hand = crest_attr - river_ref
+    crest_records = []
+    in_core = lines[lines.intersects(core)] if len(lines) else lines
+    for line_id, geometry in (
+        zip(in_core["line_id"], in_core.geometry) if len(in_core) else []
+    ):
+        xy = shapely.get_coordinates(
+            shapely.segmentize(geometry.intersection(core), res / 2)
+        )
+        cols = np.clip(
+            np.floor((xy[:, 0] - gt[0]) / res).astype(np.int64), 0, shape[1] - 1
+        )
+        rows = np.clip(
+            np.floor((gt[3] - xy[:, 1]) / res).astype(np.int64), 0, shape[0] - 1
+        )
+        values, hand_values = crest_attr[rows, cols], crest_hand[rows, cols]
+        crest_records.append(
+            (
+                line_id,
+                float(np.nanmin(values)) if np.isfinite(values).any() else np.nan,
+                (
+                    float(np.nanmin(hand_values))
+                    if np.isfinite(hand_values).any()
+                    else np.nan
+                ),
+            )
+        )
+    times["barrier_crest"] = time.perf_counter() - t
+
+    # --- Outputs ---
+    t = time.perf_counter()
+    gis.Raster.write_array(unit_dir / "hand_undef.tif", hand_undef, gt, wkt)
+    gis.Raster.write_array(
+        unit_dir / "labels.tif", labels.astype(np.int32), gt, wkt, nodata=0
+    )
+    if p["keep_intermediate"]:
+        for name, array in [
+            ("dtm", dtm),
+            ("dtm_undefended", dtm_undef),
+            ("river_ref", river_ref),
+            ("spill_undef", spill_undef),
+            ("spill_def", spill_def),
+            ("margin", margin),
+            ("barrier", barrier.astype(np.uint8)),
+            ("crest", np.where(barrier, crest, np.nan)),
+        ]:
+            gis.Raster.write_array(unit_dir / f"{name}.tif", array, gt, wkt)
+    gis.Vector.write_gpkg(compartments, unit_dir / "compartments.gpkg")
+    gis.Vector.write_gpkg(enclosed, unit_dir / "enclosed_streams.gpkg")
+    pd.DataFrame(
+        crest_records, columns=["line_id", "crest_min_m", "crest_hand_min_m"]
+    ).to_csv(unit_dir / "barrier_crest.csv", index=False)
+    times["write"] = time.perf_counter() - t
+
+    seconds = time.perf_counter() - start
+    peak_mb = gis.Run.peak_rss_mb()
+    window_cells = shape[0] * shape[1]
+    done = {
+        "unit_id": unit_id,
+        "seconds": seconds,
+        "times": {k: round(v, 3) for k, v in times.items()},
+        "peak_rss_mb": peak_mb,
+        "window_cells": window_cells,
+        "bytes_per_cell": peak_mb * 2**20 / window_cells,
+        **counts,
+    }
+    done["summary"] = (
+        f"unit {unit_id}: {len(compartments)} compartments in {seconds:.0f} s (read {times['read_terrain']:.1f} s, "
+        f"crest {times['crest_read']:.1f} s in {counts['crest_boxes']} boxes, hand {times.get('hand', 0):.1f} s, "
+        f"flood {times.get('flood', 0):.1f} s, write {times['write']:.1f} s), peak RSS {peak_mb / 1024:.2f} GB "
+        f"({done['bytes_per_cell']:.0f} B per window cell)"
+    )
+    marker = unit_dir / "done.json.tmp"
+    marker.write_text(json.dumps(done, indent=2))
+    os.replace(marker, unit_dir / "done.json")
+    log.info(done["summary"])
+    log.removeHandler(handler)
+    handler.close()
+    return done
+
+
+if __name__ == "__main__":
+    run = gis.Run.env_overrides(
+        CONFIG_PATH=CONFIG_PATH, COUNTRY=COUNTRY, FORCE=FORCE, UNITS=UNITS
+    )
+    cfg = gis.Config.load(run["CONFIG_PATH"], run["COUNTRY"], KEYS)
+    general, country = cfg["general"], cfg["country"]
+    params = dict(country["compartments"])
+    params.update(
+        {
+            "crest_box_size_m": country["crest_box_size_m"],
+            "keep_intermediate": country["keep_intermediate"],
+        }
+    )
+    work_dir = Path(general["work_dir"]) / run["COUNTRY"]
+    out_dir = Path(general["output_dir"]) / run["COUNTRY"]
+    log = gis.Run.logger("compartments", out_dir / "logs", general["log_level"])
+    gis.Config.warn_placeholders(cfg)
+    if params["stream_burn_m"] <= 0:
+        log.warning(
+            "stream_burn_m = 0 reproduces the previous HAND routing, in which drainage "
+            "paths can run along channel cells parallel to the rasterized river and reach "
+            "it only far downstream (river_ref too low, HAND too high). See README, bug B1."
+        )
+    gis.Run.configure_gdal(
+        general["gdal_cachemax_mb"], general["gdal_threads_per_worker"]
+    )
+    vrt_path = work_dir / "dtm" / "dtm.vrt"
+    needed = [
+        vrt_path,
+        out_dir / "units.csv",
+        out_dir / "units_core.gpkg",
+        out_dir / "units_window.gpkg",
+        work_dir / "units_domain.gpkg",
+    ]
+    if not all(path.exists() for path in needed):
+        raise SystemExit(
+            f"Missing inputs {[str(p) for p in needed if not p.exists()]}; "
+            "run prepare_dtm.py and build_units.py first."
+        )
+    wkt = gdal.Open(str(vrt_path)).GetProjection()
+    resolution = country["working_resolution_m"]
+    units = pd.read_csv(out_dir / "units.csv", dtype={"unit_id": str})
+    all_windows = (
+        units.win_xmin.min(),
+        units.win_ymin.min(),
+        units.win_xmax.max(),
+        units.win_ymax.max(),
+    )
+
+    # --- Barrier lines for the whole country: merge, bridge gaps (deterministic, shared by all units) ---
+    t = time.perf_counter()
+    gap, touch = params["gap_tolerance_m"], params["touch_tolerance_m"]
+    levees = gis.Vector.read_merged(country["levees"], wkt, bbox=all_windows).explode(
+        index_parts=False
+    )
+    levees = levees[
+        (levees.geom_type == "LineString") & (levees.length > 0)
+    ].reset_index(drop=True)
+    geoms = levees.geometry.values
+    starts, ends = shapely.get_point(geoms, 0), shapely.get_point(geoms, -1)
+    bridges = {}
+    own_gap = shapely.distance(starts, ends)
+    # A nearly closed ring digitised as one line; the length condition keeps short lines from closing on themselves.
+    self_close = (
+        (own_gap > touch)
+        & (own_gap <= gap)
+        & (shapely.length(geoms) > params["self_close_min_length_factor"] * gap)
+    )
+    for i in np.flatnonzero(self_close):
+        key = tuple(
+            sorted(
+                [
+                    (round(starts[i].x, 3), round(starts[i].y, 3)),
+                    (round(ends[i].x, 3), round(ends[i].y, 3)),
+                ]
+            )
+        )
+        bridges[key] = (levees.at[i, "source"], LineString([starts[i], ends[i]]))
+    open_lines = np.flatnonzero(~self_close)
+    points = np.concatenate([starts[open_lines], ends[open_lines]])
+    owners = np.concatenate([open_lines, open_lines])
+    if len(points):
+        point_idx, line_idx = levees.sindex.query(
+            points, predicate="dwithin", distance=gap
+        )
+        other = line_idx != owners[point_idx]
+        pairs = pd.DataFrame({"point": point_idx[other], "line": line_idx[other]})
+        pairs["distance"] = shapely.distance(points[pairs.point], geoms[pairs.line])
+        connected = pairs.groupby("point")["distance"].min() <= touch
+        nearest = pairs.loc[pairs.groupby("point")["distance"].idxmin()]
+        nearest = nearest[~nearest.point.map(connected).astype(bool).to_numpy()]
+        for point, line in zip(nearest.point, nearest.line):
+            endpoint, other_line = points[point], geoms[line]
+            other_ends = [starts[line], ends[line]]
+            end_distances = [endpoint.distance(e) for e in other_ends]
+            # Prefer endpoint-to-endpoint, otherwise connect to the nearest point on the other line.
+            target = (
+                other_ends[int(np.argmin(end_distances))]
+                if min(end_distances) <= gap
+                else shapely.line_interpolate_point(
+                    other_line, shapely.line_locate_point(other_line, endpoint)
+                )
+            )
+            key = tuple(
+                sorted(
+                    [
+                        (round(endpoint.x, 3), round(endpoint.y, 3)),
+                        (round(target.x, 3), round(target.y, 3)),
+                    ]
+                )
+            )
+            sources = sorted(
+                {levees.at[owners[point], "source"], levees.at[line, "source"]}
+            )
+            bridges[key] = ("|".join(sources), LineString([endpoint, target]))
+    barrier_lines = gpd.GeoDataFrame(
+        pd.concat(
+            [
+                levees[["source"]].assign(bridged=False),
+                pd.DataFrame(
+                    {"source": [b[0] for b in bridges.values()], "bridged": True}
+                ),
+            ],
+            ignore_index=True,
+        ),
+        geometry=list(geoms) + [b[1] for b in bridges.values()],
+        crs=wkt,
+    )
+    barrier_lines.insert(0, "line_id", np.arange(len(barrier_lines)))
+    gis.Vector.write_gpkg(barrier_lines, work_dir / "barrier_lines.gpkg")
+    log.info(
+        "Barrier lines: %d levee lines, %d bridged gaps (%d self-closed rings) in %.1f s.",
+        len(levees),
+        len(bridges),
+        int(self_close.sum()),
+        time.perf_counter() - t,
+    )
+
+    # --- Water sources ---
+    sources_path = out_dir / "rivers_sources.gpkg"
+    if sources_path.exists():
+        rivers = gpd.read_file(sources_path).to_crs(wkt)
+        n_all = len(rivers)
+        rivers = rivers[rivers["is_source"].astype(bool)]
+        log.info(
+            "Water sources from rivers_sources.gpkg: %d of %d river features (closed streams are excluded "
+            "from the seeds and from the HAND drainage network).",
+            len(rivers),
+            n_all,
+        )
+    else:
+        rivers = gis.Vector.read_merged(country["rivers"], wkt, bbox=all_windows)
+        log.info(
+            "rivers_sources.gpkg not found (osm_hydraulics.py not run yet): all %d river features are water "
+            "sources.",
+            len(rivers),
+        )
+    gis.Vector.write_gpkg(rivers[["geometry"]], work_dir / "rivers_used.gpkg")
+
+    # --- Units ---
+    unknown = sorted(set(run["UNITS"]) - set(units.unit_id))
+    if unknown:
+        raise SystemExit(f"Unknown unit ids in UNITS: {unknown}")
+    selected = units[units.unit_id.isin(run["UNITS"])] if run["UNITS"] else units
+    tasks, weights, skipped = [], [], []
+    for row in selected.to_dict("records"):
+        unit_dir = work_dir / "units" / row["unit_id"]
+        if (unit_dir / "done.json").exists() and not run["FORCE"]:
+            skipped.append(row["unit_id"])
+            continue
+        row.update(
+            {
+                "unit_dir": str(unit_dir),
+                "dtm_vrt": str(vrt_path),
+                "wkt": wkt,
+                "resolution": resolution,
+                "domain_path": str(work_dir / "units_domain.gpkg"),
+                "barrier_lines": str(work_dir / "barrier_lines.gpkg"),
+                "rivers_used": str(work_dir / "rivers_used.gpkg"),
+                "warp_memory_mb": general["warp_memory_limit_mb"],
+                "params": params,
+            }
+        )
+        tasks.append(row)
+        weights.append(max(row["est_domain_cells"], 1))
+    log.info(
+        "Units: %d to process, %d already finished and skipped (set FORCE to recompute).",
+        len(tasks),
+        len(skipped),
+    )
+    if tasks:
+        # Compile the numba kernels once so that worker processes load them from the cache.
+        gis.Hydro.breach_to_streams(np.zeros((3, 3), np.float32), np.eye(3, dtype=bool))
+        gis.Hydro.priority_flood(np.zeros((3, 3), np.float32), np.eye(3, dtype=bool))
+    results, failed = gis.Run.run_units(
+        process_unit,
+        tasks,
+        general["n_workers"],
+        general["gdal_cachemax_mb"],
+        general["gdal_threads_per_worker"],
+        weights,
+        log,
+    )
+    if failed:
+        log.error(
+            "%d units failed: %s. Rerun to retry them; finished units are skipped.",
+            len(failed),
+            failed,
+        )
+
+    # --- Merge all finished units ---
+    t = time.perf_counter()
+    cores = gpd.read_file(out_dir / "units_core.gpkg").set_index("unit_id")
+    windows = gpd.read_file(out_dir / "units_window.gpkg").set_index("unit_id")
+    done_units = [
+        u for u in units.unit_id if (work_dir / "units" / u / "done.json").exists()
+    ]
+    frames = [
+        gpd.read_file(work_dir / "units" / u / "compartments.gpkg") for u in done_units
+    ]
+    frames = [f for f in frames if len(f)]
+    if frames:
+        candidates = gpd.GeoDataFrame(
+            pd.concat(frames, ignore_index=True), geometry="geometry", crs=wkt
+        )
+    else:
+        candidates = gpd.GeoDataFrame(
+            {c: pd.Series(dtype=d) for c, d in UNIT_COLUMNS.items()}
+            | {"unit_id": pd.Series(dtype=str)},
+            geometry=gpd.GeoSeries([], crs=wkt),
+        )
+    if len(candidates):
+        geoms = candidates.geometry.values
+        areas = shapely.area(geoms)
+        representative = shapely.point_on_surface(geoms)
+        candidates["in_core"] = shapely.covers(
+            cores.geometry.reindex(candidates.unit_id).values, representative
+        )
+        candidates["edge_distance"] = shapely.distance(
+            representative,
+            shapely.boundary(windows.geometry.reindex(candidates.unit_id).values),
+        )
+        # The same compartment seen from several unit windows: candidates of different units overlapping by at
+        # least merge_overlap_ratio of the smaller one form one group.
+        left, right = candidates.sindex.query(geoms, predicate="intersects")
+        pair = (left < right) & (
+            candidates.unit_id.values[left] != candidates.unit_id.values[right]
+        )
+        left, right = left[pair], right[pair]
+        overlap = shapely.area(
+            shapely.intersection(geoms[left], geoms[right])
+        ) / np.minimum(areas[left], areas[right])
+        same = overlap >= country["merge_overlap_ratio"]
+        graph = coo_matrix(
+            (np.ones(same.sum()), (left[same], right[same])),
+            shape=(len(candidates),) * 2,
+        )
+        _, candidates["group"] = connected_components(graph, directed=False)
+        group_size = candidates.groupby("group")["group"].transform("size")
+        chosen = [candidates[group_size == 1]]
+        for _, members in candidates[group_size > 1].groupby("group"):
+            complete = members[~members["truncated"].astype(bool)]
+            if len(complete):
+                # Prefer a complete candidate whose representative point lies in its own core, then the most
+                # central one (largest distance from its window edge).
+                chosen.append(
+                    complete.sort_values(
+                        ["in_core", "edge_distance"], ascending=False
+                    ).iloc[[0]]
+                )
+            else:
+                # Truncated in every window: union of the pieces (recall), lowest protection level among them.
+                merged = members.loc[[members.geometry.area.idxmax()]].copy()
+                lowest = members.loc[members["protection_level_m"].idxmin()]
+                merged = merged.set_geometry(
+                    gpd.GeoSeries(
+                        [shapely.union_all(members.geometry.values)],
+                        index=merged.index,
+                        crs=wkt,
+                    )
+                )
+                merged["area_m2"] = merged.geometry.area
+                for column in [
+                    "protection_level_m",
+                    "entry_x",
+                    "entry_y",
+                    "source_x",
+                    "source_y",
+                ]:
+                    merged[column] = lowest[column]
+                merged["touches_corridor_edge"] = (
+                    members["touches_corridor_edge"].astype(bool).any()
+                )
+                chosen.append(merged)
+        final = gpd.GeoDataFrame(
+            pd.concat(chosen, ignore_index=True), geometry="geometry", crs=wkt
+        )
+        # A compartment truncated in every window may exist only because window edges
+        # closed it. Units whose windows see the same area and found nothing there have
+        # the better view (an edge can only add walls); drop it if they cover enough.
+        n_contradicted = 0
+        if country["drop_contradicted_truncated"]:
+            done_windows = windows.loc[done_units]
+            keep_rows = np.ones(len(final), bool)
+            for k in np.flatnonzero(final["truncated"].astype(bool).to_numpy()):
+                geometry = final.geometry.iloc[k]
+                members = set(
+                    candidates.unit_id[candidates.group == final.group.iloc[k]]
+                )
+                others = done_windows[
+                    ~done_windows.index.isin(members)
+                    & done_windows.intersects(geometry)
+                ]
+                hits = candidates.unit_id.values[
+                    candidates.sindex.query(geometry, predicate="intersects")
+                ]
+                silent = others[~others.index.isin(hits)]
+                if len(silent):
+                    covered = geometry.intersection(
+                        shapely.union_all(silent.geometry.values)
+                    ).area / max(geometry.area, 1e-9)
+                    keep_rows[k] = covered < country["contradiction_ratio"]
+            n_contradicted = int((~keep_rows).sum())
+            final = final[keep_rows].reset_index(drop=True)
+    else:
+        final = candidates.copy()
+        n_contradicted = 0
+    representative = shapely.point_on_surface(final.geometry.values)
+    step = country["id_rounding_m"]
+    ids = pd.Series(
+        [
+            f"{run['COUNTRY']}_{int(round(x / step) * step)}_{int(round(y / step) * step)}"
+            for x, y in shapely.get_coordinates(representative)
+        ],
+        dtype=str,
+    )
+    duplicate_rank = ids.groupby(ids).cumcount()
+    final["compartment_id"] = np.where(
+        duplicate_rank > 0, ids + "_" + (duplicate_rank + 1).astype(str), ids
+    )
+    distance = country["rp"]["levee_adjacent_distance_m"]
+    pumping_path = out_dir / "osm_pumping.gpkg"
+    if pumping_path.exists() and len(final):
+        pumps = gpd.read_file(pumping_path).to_crs(wkt)
+        hits, _ = pumps.sindex.query(
+            final.geometry.values, predicate="dwithin", distance=distance
+        )
+        final["has_pumping"] = np.isin(np.arange(len(final)), hits)
+    else:
+        final["has_pumping"] = False
+        log.info(
+            "osm_pumping.gpkg not found (osm_hydraulics.py not run yet): has_pumping is False everywhere."
+        )
+    final["no_levee"] = (
+        gis.Vector.length_near_boundary(final, barrier_lines, distance) == 0
+    )
+    final = final[OUTPUT_COLUMNS].astype(
+        {
+            "truncated": bool,
+            "touches_corridor_edge": bool,
+            "has_pumping": bool,
+            "no_levee": bool,
+        }
+    )
+    gis.Vector.write_gpkg(final, out_dir / "compartments.gpkg")
+    n_truncated = int(final["truncated"].sum())
+    log.info(
+        "Compartments: %d from %d unit candidates in %d finished units; truncated %d (%.1f %%; many truncated "
+        "compartments mean the halo is too small), dropped as contradicted by neighbouring windows %d, touching "
+        "the corridor edge %d, no levee %d, with pumping %d. Merge took %.1f s.",
+        len(final),
+        len(candidates),
+        len(done_units),
+        n_truncated,
+        100 * n_truncated / max(len(final), 1),
+        n_contradicted,
+        int(final["touches_corridor_edge"].sum()),
+        int(final["no_levee"].sum()),
+        int(final["has_pumping"].sum()),
+        time.perf_counter() - t,
+    )
+
+    # --- Barrier lines with crest attributes (minimum over the units' cores) ---
+    tables = [
+        pd.read_csv(work_dir / "units" / u / "barrier_crest.csv") for u in done_units
+    ]
+    tables = [table for table in tables if len(table)]
+    crest_table = (
+        pd.concat(tables).groupby("line_id")[["crest_min_m", "crest_hand_min_m"]].min()
+        if tables
+        else pd.DataFrame(columns=["crest_min_m", "crest_hand_min_m"])
+    )
+    barriers = barrier_lines.merge(
+        crest_table, left_on="line_id", right_index=True, how="left"
+    )
+    gis.Vector.write_gpkg(barriers, out_dir / "barriers.gpkg")
+
+    enclosed_frames = [
+        gpd.read_file(work_dir / "units" / u / "enclosed_streams.gpkg")
+        for u in done_units
+    ]
+    enclosed_frames = [f for f in enclosed_frames if len(f)]
+    if enclosed_frames:
+        enclosed = gpd.GeoDataFrame(
+            pd.concat(enclosed_frames, ignore_index=True), geometry="geometry", crs=wkt
+        )
+        enclosed = enclosed[
+            shapely.covers(
+                cores.geometry.reindex(enclosed.unit_id).values,
+                shapely.point_on_surface(enclosed.geometry.values),
+            )
+        ]
+        gis.Vector.write_gpkg(
+            enclosed.reset_index(drop=True), out_dir / "enclosed_streams.gpkg"
+        )
+        log.warning(
+            "%d levee-enclosed areas contain river cells (see enclosed_streams.gpkg).",
+            len(enclosed),
+        )
+
+    # --- Measured performance and extrapolation to the whole country ---
+    performance = pd.DataFrame(
+        [
+            json.loads((work_dir / "units" / u / "done.json").read_text())
+            for u in done_units
+        ]
+    )
+    if len(performance):
+        seconds_per_cell = performance["seconds"].sum() / max(
+            performance["domain_cells"].sum(), 1
+        )
+        bytes_per_cell = performance["bytes_per_cell"].max()
+        remaining = units[~units.unit_id.isin(done_units)]
+        step_share = (
+            pd.DataFrame(list(performance["times"])).sum()
+            / performance["seconds"].sum()
+        )
+        total_s = (
+            units["est_domain_cells"].sum() * seconds_per_cell / general["n_workers"]
+        )
+        remaining_s = (
+            remaining["est_domain_cells"].sum()
+            * seconds_per_cell
+            / general["n_workers"]
+        )
+        log.info(
+            "Measured on %d units: %.2f microseconds per domain cell, up to %.0f bytes per window cell (configured "
+            "%.0f), peak RSS up to %.2f GB. Time shares: %s.",
+            len(performance),
+            1e6 * seconds_per_cell,
+            bytes_per_cell,
+            country["bytes_per_cell"],
+            performance["peak_rss_mb"].max() / 1024,
+            ", ".join(
+                f"{k} {100 * v:.0f} %"
+                for k, v in step_share.sort_values(ascending=False).items()
+            ),
+        )
+        log.info(
+            "Extrapolation (measured s/cell x estimated domain cells / %d workers): whole country %s, remaining "
+            "%d units %s; largest unit window needs about %.1f GB.",
+            general["n_workers"],
+            gis.Run.format_seconds(total_s),
+            len(remaining),
+            gis.Run.format_seconds(remaining_s),
+            units["est_window_cells"].max() * bytes_per_cell / 1e9,
+        )
+        (out_dir / "performance.json").write_text(
+            json.dumps(
+                {
+                    "units_measured": len(performance),
+                    "seconds_per_domain_cell": seconds_per_cell,
+                    "bytes_per_window_cell": bytes_per_cell,
+                    "country_seconds": total_s,
+                    "remaining_seconds": remaining_s,
+                    "time_shares": step_share.to_dict(),
+                },
+                indent=2,
+            )
+        )

@@ -1,6 +1,15 @@
 # Standard library imports
+import ctypes
+import heapq
+import logging
+import multiprocessing
 import os
 import shutil
+import sys
+import time
+import tomllib
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from math import acos, ceil, degrees, floor, sqrt
 from os.path import exists, join
 
@@ -10,7 +19,9 @@ import pandas as pd
 import pyflwdir
 import pyogrio
 import shapely
-from osgeo import gdal, ogr, osr
+from numba import njit
+from osgeo import gdal, gdal_array, ogr, osr
+from scipy import ndimage
 from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import linemerge, nearest_points, unary_union
 from shapely.wkt import loads
@@ -18,6 +29,7 @@ from shapely.wkt import loads
 # glob_params = Parameters()
 gdal.UseExceptions()
 gdal.SetCacheMax(4 * pow(1024, 3))
+log = logging.getLogger("gis")
 
 
 class Files:
@@ -985,6 +997,395 @@ class Raster:
         dif_y = y - center_y_index
         return dif_x, dif_y
 
+    # --- Window-based IO for large rasters (WKT-based, no EPSG assumption) ---
+
+    @staticmethod
+    def inspect(in_raster: str):
+        """
+        Storage properties of a raster that decide how fast windows can be read
+        :param in_raster: raster file
+        :return: dict with size, pixel size, data type, nodata, compression, block size,
+            overviews, file size and raw (uncompressed) size
+        """
+        ds = gdal.Open(str(in_raster))
+        band = ds.GetRasterBand(1)
+        gt = ds.GetGeoTransform()
+        block_x, block_y = band.GetBlockSize()
+        structure = ds.GetMetadata("IMAGE_STRUCTURE") or {}
+        bytes_per_pixel = gdal.GetDataTypeSize(band.DataType) // 8
+        files = ds.GetFileList() or [str(in_raster)]
+        return {
+            "path": str(in_raster),
+            "driver": ds.GetDriver().ShortName,
+            "width": ds.RasterXSize,
+            "height": ds.RasterYSize,
+            "bands": ds.RasterCount,
+            "pixel_x": gt[1],
+            "pixel_y": gt[5],
+            "data_type": gdal.GetDataTypeName(band.DataType),
+            "bytes_per_pixel": bytes_per_pixel,
+            "nodata": band.GetNoDataValue(),
+            "scale": band.GetScale(),
+            "offset": band.GetOffset(),
+            "compression": structure.get("COMPRESSION", "NONE"),
+            "predictor": structure.get("PREDICTOR", ""),
+            "block_x": block_x,
+            "block_y": block_y,
+            "strip_layout": block_y < 64 or block_x == ds.RasterXSize,
+            "overviews": band.GetOverviewCount(),
+            "overview_widths": [
+                band.GetOverview(i).XSize for i in range(band.GetOverviewCount())
+            ],
+            "file_size_gb": sum(os.path.getsize(f) for f in files if exists(f)) / 1e9,
+            "raw_size_gb": ds.RasterXSize * ds.RasterYSize * bytes_per_pixel / 1e9,
+            "crs_wkt": ds.GetProjection(),
+        }
+
+    @staticmethod
+    def build_vrt(in_rasters, out_vrt):
+        """
+        VRT over rasters that must share one CRS; stops with a message otherwise
+        :param in_rasters: raster path or list of paths
+        :param out_vrt: output VRT path
+        :return: path to the VRT
+        """
+        in_rasters = [str(p) for p in Config.as_list(in_rasters)]
+        reference = None
+        for path in in_rasters:
+            srs = osr.SpatialReference(wkt=gdal.Open(path).GetProjection())
+            if reference is None:
+                reference = srs
+            elif not srs.IsSame(reference):
+                raise SystemExit(
+                    f"DTM {path} has a different CRS than {in_rasters[0]}. "
+                    "Reproject it to a common CRS first."
+                )
+        os.makedirs(os.path.dirname(str(out_vrt)) or ".", exist_ok=True)
+        gdal.BuildVRT(
+            str(out_vrt), in_rasters, options=gdal.BuildVRTOptions(resolution="highest")
+        ).FlushCache()
+        return str(out_vrt)
+
+    @staticmethod
+    def read_window(
+        in_raster,
+        bounds,
+        resolution,
+        resample="average",
+        warp_memory_mb=512,
+        overview="AUTO",
+        multithread=True,
+    ):
+        """
+        Reads a map window resampled to a grid aligned with bounds (gdal.Warp to MEM).
+        With overview="AUTO" GDAL reads from the overview closest to the target
+        resolution; use "NONE" for resampling methods such as max that overviews
+        built with AVERAGE cannot reproduce.
+        :param in_raster: raster path or open dataset
+        :param bounds: (xmin, ymin, xmax, ymax) in the raster CRS, multiples of resolution
+        :param resolution: output cell size
+        :param resample: GDAL resampling algorithm
+        :param warp_memory_mb: warp working buffer in MB
+        :param overview: "AUTO", "NONE" or overview index
+        :param multithread: warp with a worker thread (GDAL_NUM_THREADS)
+        :return: (float32 array with NaN as nodata, geotransform)
+        """
+        ds = (
+            gdal.Open(str(in_raster))
+            if isinstance(in_raster, (str, os.PathLike))
+            else in_raster
+        )
+        band = ds.GetRasterBand(1)
+        kwargs = {
+            "format": "MEM",
+            "outputBounds": list(bounds),
+            "xRes": resolution,
+            "yRes": resolution,
+            "resampleAlg": resample,
+            "outputType": gdal.GDT_Float32,
+            "dstNodata": float("nan"),
+            "multithread": multithread,
+            "warpMemoryLimit": warp_memory_mb,
+            "overviewLevel": overview,
+        }
+        if band.GetNoDataValue() is not None:
+            kwargs["srcNodata"] = band.GetNoDataValue()
+        out = gdal.Warp("", ds, options=gdal.WarpOptions(**kwargs))
+        array = out.GetRasterBand(1).ReadAsArray()
+        scale, offset = band.GetScale(), band.GetOffset()
+        if scale not in (None, 1.0) or offset not in (None, 0.0):
+            array = array * (scale or 1.0) + (offset or 0.0)
+        return array.astype(np.float32, copy=False), out.GetGeoTransform()
+
+    @staticmethod
+    def read_native(in_raster, bounds):
+        """
+        Reads the native pixels covering bounds (no resampling)
+        :param in_raster: raster path or open dataset
+        :param bounds: (xmin, ymin, xmax, ymax) in the raster CRS
+        :return: (float32 array with NaN as nodata, geotransform of the window)
+        """
+        ds = (
+            gdal.Open(str(in_raster))
+            if isinstance(in_raster, (str, os.PathLike))
+            else in_raster
+        )
+        band = ds.GetRasterBand(1)
+        gt = ds.GetGeoTransform()
+        col0 = max(int(floor((bounds[0] - gt[0]) / gt[1] + 1e-9)), 0)
+        col1 = min(int(ceil((bounds[2] - gt[0]) / gt[1] - 1e-9)), ds.RasterXSize)
+        row0 = max(int(floor((bounds[3] - gt[3]) / gt[5] + 1e-9)), 0)
+        row1 = min(int(ceil((bounds[1] - gt[3]) / gt[5] - 1e-9)), ds.RasterYSize)
+        if col1 <= col0 or row1 <= row0:
+            return np.empty((0, 0), np.float32), gt
+        array = band.ReadAsArray(col0, row0, col1 - col0, row1 - row0).astype(
+            np.float32
+        )
+        if band.GetNoDataValue() is not None:
+            array[array == np.float32(band.GetNoDataValue())] = np.nan
+        scale, offset = band.GetScale(), band.GetOffset()
+        if scale not in (None, 1.0) or offset not in (None, 0.0):
+            array = array * (scale or 1.0) + (offset or 0.0)
+        window_gt = (gt[0] + col0 * gt[1], gt[1], 0.0, gt[3] + row0 * gt[5], 0.0, gt[5])
+        return array, window_gt
+
+    @staticmethod
+    def array_to_mem(array, geotransform, wkt, nodata=None):
+        """
+        Numpy array to MEM dataset; float arrays get NaN as nodata unless set
+        :param array: 2D array (bool is stored as Byte)
+        :param geotransform: GDAL geotransform
+        :param wkt: CRS as WKT
+        :param nodata: nodata value
+        :return: gdal.Dataset
+        """
+        if array.dtype == bool:
+            array = array.astype(np.uint8)
+        data_type = gdal_array.NumericTypeCodeToGDALTypeCode(array.dtype)
+        ds = gdal.GetDriverByName("MEM").Create(
+            "", array.shape[1], array.shape[0], 1, data_type
+        )
+        ds.SetGeoTransform(geotransform)
+        ds.SetProjection(wkt)
+        band = ds.GetRasterBand(1)
+        if nodata is not None:
+            band.SetNoDataValue(float(nodata))
+        elif np.issubdtype(array.dtype, np.floating):
+            band.SetNoDataValue(float("nan"))
+        band.WriteArray(array)
+        return ds
+
+    @staticmethod
+    def best_compression(preferred="ZSTD"):
+        """
+        :param preferred: preferred GTiff compression
+        :return: preferred if the GDAL build supports it, otherwise DEFLATE
+        """
+        options = gdal.GetDriverByName("GTiff").GetMetadataItem(
+            "DMD_CREATIONOPTIONLIST"
+        )
+        return preferred if preferred in options else "DEFLATE"
+
+    @staticmethod
+    def write_array(path, array, geotransform, wkt, nodata=None, compress="ZSTD"):
+        """
+        Writes an array as tiled, compressed GeoTIFF (predictor by data type)
+        :param path: output GeoTIFF
+        :param array: 2D array
+        :param geotransform: GDAL geotransform
+        :param wkt: CRS as WKT
+        :param nodata: nodata value (NaN for float arrays if not set)
+        :param compress: preferred compression
+        """
+        os.makedirs(os.path.dirname(str(path)) or ".", exist_ok=True)
+        mem = Raster.array_to_mem(array, geotransform, wkt, nodata)
+        is_float = np.issubdtype(array.dtype, np.floating)
+        options = [
+            "TILED=YES",
+            "BLOCKXSIZE=256",
+            "BLOCKYSIZE=256",
+            f"COMPRESS={Raster.best_compression(compress)}",
+            f"PREDICTOR={3 if is_float else 2}",
+            "BIGTIFF=IF_SAFER",
+            "NUM_THREADS=ALL_CPUS",
+        ]
+        gdal.Translate(str(path), mem, format="GTiff", creationOptions=options)
+
+    @staticmethod
+    def rasterize_geometries(
+        geometries, values, shape, geotransform, wkt, all_touched=False, dtype=np.int32
+    ):
+        """
+        Burns shapely geometries with per-geometry values onto a grid
+        :param geometries: iterable of shapely geometries
+        :param values: burn value per geometry
+        :param shape: (rows, cols)
+        :param geotransform: GDAL geotransform
+        :param wkt: CRS as WKT
+        :param all_touched: burn every cell touched by the geometry
+        :param dtype: output numpy dtype
+        :return: array, 0 where nothing was burnt
+        """
+        vector_ds = gdal.GetDriverByName("MEM").Create("", 0, 0, 0, gdal.GDT_Unknown)
+        layer = vector_ds.CreateLayer(
+            "features", osr.SpatialReference(wkt=wkt), ogr.wkbUnknown
+        )
+        is_float = np.issubdtype(np.dtype(dtype), np.floating)
+        layer.CreateField(
+            ogr.FieldDefn("value", ogr.OFTReal if is_float else ogr.OFTInteger64)
+        )
+        definition = layer.GetLayerDefn()
+        for geometry, value in zip(geometries, values):
+            if geometry is None or geometry.is_empty:
+                continue
+            feature = ogr.Feature(definition)
+            feature.SetGeometry(ogr.CreateGeometryFromWkb(shapely.to_wkb(geometry)))
+            feature.SetField("value", float(value) if is_float else int(value))
+            layer.CreateFeature(feature)
+        raster = Raster.array_to_mem(
+            np.zeros(shape, dtype), geotransform, wkt, nodata=0
+        )
+        gdal.RasterizeLayer(
+            raster,
+            [1],
+            layer,
+            options=[
+                "ATTRIBUTE=value",
+                f"ALL_TOUCHED={'TRUE' if all_touched else 'FALSE'}",
+            ],
+        )
+        return raster.GetRasterBand(1).ReadAsArray()
+
+    @staticmethod
+    def polygonize_labels(labels, geotransform, wkt, connectedness=4):
+        """
+        Polygonizes a label raster (0 = background), one dissolved polygon per label
+        :param labels: 2D integer array
+        :param geotransform: GDAL geotransform
+        :param wkt: CRS as WKT
+        :param connectedness: 4 or 8
+        :return: gpd.GeoDataFrame with columns label, geometry
+        """
+        vector_ds = gdal.GetDriverByName("MEM").Create("", 0, 0, 0, gdal.GDT_Unknown)
+        layer = vector_ds.CreateLayer(
+            "polygons", osr.SpatialReference(wkt=wkt), ogr.wkbPolygon
+        )
+        layer.CreateField(ogr.FieldDefn("label", ogr.OFTInteger))
+        if labels.any():
+            label_ds = Raster.array_to_mem(
+                labels.astype(np.int32), geotransform, wkt, nodata=0
+            )
+            mask_ds = Raster.array_to_mem(
+                (labels > 0).astype(np.uint8), geotransform, wkt
+            )
+            options = ["8CONNECTED=8"] if connectedness == 8 else []
+            gdal.Polygonize(
+                label_ds.GetRasterBand(1), mask_ds.GetRasterBand(1), layer, 0, options
+            )
+        features = [
+            (
+                f.GetField("label"),
+                shapely.from_wkb(bytes(f.GetGeometryRef().ExportToWkb())),
+            )
+            for f in layer
+        ]
+        gdf = gpd.GeoDataFrame(
+            {"label": pd.Series([f[0] for f in features], dtype="int64")},
+            geometry=gpd.GeoSeries([f[1] for f in features], crs=wkt),
+        )
+        if gdf.empty:
+            return gdf
+        return gdf.dissolve(by="label").reset_index()
+
+    @staticmethod
+    def fill_nodata_cells(array, to_fill, geotransform, wkt, max_search_cells):
+        """
+        Interpolates selected cells with gdal.FillNodata (inverse distance from the
+        nearest valid cells); only the bounding box of to_fill is processed
+        :param array: 2D float array, NaN = nodata
+        :param to_fill: boolean mask of cells to interpolate
+        :param geotransform: GDAL geotransform
+        :param wkt: CRS as WKT
+        :param max_search_cells: search distance in cells
+        :return: (filled float32 array, number of cells that could not be filled)
+        """
+        result = array.astype(np.float32, copy=True)
+        if not to_fill.any():
+            return result, 0
+        margin = int(max_search_cells) + 1
+        rows = np.flatnonzero(to_fill.any(axis=1))
+        cols = np.flatnonzero(to_fill.any(axis=0))
+        r0, r1 = max(rows[0] - margin, 0), min(rows[-1] + 1 + margin, array.shape[0])
+        c0, c1 = max(cols[0] - margin, 0), min(cols[-1] + 1 + margin, array.shape[1])
+        sub = result[r0:r1, c0:c1].copy()
+        sub_fill = to_fill[r0:r1, c0:c1]
+        sub[sub_fill] = np.nan
+        sub_gt = (
+            geotransform[0] + c0 * geotransform[1],
+            geotransform[1],
+            0.0,
+            geotransform[3] + r0 * geotransform[5],
+            0.0,
+            geotransform[5],
+        )
+        target = Raster.array_to_mem(sub, sub_gt, wkt)
+        mask = Raster.array_to_mem((~np.isnan(sub)).astype(np.uint8), sub_gt, wkt)
+        gdal.FillNodata(
+            target.GetRasterBand(1),
+            mask.GetRasterBand(1),
+            maxSearchDist=int(max_search_cells),
+            smoothingIterations=0,
+        )
+        filled = target.GetRasterBand(1).ReadAsArray()
+        done = sub_fill & ~np.isnan(filled)
+        window = result[r0:r1, c0:c1]
+        window[done] = filled[done]
+        return result, int((sub_fill & ~done).sum())
+
+    @staticmethod
+    def footprint(in_raster, resolution):
+        """
+        Valid-data footprint of a raster from a decimated read; GDAL serves the read
+        from overviews when they exist, otherwise only the rows and columns needed
+        are decoded. The mask is dilated by one coarse cell so that narrow strips of
+        data lost by decimation are kept.
+        :param in_raster: raster path
+        :param resolution: footprint cell size in raster units
+        :return: gpd.GeoDataFrame with one dissolved (multi)polygon
+        """
+        ds = gdal.Open(str(in_raster))
+        band = ds.GetRasterBand(1)
+        gt = ds.GetGeoTransform()
+        factor = max(1, int(round(resolution / abs(gt[1]))))
+        out_w = max(1, ceil(ds.RasterXSize / factor))
+        out_h = max(1, ceil(ds.RasterYSize / factor))
+        array = band.ReadAsArray(
+            buf_xsize=out_w,
+            buf_ysize=out_h,
+            resample_alg=gdal.GRIORA_NearestNeighbour,
+        )
+        valid = np.ones(array.shape, bool)
+        if band.GetNoDataValue() is not None:
+            valid &= array != band.GetNoDataValue()
+        if np.issubdtype(array.dtype, np.floating):
+            valid &= ~np.isnan(array)
+        valid = ndimage.binary_dilation(valid, structure=np.ones((3, 3), bool))
+        coarse_gt = (
+            gt[0],
+            gt[1] * ds.RasterXSize / out_w,
+            0.0,
+            gt[3],
+            0.0,
+            gt[5] * ds.RasterYSize / out_h,
+        )
+        polygons = Raster.polygonize_labels(
+            valid.astype(np.int32), coarse_gt, ds.GetProjection()
+        )
+        return gpd.GeoDataFrame(
+            geometry=[shapely.union_all(polygons.geometry.values)],
+            crs=ds.GetProjection(),
+        )
+
 
 class Vector:
     @staticmethod
@@ -1428,6 +1829,85 @@ class Vector:
             gdf_lines_merged = gdf_lines.copy()
         return gdf_lines_merged
 
+    @staticmethod
+    def check_single_layer(path):
+        """
+        Stops with a clear message unless the vector file contains exactly one layer
+        :param path: vector file
+        """
+        ds = ogr.Open(str(path))
+        if ds is None:
+            raise SystemExit(f"Cannot open vector file: {path}")
+        if ds.GetLayerCount() != 1:
+            names = [ds.GetLayer(i).GetName() for i in range(ds.GetLayerCount())]
+            raise SystemExit(
+                f"{path} contains {ds.GetLayerCount()} layers {names}; every vector input "
+                "must contain exactly one layer (convert it with gdal.VectorTranslate)."
+            )
+
+    @staticmethod
+    def read_merged(paths, wkt, bbox=None, where=None, keep_columns=None):
+        """
+        Reads one or more single-layer vector files, reprojects them to wkt and merges
+        them; the column source holds the file stem
+        :param paths: path or list of paths
+        :param wkt: target CRS as WKT
+        :param bbox: optional (xmin, ymin, xmax, ymax) in the target CRS
+        :param where: optional SQL WHERE clause
+        :param keep_columns: attribute columns to keep when present
+        :return: gpd.GeoDataFrame with keep_columns, source and geometry
+        """
+        frames = []
+        for path in Config.as_list(paths):
+            Vector.check_single_layer(path)
+            kwargs = {}
+            if bbox is not None:
+                kwargs["bbox"] = gpd.GeoSeries([box(*bbox)], crs=wkt)
+            if where:
+                kwargs["where"] = where
+            gdf = gpd.read_file(path, **kwargs)
+            if gdf.crs is None:
+                log.warning("%s has no CRS; assuming the DTM CRS.", path)
+                gdf = gdf.set_crs(wkt)
+            gdf = gdf.to_crs(wkt)
+            gdf["source"] = os.path.splitext(os.path.basename(str(path)))[0]
+            columns = [c for c in (keep_columns or []) if c in gdf.columns]
+            frames.append(gdf[columns + ["source", "geometry"]])
+        gdf = gpd.GeoDataFrame(
+            pd.concat(frames, ignore_index=True), geometry="geometry", crs=wkt
+        )
+        return gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].reset_index(drop=True)
+
+    @staticmethod
+    def write_gpkg(gdf, path):
+        """
+        Writes a GeoDataFrame as its own single-layer GeoPackage (replaces the file)
+        :param gdf: gpd.GeoDataFrame
+        :param path: output .gpkg
+        """
+        os.makedirs(os.path.dirname(str(path)) or ".", exist_ok=True)
+        if exists(str(path)):
+            os.remove(str(path))
+        gdf.to_file(str(path), driver="GPKG")
+
+    @staticmethod
+    def length_near_boundary(polygons, lines, distance):
+        """
+        Length of lines within distance of each polygon boundary
+        :param polygons: gpd.GeoDataFrame of polygons
+        :param lines: gpd.GeoDataFrame of lines in the same CRS
+        :param distance: search distance in CRS units
+        :return: numpy array with one length per polygon
+        """
+        if polygons.empty or lines.empty:
+            return np.zeros(len(polygons))
+        zones = shapely.buffer(shapely.boundary(polygons.geometry.values), distance)
+        idx_zone, idx_line = lines.sindex.query(zones, predicate="intersects")
+        lengths = shapely.length(
+            shapely.intersection(zones[idx_zone], lines.geometry.values[idx_line])
+        )
+        return np.bincount(idx_zone, weights=lengths, minlength=len(polygons))
+
 
 class Geometry:
     # from StackOverflow to be tested
@@ -1560,6 +2040,52 @@ class Hydro:
     def flow_accumulation(d8):
         flow_acc = pyflwdir.flow_accumulation(d8)
         return flow_acc
+
+    @staticmethod
+    def breach_to_streams(dem, stream, burn=0.0, burn_buffer_cells=0.0, eps=1e-5):
+        """
+        Stream cell reached downstream by every cell. Routing runs on a conditioned
+        copy of dem: tapered stream burning (cells lowered by burn at the stream,
+        decreasing linearly to zero at burn_buffer_cells), complete breaching
+        (priority flood from the stream cells, depressions carved along the flood path,
+        flats given an eps gradient), then D8 steepest descent. Without the burning,
+        paths can run along channel cells parallel to the rasterized stream and reach
+        it only far downstream. The input dem is not modified.
+        :param dem: 2D float array, NaN = nodata
+        :param stream: 2D bool array of stream cells (the only outlets)
+        :param burn: lowering of the stream cells in the conditioned copy
+        :param burn_buffer_cells: distance in cells over which the lowering tapers off
+        :param eps: elevation step used for carving and flats
+        :return: 2D int64 array of flat indices of the stream cell reached, -1 if none
+        """
+        conditioned = np.ascontiguousarray(dem, dtype=np.float32)
+        if burn > 0 and stream.any():
+            distance = ndimage.distance_transform_edt(~stream)
+            taper = np.clip(1.0 - distance / max(float(burn_buffer_cells), 1.0), 0, 1)
+            conditioned = (conditioned - burn * taper).astype(np.float32)
+            del distance, taper
+        return _breach_to_streams(
+            conditioned, np.ascontiguousarray(stream, dtype=np.bool_), eps
+        )
+
+    @staticmethod
+    def priority_flood(surface, seeds):
+        """
+        Lowest level at which water starting at the seeds reaches each cell
+        (4-connected, spill = max(spill of the previous cell, surface)).
+        :param surface: 2D float array, NaN = impassable
+        :param seeds: 2D bool array of seed cells (level 0)
+        :return: (spill float32 with NaN where unreached,
+                  seed int64 flat index of the seed each minimal path starts from,
+                  order int64 in which cells were reached, -1 where unreached)
+        """
+        spill, seed, order = _priority_flood(
+            np.ascontiguousarray(surface, dtype=np.float32),
+            np.ascontiguousarray(seeds, dtype=np.bool_),
+        )
+        spill = spill.astype(np.float32)
+        spill[~np.isfinite(spill)] = np.nan
+        return spill, seed, order
 
 
 class MosaicRasters:
@@ -2041,3 +2567,583 @@ class MosaicRasters:
 
         self.dst = None
         return self.output
+
+
+# =============================================================================
+# Defenses package: numba kernels, configuration and run utilities
+# =============================================================================
+
+
+@njit(cache=True)
+def _breach_to_streams(dem, stream, eps):
+    rows, cols = dem.shape
+    n = rows * cols
+    flat = dem.ravel()
+    is_stream = stream.ravel()
+    z = np.empty(n, np.float64)
+    for c in range(n):
+        z[c] = flat[c]
+    parent = np.full(n, -1, np.int64)
+    seen = np.zeros(n, np.bool_)
+    di = np.array([-1, -1, -1, 0, 0, 1, 1, 1])
+    dj = np.array([-1, 0, 1, -1, 1, -1, 0, 1])
+    dist = np.array([sqrt(2.0), 1.0, sqrt(2.0), 1.0, 1.0, sqrt(2.0), 1.0, sqrt(2.0)])
+    heap = [(0.0, np.int64(0))]
+    heap.pop()
+    for c in range(n):
+        if is_stream[c] and not np.isnan(z[c]):
+            seen[c] = True
+            heap.append((z[c], np.int64(c)))
+    heapq.heapify(heap)
+    while len(heap) > 0:
+        _, c = heapq.heappop(heap)
+        ci = c // cols
+        cj = c % cols
+        for k in range(8):
+            ni = ci + di[k]
+            nj = cj + dj[k]
+            if ni < 0 or nj < 0 or ni >= rows or nj >= cols:
+                continue
+            nb = ni * cols + nj
+            if seen[nb] or np.isnan(z[nb]):
+                continue
+            seen[nb] = True
+            parent[nb] = c
+            if z[nb] <= z[c]:
+                if z[c] - z[nb] < eps:
+                    # flat: a small gradient towards the outlet
+                    z[nb] = z[c] + eps
+                else:
+                    # pit: carve the path back towards the outlet below the pit level
+                    target = z[nb] - eps
+                    p = c
+                    while p >= 0 and z[p] > target:
+                        z[p] = target
+                        target -= eps
+                        p = parent[p]
+            heapq.heappush(heap, (z[nb], nb))
+
+    # D8 steepest descent on the conditioned surface; receivers are always lower,
+    # so processing cells by increasing elevation resolves every path in one pass.
+    reached = np.full(n, -1, np.int64)
+    for c in np.argsort(z):
+        if not seen[c]:
+            continue
+        if is_stream[c]:
+            reached[c] = c
+            continue
+        ci = c // cols
+        cj = c % cols
+        best = 0.0
+        receiver = -1
+        for k in range(8):
+            ni = ci + di[k]
+            nj = cj + dj[k]
+            if ni < 0 or nj < 0 or ni >= rows or nj >= cols:
+                continue
+            nb = ni * cols + nj
+            if not seen[nb]:
+                continue
+            slope = (z[c] - z[nb]) / dist[k]
+            if slope > best:
+                best = slope
+                receiver = nb
+        if receiver < 0:
+            receiver = parent[c]
+        reached[c] = reached[receiver]
+    return reached.reshape(rows, cols)
+
+
+@njit(cache=True)
+def _priority_flood(surface, seeds):
+    rows, cols = surface.shape
+    n = rows * cols
+    flat = surface.ravel()
+    is_seed = seeds.ravel()
+    spill = np.full(n, np.inf)
+    seed = np.full(n, -1, np.int64)
+    order = np.full(n, -1, np.int64)
+    heap = [(0.0, np.int64(0))]
+    heap.pop()
+    for c in range(n):
+        if is_seed[c] and not np.isnan(flat[c]):
+            spill[c] = 0.0
+            seed[c] = c
+            heap.append((0.0, np.int64(c)))
+    heapq.heapify(heap)
+    counter = 0
+    while len(heap) > 0:
+        level, c = heapq.heappop(heap)
+        if level > spill[c] or order[c] >= 0:
+            continue
+        order[c] = counter
+        counter += 1
+        ci = c // cols
+        cj = c % cols
+        for k in range(4):
+            if k == 0:
+                if ci == 0:
+                    continue
+                nb = c - cols
+            elif k == 1:
+                if ci == rows - 1:
+                    continue
+                nb = c + cols
+            elif k == 2:
+                if cj == 0:
+                    continue
+                nb = c - 1
+            else:
+                if cj == cols - 1:
+                    continue
+                nb = c + 1
+            value = flat[nb]
+            if np.isnan(value) or order[nb] >= 0:
+                continue
+            new_level = level if level > value else value
+            if new_level < spill[nb]:
+                spill[nb] = new_level
+                seed[nb] = seed[c]
+                heapq.heappush(heap, (new_level, nb))
+    return (
+        spill.reshape(rows, cols),
+        seed.reshape(rows, cols),
+        order.reshape(rows, cols),
+    )
+
+
+class Config:
+    """
+    TOML configuration of the Defenses package. Keys are dotted names; the prefix
+    "country." addresses the table [countries.<code>] of the selected country.
+    Keys listed in the top-level array "placeholders" are logged as warnings when used.
+    """
+
+    # Value kinds: int, float, bool, str, dir, path, paths, opt_path, opt_paths,
+    # int_list, float_list, table
+    SCHEMA = {
+        "general.work_dir": "dir",
+        "general.output_dir": "dir",
+        "general.n_workers": "int",
+        "general.max_ram_gb_per_worker": "float",
+        "general.gdal_cachemax_mb": "int",
+        "general.warp_memory_limit_mb": "int",
+        "general.gdal_threads_per_worker": "int",
+        "general.log_level": "str",
+        "benchmark.n_windows": "int",
+        "benchmark.window_px": "int",
+        "benchmark.sequential_rows": "int",
+        "benchmark.seed": "int",
+        "country.dtm": "paths",
+        "country.levees": "paths",
+        "country.rivers": "paths",
+        "country.river_upstream_area_field": "str",
+        "country.upstream_area_raster": "opt_path",
+        "country.reference_protected_areas": "opt_paths",
+        "country.reference_rp_field": "str",
+        "country.overrides": "opt_path",
+        "country.working_resolution_m": "float",
+        "country.corridor_buffer_m": "float",
+        "country.unit_core_size_m": "float",
+        "country.unit_halo_m": "float",
+        "country.convert_dtm": "bool",
+        "country.dtm_conversion": "str",
+        "country.dtm_compress": "str",
+        "country.footprint_resolution_m": "float",
+        "country.bytes_per_cell": "float",
+        "country.crest_box_size_m": "float",
+        "country.merge_overlap_ratio": "float",
+        "country.drop_contradicted_truncated": "bool",
+        "country.contradiction_ratio": "float",
+        "country.id_rounding_m": "float",
+        "country.keep_intermediate": "bool",
+        "country.compartments.gap_tolerance_m": "float",
+        "country.compartments.touch_tolerance_m": "float",
+        "country.compartments.self_close_min_length_factor": "float",
+        "country.compartments.crest_search_radius_m": "float",
+        "country.compartments.barrier_removal_width_m": "float",
+        "country.compartments.min_margin_m": "float",
+        "country.compartments.max_level_m": "float",
+        "country.compartments.min_area_m2": "float",
+        "country.compartments.gated_crossings": "bool",
+        "country.compartments.fill_nodata_holes": "bool",
+        "country.compartments.stream_burn_m": "float",
+        "country.compartments.stream_burn_buffer_m": "float",
+        "country.rp.classes": "int_list",
+        "country.rp.distribution_classes": "int_list",
+        "country.rp.distribution_shares": "float_list",
+        "country.rp.max_rp": "int",
+        "country.rp.cap_levels_m": "float_list",
+        "country.rp.cap_rp": "int_list",
+        "country.rp.score_weight_value": "float",
+        "country.rp.score_weight_upstream": "float",
+        "country.rp.levee_adjacent_distance_m": "float",
+        "country.rp.storey_height_m": "float",
+        "country.rp.max_damage_csv": "path",
+        "country.rp.depth_damage_csv": "path",
+    }
+    ALLOWED = {
+        "country.dtm_conversion": {"A", "B"},
+        "country.dtm_compress": {"ZSTD", "DEFLATE", "LZW"},
+        "general.log_level": {"DEBUG", "INFO", "WARNING", "ERROR"},
+    }
+
+    @staticmethod
+    def as_list(value):
+        """
+        :param value: single path, list of paths, or empty string
+        :return: list of strings (empty for "" or None)
+        """
+        if value is None or value == "":
+            return []
+        if isinstance(value, (list, tuple)):
+            return [str(v) for v in value]
+        return [str(value)]
+
+    @staticmethod
+    def get(cfg, key):
+        """
+        :param cfg: configuration dict returned by load
+        :param key: dotted key
+        :return: value (KeyError if missing)
+        """
+        node = cfg
+        for part in key.split("."):
+            node = node[part]
+        return node
+
+    @staticmethod
+    def load(path, country, keys):
+        """
+        Reads the TOML configuration and validates the keys a script uses: presence,
+        type, file existence, allowed values and consistency between related keys.
+        Stops with a list of all problems.
+        :param path: TOML file
+        :param country: country code, a table [countries.<code>] must exist
+        :param keys: dotted keys required by the calling script
+        :return: dict with the top-level tables, "country" (the country table),
+            "country_code" and "used_keys"
+        """
+        if not exists(str(path)):
+            raise SystemExit(f"Configuration file not found: {path}")
+        with open(str(path), "rb") as f:
+            raw = tomllib.load(f)
+        countries = raw.get("countries", {})
+        if country not in countries:
+            raise SystemExit(
+                f"Country '{country}' is not configured in {path}; "
+                f"available: {sorted(countries)}"
+            )
+        cfg = {k: v for k, v in raw.items() if k != "countries"}
+        cfg["country"] = countries[country]
+        cfg["country_code"] = country
+        cfg["used_keys"] = list(keys)
+        errors = []
+        for key in keys:
+            kind = Config.SCHEMA.get(key)
+            if kind is None:
+                errors.append(f"{key}: not a known configuration key")
+                continue
+            try:
+                value = Config.get(cfg, key)
+            except (KeyError, TypeError):
+                errors.append(f"{key}: missing")
+                continue
+            checked, problem = Config._check_value(kind, value)
+            if problem:
+                errors.append(f"{key}: {problem}")
+                continue
+            if key in Config.ALLOWED and checked not in Config.ALLOWED[key]:
+                errors.append(
+                    f"{key}: {checked!r} not in {sorted(Config.ALLOWED[key])}"
+                )
+            node = cfg
+            parts = key.split(".")
+            for part in parts[:-1]:
+                node = node[part]
+            node[parts[-1]] = checked
+        if not errors:
+            errors = Config._check_consistency(cfg, set(keys))
+        if errors:
+            raise SystemExit(
+                f"Invalid configuration {path} (country {country}):\n  - "
+                + "\n  - ".join(errors)
+            )
+        return cfg
+
+    @staticmethod
+    def _check_value(kind, value):
+        numeric = (int, float)
+        if kind == "int":
+            if isinstance(value, bool) or not isinstance(value, int):
+                return value, f"expected an integer, got {value!r}"
+            return value, None if value >= 0 else "must not be negative"
+        if kind == "float":
+            if isinstance(value, bool) or not isinstance(value, numeric):
+                return value, f"expected a number, got {value!r}"
+            return float(value), None if value >= 0 else "must not be negative"
+        if kind == "bool":
+            return value, (
+                None
+                if isinstance(value, bool)
+                else f"expected true/false, got {value!r}"
+            )
+        if kind == "str":
+            return value, (
+                None if isinstance(value, str) else f"expected a string, got {value!r}"
+            )
+        if kind == "dir":
+            if not isinstance(value, str) or not value:
+                return value, "expected a non-empty directory path"
+            return value, None
+        if kind in ("path", "opt_path"):
+            if not isinstance(value, str):
+                return value, f"expected a path string, got {value!r}"
+            if not value:
+                return value, None if kind == "opt_path" else "empty path"
+            return value, None if exists(value) else f"file not found: {value}"
+        if kind in ("paths", "opt_paths"):
+            if not isinstance(value, (str, list)):
+                return value, "expected a path or a list of paths"
+            paths = Config.as_list(value)
+            if not paths and kind == "paths":
+                return paths, "at least one path is required"
+            missing = [p for p in paths if not exists(p)]
+            return paths, f"file(s) not found: {missing}" if missing else None
+        if kind in ("int_list", "float_list"):
+            if not isinstance(value, list) or not all(
+                isinstance(v, numeric) and not isinstance(v, bool) for v in value
+            ):
+                return value, f"expected a list of numbers, got {value!r}"
+            if kind == "int_list" and not all(isinstance(v, int) for v in value):
+                return value, f"expected a list of integers, got {value!r}"
+            return value, None
+        if kind == "table":
+            return value, None if isinstance(value, dict) else "expected a table"
+        return value, f"unknown kind {kind}"
+
+    @staticmethod
+    def _check_consistency(cfg, keys):
+        errors = []
+        c = cfg["country"]
+        if "country.working_resolution_m" in keys and c["working_resolution_m"] <= 0:
+            errors.append("country.working_resolution_m must be positive")
+        if {"country.unit_core_size_m", "country.working_resolution_m"} <= keys:
+            if c["unit_core_size_m"] < 2 * c["working_resolution_m"]:
+                errors.append(
+                    "country.unit_core_size_m must be at least two working cells"
+                )
+        if {"country.unit_halo_m", "country.corridor_buffer_m"} <= keys:
+            if c["unit_halo_m"] < c["corridor_buffer_m"]:
+                # A core cell may lie corridor_buffer_m from its river; HAND needs that river inside the window.
+                errors.append(
+                    "country.unit_halo_m must be at least country.corridor_buffer_m, otherwise "
+                    "cells of a core can have their river outside the unit window"
+                )
+        if "general.n_workers" in keys and cfg["general"]["n_workers"] < 1:
+            errors.append("general.n_workers must be at least 1")
+        if (
+            "country.merge_overlap_ratio" in keys
+            and not 0 < c["merge_overlap_ratio"] <= 1
+        ):
+            errors.append("country.merge_overlap_ratio must be in (0, 1]")
+        if "benchmark.window_px" in keys and cfg["benchmark"]["window_px"] < 1:
+            errors.append("benchmark.window_px must be positive")
+        rp = c.get("rp", {})
+        if {
+            "country.rp.distribution_classes",
+            "country.rp.distribution_shares",
+        } <= keys:
+            if len(rp["distribution_classes"]) != len(rp["distribution_shares"]):
+                errors.append(
+                    "rp.distribution_classes and rp.distribution_shares differ in length"
+                )
+            elif abs(sum(rp["distribution_shares"]) - 1.0) > 1e-6:
+                errors.append("rp.distribution_shares must sum to 1")
+        if {"country.rp.cap_levels_m", "country.rp.cap_rp"} <= keys:
+            if len(rp["cap_levels_m"]) != len(rp["cap_rp"]):
+                errors.append("rp.cap_levels_m and rp.cap_rp differ in length")
+            elif list(rp["cap_levels_m"]) != sorted(rp["cap_levels_m"]):
+                errors.append("rp.cap_levels_m must be ascending")
+        if "country.rp.classes" in keys and list(rp["classes"]) != sorted(
+            set(rp["classes"])
+        ):
+            errors.append("rp.classes must be strictly ascending")
+        return errors
+
+    @staticmethod
+    def warn_placeholders(cfg, keys=None):
+        """
+        Logs a warning for every used key listed in the top-level array placeholders
+        :param cfg: configuration dict returned by load
+        :param keys: keys to check (default: the keys validated by load)
+        """
+        placeholders = set(cfg.get("placeholders", []))
+        for key in keys or cfg["used_keys"]:
+            if key in placeholders:
+                log.warning(
+                    "Placeholder value in use: %s = %r", key, Config.get(cfg, key)
+                )
+
+
+class Run:
+    @staticmethod
+    def env_overrides(**variables):
+        """
+        Run variables set at the top of a script, overridden by environment variables
+        DEFENSES_<NAME> (used by tests and batch runs). Types follow the defaults:
+        bool accepts 1/0/true/false, list accepts comma-separated values.
+        :return: dict name -> value in the given order
+        """
+        values = {}
+        for name, default in variables.items():
+            raw = os.environ.get(f"DEFENSES_{name}")
+            if raw is None:
+                values[name] = default
+            elif isinstance(default, bool):
+                values[name] = raw.strip().lower() in ("1", "true", "yes")
+            elif isinstance(default, list):
+                values[name] = [v.strip() for v in raw.split(",") if v.strip()]
+            else:
+                values[name] = type(default)(raw)
+        return values
+
+    @staticmethod
+    def logger(name, log_dir=None, level="INFO"):
+        """
+        Console logging plus an optional run log file <log_dir>/<name>_<timestamp>.log
+        :return: logging.Logger
+        """
+        root = logging.getLogger()
+        root.setLevel(level)
+        formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        if not any(type(h) is logging.StreamHandler for h in root.handlers):
+            console = logging.StreamHandler()
+            console.setFormatter(formatter)
+            root.addHandler(console)
+        if log_dir is not None:
+            os.makedirs(str(log_dir), exist_ok=True)
+            path = join(str(log_dir), f"{name}_{time.strftime('%Y%m%d_%H%M%S')}.log")
+            file_handler = logging.FileHandler(path, encoding="utf-8")
+            file_handler.setFormatter(formatter)
+            root.addHandler(file_handler)
+        logging.captureWarnings(True)
+        return logging.getLogger(name)
+
+    @staticmethod
+    def peak_rss_mb():
+        """
+        Peak resident memory of the current process in MB (Linux, macOS, Windows)
+        """
+        if sys.platform == "win32":
+
+            class Counters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", ctypes.c_ulong),
+                    ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = Counters()
+            counters.cb = ctypes.sizeof(Counters)
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            psapi = ctypes.windll.psapi
+            psapi.GetProcessMemoryInfo.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(Counters),
+                ctypes.c_ulong,
+            ]
+            psapi.GetProcessMemoryInfo(
+                kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+            )
+            return counters.PeakWorkingSetSize / 2**20
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return peak / 2**20 if sys.platform == "darwin" else peak / 1024
+
+    @staticmethod
+    def configure_gdal(cache_mb, threads):
+        """
+        GDAL block cache and thread count of the current process
+        :param cache_mb: GDAL_CACHEMAX in MB
+        :param threads: GDAL_NUM_THREADS (int or "ALL_CPUS")
+        """
+        gdal.SetCacheMax(int(cache_mb) * 2**20)
+        gdal.SetConfigOption("GDAL_NUM_THREADS", str(threads))
+
+    @staticmethod
+    def format_seconds(seconds):
+        """
+        :return: seconds as h:mm:ss
+        """
+        if seconds is None or not np.isfinite(seconds):
+            return "?"
+        seconds = int(round(seconds))
+        return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+    @staticmethod
+    def run_units(func, tasks, n_workers, gdal_cache_mb, gdal_threads, weights, logger):
+        """
+        Runs func(task) for every task in a pool of fresh processes (one process per
+        task, so peak memory is measured per task and freed after it). Tasks are
+        submitted in the given order; func returns a dict with a "summary" string.
+        :param tasks: list of picklable dicts with key unit_id
+        :param weights: relative cost per task, used for the ETA
+        :return: (list of results, list of failed unit ids)
+        """
+        results, failed = [], []
+        if not tasks:
+            return results, failed
+        total = float(sum(weights)) or 1.0
+        finished = 0.0
+        start = time.perf_counter()
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            mp_context=context,
+            max_tasks_per_child=1,
+            initializer=Run.configure_gdal,
+            initargs=(gdal_cache_mb, gdal_threads),
+        ) as pool:
+            futures = {
+                pool.submit(func, task): (task, w) for task, w in zip(tasks, weights)
+            }
+            for future in as_completed(futures):
+                task, weight = futures[future]
+                finished += weight
+                try:
+                    result = future.result()
+                    results.append(result)
+                    message = result.get("summary", "")
+                except BrokenProcessPool as error:
+                    failed.append(task["unit_id"])
+                    message = f"worker process died ({error}); possibly out of memory"
+                    logger.error("Unit %s: %s", task["unit_id"], message)
+                except Exception:
+                    failed.append(task["unit_id"])
+                    logger.exception("Unit %s failed", task["unit_id"])
+                    message = "failed"
+                elapsed = time.perf_counter() - start
+                eta = (
+                    elapsed / finished * (total - finished)
+                    if finished
+                    else float("nan")
+                )
+                logger.info(
+                    "[%d/%d] %s | elapsed %s, ETA %s",
+                    len(results) + len(failed),
+                    len(tasks),
+                    message,
+                    Run.format_seconds(elapsed),
+                    Run.format_seconds(eta),
+                )
+        return results, failed

@@ -1,0 +1,113 @@
+# Configuration of the Defenses package (read with tomllib).
+# Every path entry accepts a single string or a list of strings; "" or [] means "not used".
+# Copy the [countries.XX] tables for every country; scripts select one via the COUNTRY run variable.
+# Keys listed in `placeholders` are logged as warnings whenever a script uses them; remove a key
+# from the list once its value is confirmed.
+
+placeholders = [
+    "country.bytes_per_cell",
+    "country.rp.distribution_classes",
+    "country.rp.distribution_shares",
+    "country.rp.max_rp",
+    "country.rp.cap_levels_m",
+    "country.rp.cap_rp",
+    "sources.glofas_min_upstream_area_km2",
+    "evidence.f_wet_comparison",
+    "evidence.f_dry_inside",
+    "evidence.f_wet_inside",
+    "evidence.upstream_ratio_min",
+    "evidence.upstream_ratio_max",
+]
+
+[general]
+work_dir = ""                   # scratch and per-unit intermediates (fast local disk)
+output_dir = ""                 # final GeoPackages, CSV tables and run logs
+n_workers = 4                   # parallel unit processes; RAM need = n_workers x unit RAM
+max_ram_gb_per_worker = 16.0    # build_units stops if a unit window would need more
+gdal_cachemax_mb = 2048         # GDAL block cache per process
+warp_memory_limit_mb = 1024     # gdal.Warp working buffer per call
+gdal_threads_per_worker = 2     # GDAL_NUM_THREADS inside each worker (warping, compression)
+log_level = "INFO"
+
+[benchmark]
+n_windows = 20                  # random windows per DTM
+window_px = 4096                # native window edge in pixels
+sequential_rows = 512           # full-width rows read in one sequential request
+seed = 42                       # random generator seed (reproducible window positions)
+
+[countries.XX]
+dtm = []                        # one or more large GeoTIFF/VRT files in one CRS
+levees = []                     # e.g. ["/data/levees_ml.gpkg", "/data/levees_osm.gpkg"]
+rivers = []                     # modelled river network (lines)
+river_upstream_area_field = ""  # column with upstream area in km2, or ""
+upstream_area_raster = ""       # alternative upstream area source, or ""
+reference_protected_areas = []  # optional, validation only
+reference_rp_field = ""         # optional
+overrides = ""                  # optional point file with columns rp and note
+working_resolution_m = 5.0      # processing grid; terrain is averaged from the native DTM
+corridor_buffer_m = 3000.0      # river buffer defining the processed corridor
+unit_core_size_m = 20000.0      # square unit cores, aligned to the working grid
+unit_halo_m = 3000.0            # overlap read around each core
+convert_dtm = false             # prepare_dtm.py converts only when true
+dtm_conversion = "B"            # "A": whole file tiled + overviews; "B": corridor-clipped tiled copy
+dtm_compress = "ZSTD"           # ZSTD (falls back to DEFLATE if GDAL lacks it), DEFLATE or LZW
+footprint_resolution_m = 100.0  # cell size of the valid-data footprint
+bytes_per_cell = 180.0          # peak RAM per window cell; replace with the value logged by compartments.py
+crest_box_size_m = 500.0        # crest boxes around levees; adjacent boxes in a row are merged
+merge_overlap_ratio = 0.5       # candidates from different units overlapping more are the same compartment
+drop_contradicted_truncated = true  # drop compartments truncated everywhere if neighbouring windows see no protection
+contradiction_ratio = 0.5       # share of such a compartment that silent neighbouring windows must cover
+id_rounding_m = 10.0            # rounding of the representative point in compartment_id
+keep_intermediate = false       # write dtm, spill, margin, barrier and crest rasters per unit
+
+[countries.XX.compartments]
+gap_tolerance_m = 20.0
+touch_tolerance_m = 0.01                 # endpoint closer than this to another line is connected
+self_close_min_length_factor = 3.0       # a line closes on itself only if longer than factor x gap
+crest_search_radius_m = 5.0
+barrier_removal_width_m = 10.0
+min_margin_m = 0.3
+max_level_m = 20.0
+min_area_m2 = 10000.0
+gated_crossings = false                  # true: river-levee crossings closed (flap gates)
+fill_nodata_holes = true                 # interpolate DTM nodata holes enclosed by data
+stream_burn_m = 0.0                      # bug B1 (README): 0 = previous routing; 5.0 proposed, pending approval
+stream_burn_buffer_m = 100.0             # taper width of the burning; wider than half the widest channel
+
+[countries.XX.rp]
+classes = [10, 20, 50, 100, 200, 500]
+distribution_classes = [20, 50, 100, 200]    # placeholder
+distribution_shares = [0.2, 0.3, 0.4, 0.1]   # placeholder
+max_rp = 200                                 # placeholder
+cap_levels_m = [0.5, 1.0, 2.0]               # placeholder
+cap_rp = [10, 50, 100]                       # placeholder
+score_weight_value = 0.5
+score_weight_upstream = 0.5
+levee_adjacent_distance_m = 10.0
+storey_height_m = 3.0
+max_damage_csv = ""                          # user provided (JRC global depth-damage based)
+depth_damage_csv = ""                        # user provided
+
+[sources]
+geofabrik_url_template = ""     # NOT VERIFIED: fill from the official Geofabrik documentation
+ghsl_url_templates = []         # NOT VERIFIED: tile naming of the JRC GHSL FTP to be confirmed
+ghsl_epoch = 0                  # 0 = latest available unless set
+gfm_stac_url = ""               # NOT VERIFIED: GFM STAC API endpoint
+gfm_date_from = "2015-01-01"
+gfm_date_to = ""
+glofas_enabled = true
+glofas_dataset_id = ""          # NOT VERIFIED: EWDS dataset identifier
+glofas_min_upstream_area_km2 = 0   # placeholder
+osm_tags_hydraulic = { waterway = ["sluice_gate", "lock_gate", "weir", "dam"], man_made = ["pumping_station"] }
+osm_tags_drains = { waterway = ["drain", "ditch", "canal"] }
+
+[evidence]
+comparison_distance_m = 2000.0
+min_valid_pixels = 200
+f_wet_comparison = 0.5          # placeholder
+f_dry_inside = 0.05             # placeholder
+f_wet_inside = 0.3              # placeholder
+flooded_window_days = 3
+glofas_search_radius_km = 5.0
+upstream_ratio_min = 0.7        # placeholder
+upstream_ratio_max = 1.3        # placeholder
