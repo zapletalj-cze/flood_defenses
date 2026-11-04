@@ -1,11 +1,10 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
-# Inspects and benchmarks the national DTM files, derives their valid-data footprint, estimates runtimes
-# and disk needs, and optionally converts them to a tiled layout with overviews (whole file or corridor).
+# Inspects and benchmarks the national DTM files (and DSM files when configured), derives their valid-data footprint,
+# estimates runtimes and disk needs, and optionally converts the DTM to a tiled layout with overviews.
 
 import json
 import os
-import re
 import shutil
 import time
 from pathlib import Path
@@ -14,7 +13,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
-from osgeo import gdal, gdal_array
+from osgeo import gdal, gdal_array, osr
 
 import gis
 
@@ -36,6 +35,7 @@ KEYS = [
     "benchmark.sequential_rows",
     "benchmark.seed",
     "country.dtm",
+    "country.dsm",
     "country.working_resolution_m",
     "country.unit_core_size_m",
     "country.unit_halo_m",
@@ -155,218 +155,137 @@ if __name__ == "__main__":
             100 * area_km2 / extent_km2,
         )
 
-    # --- 3. Benchmark ---
-    estimates = {"country": run["COUNTRY"], "dtm": []}
-    bench_path = out_dir / "dtm_benchmark.csv"
+    # --- 2b. DSM (Stage D): same inspection, same CRS as the DTM, footprint, VRT ---
+    dsm_infos = [gis.Raster.inspect(path) for path in country["dsm"]]
+    dsm_footprints = gpd.GeoDataFrame(columns=["path", "geometry"], geometry="geometry")
+    if dsm_infos:
+        dtm_srs = osr.SpatialReference(wkt=infos[0]["crs_wkt"])
+        for info in dsm_infos:
+            if not osr.SpatialReference(wkt=info["crs_wkt"]).IsSame(dtm_srs):
+                raise SystemExit(
+                    f"DSM {info['path']} has a different CRS than the DTM; reproject it first."
+                )
+            log.info(
+                "DSM %s: %d x %d px, pixel %.3f x %.3f, %s, nodata %s, compression %s, block %d x %d%s, "
+                "overviews %d, file %.2f GB (raw %.2f GB)",
+                info["path"],
+                info["width"],
+                info["height"],
+                info["pixel_x"],
+                abs(info["pixel_y"]),
+                info["data_type"],
+                info["nodata"],
+                info["compression"],
+                info["block_x"],
+                info["block_y"],
+                " (strip layout)" if info["strip_layout"] else "",
+                info["overviews"],
+                info["file_size_gb"],
+                info["raw_size_gb"],
+            )
+        gis.Raster.build_vrt(country["dsm"], work_dir / "dsm" / "dsm.vrt")
+        pd.DataFrame(dsm_infos).drop(columns=["crs_wkt"]).to_csv(
+            out_dir / "dsm_inspection.csv", index=False
+        )
+        dsm_footprint_path = out_dir / "dsm_footprint.gpkg"
+        if dsm_footprint_path.exists() and not run["FORCE"]:
+            dsm_footprints = gpd.read_file(dsm_footprint_path)
+        else:
+            frames = []
+            for info in dsm_infos:
+                part = gis.Raster.footprint(
+                    info["path"], country["footprint_resolution_m"]
+                )
+                part["path"] = info["path"]
+                frames.append(part)
+            dsm_footprints = gpd.GeoDataFrame(
+                pd.concat(frames, ignore_index=True), crs=frames[0].crs
+            )
+            gis.Vector.write_gpkg(dsm_footprints, dsm_footprint_path)
+
+    # --- 3. Benchmark (DTM and, when configured, DSM: same windows, same measures) ---
+    estimates = {"country": run["COUNTRY"], "dtm": [], "dsm": []}
     if run["RUN_BENCHMARK"]:
         rng = np.random.default_rng(bench["seed"])
-        records = []
-        for info in infos:
-            ds = gdal.Open(info["path"])
-            band = ds.GetRasterBand(1)
-            gt = ds.GetGeoTransform()
-            win_x, win_y = min(bench["window_px"], info["width"]), min(
-                bench["window_px"], info["height"]
-            )
-            bytes_window = win_x * win_y * info["bytes_per_pixel"]
-            polygon = shapely.union_all(
-                footprints.loc[footprints["path"] == info["path"]].geometry.values
-            )
-            # Window centres drawn inside the valid footprint, so that the windows read real data.
-            xs = rng.uniform(
-                gt[0] + win_x / 2 * gt[1],
-                gt[0] + (info["width"] - win_x / 2) * gt[1],
-                200 * bench["n_windows"],
-            )
-            ys = rng.uniform(
-                gt[3] + (info["height"] - win_y / 2) * gt[5],
-                gt[3] + win_y / 2 * gt[5],
-                200 * bench["n_windows"],
-            )
-            inside = shapely.contains_xy(polygon, xs, ys)
-            centres = list(zip(xs[inside], ys[inside]))[: bench["n_windows"]]
-            if len(centres) < bench["n_windows"]:
-                log.warning(
-                    "Only %d benchmark windows fit inside the footprint of %s.",
-                    len(centres),
-                    info["path"],
+        for kind, kind_infos, kind_footprints in [
+            ("dtm", infos, footprints),
+            ("dsm", dsm_infos, dsm_footprints),
+        ]:
+            records = []
+            for info in kind_infos:
+                polygon = shapely.union_all(
+                    kind_footprints.loc[
+                        kind_footprints["path"] == info["path"]
+                    ].geometry.values
                 )
-            overview_messages = []
-            sample_window = (0, 0)
-            for k, (x, y) in enumerate(centres):
-                col0 = int(
-                    np.clip((x - gt[0]) / gt[1] - win_x / 2, 0, info["width"] - win_x)
-                )
-                row0 = int(
-                    np.clip((y - gt[3]) / gt[5] - win_y / 2, 0, info["height"] - win_y)
-                )
-                sample_window = sample_window if k else (col0, row0)
-                start = time.perf_counter()
-                native = band.ReadAsArray(col0, row0, win_x, win_y)
-                t_native = time.perf_counter() - start
-                valid_share = (
-                    float(np.mean(native != info["nodata"]))
-                    if info["nodata"] is not None
-                    else 1.0
-                )
-                # Same ground window at the working resolution, snapped outward to the working grid.
-                xmin, ymax = gt[0] + col0 * gt[1], gt[3] + row0 * gt[5]
-                bounds = (
-                    xmin,
-                    ymax - np.ceil(win_y * abs(gt[5]) / resolution) * resolution,
-                    xmin + np.ceil(win_x * gt[1] / resolution) * resolution,
-                    ymax,
-                )
-                if k == 0:
-                    # Untimed single-threaded warp with debug output: the warp kernel reports the source
-                    # window it reads; a window smaller than the native one proves that an overview was used.
-                    gdal.SetConfigOption("CPL_DEBUG", "ON")
-                    gdal.PushErrorHandler(
-                        lambda err_class, err_no, msg: overview_messages.append(msg)
-                    )
-                    try:
-                        gis.Raster.read_window(
-                            info["path"],
-                            bounds,
-                            resolution,
-                            "average",
-                            general["warp_memory_limit_mb"],
-                            multithread=False,
-                        )
-                    finally:
-                        gdal.PopErrorHandler()
-                        gdal.SetConfigOption("CPL_DEBUG", None)
-                start = time.perf_counter()
-                warped, _ = gis.Raster.read_window(
-                    info["path"],
-                    bounds,
+                rows, summary, source_widths = gis.Raster.benchmark_reads(
+                    info,
+                    polygon,
+                    bench["n_windows"],
+                    bench["window_px"],
                     resolution,
-                    "average",
                     general["warp_memory_limit_mb"],
+                    bench["sequential_rows"],
+                    compress,
+                    rng,
                 )
-                t_warp = time.perf_counter() - start
-                records.append(
-                    {
-                        "dtm": Path(info["path"]).name,
-                        "window": k,
-                        "col0": col0,
-                        "row0": row0,
-                        "valid_share": valid_share,
-                        "native_s": t_native,
-                        "native_mb_s": bytes_window / 1e6 / t_native,
-                        "warp_s": t_warp,
-                        "warp_native_equivalent_mb_s": bytes_window / 1e6 / t_warp,
-                        "warp_output_cells": warped.size,
-                    }
-                )
-            del native, warped
-            source_widths = [
-                int(m.group(1))
-                for m in map(
-                    re.compile(r"Src=\d+,\d+,(\d+)x(\d+)").search, overview_messages
-                )
-                if m
-            ]
-            if not source_widths:
-                log.warning(
-                    "Could not determine from the GDAL debug output whether gdal.Warp used an "
-                    "overview for %s.",
-                    Path(info["path"]).name,
-                )
-            elif min(source_widths) < 0.9 * win_x:
+                if len(rows) < bench["n_windows"]:
+                    log.warning(
+                        "Only %d benchmark windows fit inside the footprint of %s.",
+                        len(rows),
+                        info["path"],
+                    )
+                if not source_widths:
+                    log.warning(
+                        "Could not determine from the GDAL debug output whether gdal.Warp used an "
+                        "overview for %s.",
+                        Path(info["path"]).name,
+                    )
+                elif min(source_widths) < 0.9 * summary["window_px"]:
+                    log.info(
+                        "gdal.Warp read %s from an overview: source windows of %d px instead of %d "
+                        "native px (factor %.0f).",
+                        Path(info["path"]).name,
+                        min(source_widths),
+                        summary["window_px"],
+                        summary["window_px"] / min(source_widths),
+                    )
+                else:
+                    log.info(
+                        "gdal.Warp read %s at full resolution (source window %d px, %d overviews): "
+                        "every native pixel is decoded.",
+                        Path(info["path"]).name,
+                        min(source_widths),
+                        info["overviews"],
+                    )
+                records += rows
+                estimates[kind].append(summary)
                 log.info(
-                    "gdal.Warp read %s from an overview: source windows of %d px instead of %d "
-                    "native px (factor %.0f).",
+                    "Benchmark %s %s (%d windows of %d x %d px = %.2f km2): native read %.2f s/window (p90 %.2f), "
+                    "%.0f MB/s; warp to %.1f m %.2f s/window (p90 %.2f), %.0f MB/s native equivalent; sequential "
+                    "read %.0f MB/s; %s compression ratio %.2f at %.0f MB/s.",
+                    kind.upper(),
                     Path(info["path"]).name,
-                    min(source_widths),
-                    win_x,
-                    win_x / min(source_widths),
+                    len(rows),
+                    summary["window_px"],
+                    summary["window_px"],
+                    summary["window_ground_km2"],
+                    summary["native_s_median"],
+                    summary["native_s_p90"],
+                    summary["native_mb_s_median"],
+                    resolution,
+                    summary["warp_s_median"],
+                    summary["warp_s_p90"],
+                    summary["warp_native_equivalent_mb_s_median"],
+                    summary["sequential_mb_s"],
+                    compress,
+                    summary["compression_ratio"],
+                    summary["compression_mb_s"],
                 )
-            else:
-                log.info(
-                    "gdal.Warp read %s at full resolution (source window %d px, %d overviews): "
-                    "every native pixel is decoded.",
-                    Path(info["path"]).name,
-                    min(source_widths),
-                    info["overviews"],
+            if kind_infos:
+                pd.DataFrame(records).to_csv(
+                    out_dir / f"{kind}_benchmark.csv", index=False
                 )
-
-            # Sequential full-width read (pattern of a conversion pass).
-            n_rows = min(bench["sequential_rows"], info["height"])
-            row0 = int(rng.integers(0, info["height"] - n_rows + 1))
-            start = time.perf_counter()
-            block = band.ReadAsArray(0, row0, info["width"], n_rows)
-            t_seq = time.perf_counter() - start
-            seq_mb_s = info["width"] * n_rows * info["bytes_per_pixel"] / 1e6 / t_seq
-            del block
-
-            # Compression ratio and speed of the target layout, measured on one native window.
-            sample = band.ReadAsArray(sample_window[0], sample_window[1], win_x, win_y)
-            is_float = np.issubdtype(sample.dtype, np.floating)
-            mem = gdal.GetDriverByName("MEM").Create("", win_x, win_y, 1, band.DataType)
-            mem.GetRasterBand(1).WriteArray(sample)
-            if info["nodata"] is not None:
-                mem.GetRasterBand(1).SetNoDataValue(info["nodata"])
-            start = time.perf_counter()
-            gdal.Translate(
-                "/vsimem/compression_sample.tif",
-                mem,
-                format="GTiff",
-                creationOptions=[
-                    "TILED=YES",
-                    "BLOCKXSIZE=512",
-                    "BLOCKYSIZE=512",
-                    f"COMPRESS={compress}",
-                    f"PREDICTOR={3 if is_float else 2}",
-                    "NUM_THREADS=ALL_CPUS",
-                ],
-            )
-            t_compress = time.perf_counter() - start
-            ratio = gdal.VSIStatL("/vsimem/compression_sample.tif").size / bytes_window
-            gdal.Unlink("/vsimem/compression_sample.tif")
-
-            table = pd.DataFrame(
-                [r for r in records if r["dtm"] == Path(info["path"]).name]
-            )
-            summary = {
-                "path": info["path"],
-                "native_s_median": float(table["native_s"].median()),
-                "native_s_p90": float(table["native_s"].quantile(0.9)),
-                "native_mb_s_median": float(table["native_mb_s"].median()),
-                "warp_s_median": float(table["warp_s"].median()),
-                "warp_s_p90": float(table["warp_s"].quantile(0.9)),
-                "warp_native_equivalent_mb_s_median": float(
-                    table["warp_native_equivalent_mb_s"].median()
-                ),
-                "window_ground_km2": win_x * win_y * abs(gt[1] * gt[5]) / 1e6,
-                "sequential_mb_s": seq_mb_s,
-                "compression_ratio": ratio,
-                "compression_mb_s": bytes_window / 1e6 / t_compress,
-                "raw_gb": info["raw_size_gb"],
-            }
-            estimates["dtm"].append(summary)
-            log.info(
-                "Benchmark %s (%d windows of %d x %d px = %.2f km2): native read %.2f s/window (p90 %.2f), %.0f MB/s; "
-                "warp to %.1f m %.2f s/window (p90 %.2f), %.0f MB/s native equivalent; sequential read %.0f MB/s; "
-                "%s compression ratio %.2f at %.0f MB/s.",
-                Path(info["path"]).name,
-                len(table),
-                win_x,
-                win_y,
-                summary["window_ground_km2"],
-                summary["native_s_median"],
-                summary["native_s_p90"],
-                summary["native_mb_s_median"],
-                resolution,
-                summary["warp_s_median"],
-                summary["warp_s_p90"],
-                summary["warp_native_equivalent_mb_s_median"],
-                seq_mb_s,
-                compress,
-                ratio,
-                summary["compression_mb_s"],
-            )
-        pd.DataFrame(records).to_csv(bench_path, index=False)
         log.info(
             "Note: the operating system file cache can make repeated benchmarks faster than a cold read."
         )

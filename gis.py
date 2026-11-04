@@ -6,6 +6,7 @@ import json
 import logging
 import multiprocessing
 import os
+import re
 import shutil
 import sys
 import time
@@ -1400,6 +1401,210 @@ class Raster:
             crs=ds.GetProjection(),
         )
 
+    @staticmethod
+    def benchmark_reads(
+        info,
+        polygon,
+        n_windows,
+        window_px,
+        resolution,
+        warp_memory_mb,
+        sequential_rows,
+        compress,
+        rng,
+    ):
+        """
+        Read benchmark of one raster (DTM or DSM): random native windows inside the
+        valid-data polygon, the same ground windows warped to the working resolution,
+        one sequential full-width read, and the compression ratio and speed of a tiled
+        copy of one window. The first warp is repeated single-threaded with GDAL debug
+        output; the source window it reports shows whether an overview was used.
+        :param info: dict from Raster.inspect
+        :param polygon: shapely polygon of valid data in the raster CRS
+        :param n_windows: number of windows
+        :param window_px: window size in native pixels
+        :param resolution: working resolution of the warped reads
+        :param warp_memory_mb: warp working buffer in MB
+        :param sequential_rows: rows of the sequential read
+        :param compress: compression of the tiled copy (ZSTD, DEFLATE, LZW)
+        :param rng: numpy random Generator
+        :return: (list of per-window records, summary dict, list of source window
+            widths from the debug output)
+        """
+        ds = gdal.Open(info["path"])
+        band = ds.GetRasterBand(1)
+        gt = ds.GetGeoTransform()
+        name = os.path.basename(info["path"])
+        win_x, win_y = min(window_px, info["width"]), min(window_px, info["height"])
+        bytes_window = win_x * win_y * info["bytes_per_pixel"]
+        # Window centres drawn inside the valid footprint, so that the windows read real data.
+        xs = rng.uniform(
+            gt[0] + win_x / 2 * gt[1],
+            gt[0] + (info["width"] - win_x / 2) * gt[1],
+            200 * n_windows,
+        )
+        ys = rng.uniform(
+            gt[3] + (info["height"] - win_y / 2) * gt[5],
+            gt[3] + win_y / 2 * gt[5],
+            200 * n_windows,
+        )
+        inside = shapely.contains_xy(polygon, xs, ys)
+        centres = list(zip(xs[inside], ys[inside]))[:n_windows]
+        messages, records = [], []
+        sample_window = (0, 0)
+        for k, (x, y) in enumerate(centres):
+            col0 = int(
+                np.clip((x - gt[0]) / gt[1] - win_x / 2, 0, info["width"] - win_x)
+            )
+            row0 = int(
+                np.clip((y - gt[3]) / gt[5] - win_y / 2, 0, info["height"] - win_y)
+            )
+            sample_window = sample_window if k else (col0, row0)
+            start = time.perf_counter()
+            native = band.ReadAsArray(col0, row0, win_x, win_y)
+            t_native = time.perf_counter() - start
+            valid_share = (
+                float(np.mean(native != info["nodata"]))
+                if info["nodata"] is not None
+                else 1.0
+            )
+            # Same ground window at the working resolution, snapped outward to the working grid.
+            xmin, ymax = gt[0] + col0 * gt[1], gt[3] + row0 * gt[5]
+            bounds = (
+                xmin,
+                ymax - np.ceil(win_y * abs(gt[5]) / resolution) * resolution,
+                xmin + np.ceil(win_x * gt[1] / resolution) * resolution,
+                ymax,
+            )
+            if k == 0:
+                gdal.SetConfigOption("CPL_DEBUG", "ON")
+                gdal.PushErrorHandler(
+                    lambda err_class, err_no, msg: messages.append(msg)
+                )
+                try:
+                    Raster.read_window(
+                        info["path"],
+                        bounds,
+                        resolution,
+                        "average",
+                        warp_memory_mb,
+                        multithread=False,
+                    )
+                finally:
+                    gdal.PopErrorHandler()
+                    gdal.SetConfigOption("CPL_DEBUG", None)
+            start = time.perf_counter()
+            warped, _ = Raster.read_window(
+                info["path"], bounds, resolution, "average", warp_memory_mb
+            )
+            t_warp = time.perf_counter() - start
+            records.append(
+                {
+                    "raster": name,
+                    "window": k,
+                    "col0": col0,
+                    "row0": row0,
+                    "valid_share": valid_share,
+                    "native_s": t_native,
+                    "native_mb_s": bytes_window / 1e6 / t_native,
+                    "warp_s": t_warp,
+                    "warp_native_equivalent_mb_s": bytes_window / 1e6 / t_warp,
+                    "warp_output_cells": warped.size,
+                }
+            )
+        source_widths = [
+            int(m.group(1))
+            for m in map(re.compile(r"Src=\d+,\d+,(\d+)x(\d+)").search, messages)
+            if m
+        ]
+        # Sequential full-width read (pattern of a conversion pass).
+        n_rows = min(sequential_rows, info["height"])
+        row0 = int(rng.integers(0, info["height"] - n_rows + 1))
+        start = time.perf_counter()
+        band.ReadAsArray(0, row0, info["width"], n_rows)
+        t_seq = time.perf_counter() - start
+        seq_mb_s = info["width"] * n_rows * info["bytes_per_pixel"] / 1e6 / t_seq
+        # Compression ratio and speed of the target layout, measured on one native window.
+        sample = band.ReadAsArray(sample_window[0], sample_window[1], win_x, win_y)
+        is_float = np.issubdtype(sample.dtype, np.floating)
+        mem = gdal.GetDriverByName("MEM").Create("", win_x, win_y, 1, band.DataType)
+        mem.GetRasterBand(1).WriteArray(sample)
+        if info["nodata"] is not None:
+            mem.GetRasterBand(1).SetNoDataValue(info["nodata"])
+        start = time.perf_counter()
+        gdal.Translate(
+            "/vsimem/compression_sample.tif",
+            mem,
+            format="GTiff",
+            creationOptions=[
+                "TILED=YES",
+                "BLOCKXSIZE=512",
+                "BLOCKYSIZE=512",
+                f"COMPRESS={compress}",
+                f"PREDICTOR={3 if is_float else 2}",
+                "NUM_THREADS=ALL_CPUS",
+            ],
+        )
+        t_compress = time.perf_counter() - start
+        ratio = gdal.VSIStatL("/vsimem/compression_sample.tif").size / bytes_window
+        gdal.Unlink("/vsimem/compression_sample.tif")
+        table = pd.DataFrame(records)
+        summary = {
+            "path": info["path"],
+            "windows": len(records),
+            "native_s_median": (
+                float(table["native_s"].median()) if len(table) else np.nan
+            ),
+            "native_s_p90": (
+                float(table["native_s"].quantile(0.9)) if len(table) else np.nan
+            ),
+            "native_mb_s_median": (
+                float(table["native_mb_s"].median()) if len(table) else np.nan
+            ),
+            "warp_s_median": float(table["warp_s"].median()) if len(table) else np.nan,
+            "warp_s_p90": (
+                float(table["warp_s"].quantile(0.9)) if len(table) else np.nan
+            ),
+            "warp_native_equivalent_mb_s_median": (
+                float(table["warp_native_equivalent_mb_s"].median())
+                if len(table)
+                else np.nan
+            ),
+            "window_ground_km2": win_x * win_y * abs(gt[1] * gt[5]) / 1e6,
+            "sequential_mb_s": seq_mb_s,
+            "compression_ratio": ratio,
+            "compression_mb_s": bytes_window / 1e6 / t_compress,
+            "raw_gb": info["raw_size_gb"],
+            "window_px": win_x,
+        }
+        return records, summary, source_widths
+
+    @staticmethod
+    def map_codes(values, mapping, default=0):
+        """
+        Replaces raster values by codes (e.g. CORINE class index -> three-digit code)
+        :param values: integer or float array (NaN or values outside the mapping give default)
+        :param mapping: dict raster value -> code
+        :param default: code for values without a mapping
+        :return: int32 array of codes
+        """
+        values = np.asarray(values)
+        keys = np.array([int(k) for k in mapping], dtype=np.int64)
+        codes = np.array([int(v) for v in mapping.values()], dtype=np.int32)
+        out = np.full(values.shape, default, np.int32)
+        known = (
+            np.isfinite(values)
+            if values.dtype.kind == "f"
+            else np.ones(values.shape, bool)
+        )
+        if len(keys):
+            ints = np.where(known, values, -1).astype(np.int64)
+            lookup = np.full(int(max(keys.max(), 0)) + 2, default, np.int32)
+            lookup[keys[keys >= 0]] = codes[keys >= 0]
+            inside = known & (ints >= 0) & (ints < len(lookup))
+            out[inside] = lookup[ints[inside]]
+        return out
+
 
 class Vector:
     @staticmethod
@@ -1924,6 +2129,34 @@ class Vector:
             shapely.intersection(zones[idx_zone], lines.geometry.values[idx_line])
         )
         return np.bincount(idx_zone, weights=lengths, minlength=len(polygons))
+
+    @staticmethod
+    def zones_to_grid(zones, order, shape, geotransform, wkt, field="context"):
+        """
+        Context of every cell of a grid from non-overlapping zone polygons
+        :param zones: gpd.GeoDataFrame with the context name in field
+        :param order: context names; cell value = position in order + 1, 0 = no zone
+        :param shape: (rows, cols)
+        :param geotransform: GDAL geotransform of the grid
+        :param wkt: CRS of the grid as WKT
+        :return: uint8 array
+        """
+        if zones.empty:
+            return np.zeros(shape, np.uint8)
+        zones = zones.to_crs(wkt)
+        values = zones[field].map({name: k for k, name in enumerate(order, start=1)})
+        if values.isna().any():
+            raise SystemExit(
+                f"Zones with unknown contexts {sorted(set(zones.loc[values.isna(), field]))}; "
+                f"expected {list(order)}."
+            )
+        # Later contexts are burnt first, so earlier ones win if polygons ever overlap.
+        ranked = zones.assign(value=values.astype(int)).sort_values(
+            "value", ascending=False
+        )
+        return Raster.rasterize_geometries(
+            ranked.geometry, ranked["value"], shape, geotransform, wkt, False, np.uint8
+        )
 
     @staticmethod
     def layer_names(path):
@@ -3079,7 +3312,75 @@ class Config:
         "sources.worldcover_tile_field": "str",
         "sources.worldcover_version": "str",
         "sources.worldcover_year": "int",
+        "country.dsm": "opt_paths",
+        "country.building_footprints": "opt_paths",
+        "country.manual_barriers": "opt_paths",
+        "country.industrial_registry": "opt_paths",
+        "country.ems_flood_extents": "opt_paths",
+        "country.water_polygons": "opt_paths",
+        "country.corine": "opt_paths",
+        "country.corine_legend": "opt_path",
+        "country.corine_legend_index_field": "str",
+        "country.corine_legend_code_field": "str",
+        "country.corine_check": "list",
+        "country.context.order": "str_list",
+        "country.context.corine_industrial_codes": "int_list",
+        "country.context.corine_dense_urban_codes": "int_list",
+        "country.context.urban_atlas_industrial_codes": "int_list",
+        "country.context.urban_atlas_dense_urban_codes": "int_list",
+        "country.context.ghsl_smod_dense_urban": "int_list",
+        "country.context.ghsl_smod_urban": "int_list",
+        "country.context.osm_industrial": "table",
+        "country.context.min_zone_area_m2": "float",
+        **{
+            f"country.context.params.{context}.{key}": kind
+            for context in ("industrial", "dense_urban", "urban", "rural")
+            for key, kind in (
+                ("working_resolution_m", "float"),
+                ("unit_core_size_m", "float"),
+                ("gap_tolerance_m", "float"),
+                ("closure_gap_max_m", "float"),
+                ("crest_lines", "bool"),
+                ("rp_distribution_classes", "int_list"),
+                ("rp_distribution_shares", "float_list"),
+                ("score_weight_value", "float"),
+                ("score_weight_population", "float"),
+                ("score_weight_upstream", "float"),
+            )
+        },
+        "sources.osm_tags_water": "table",
+        **{
+            f"crest_lines.{key}": "float"
+            for key in (
+                "transect_spacing_m",
+                "transect_length_m",
+                "max_bank_distance_m",
+                "min_drop_m",
+                "landward_window_m",
+                "width_drop_m",
+                "max_wall_width_m",
+                "min_wall_height_m",
+                "building_buffer_m",
+                "max_crest_std_m",
+                "link_max_m",
+                "link_max_dz_m",
+                "min_line_length_m",
+            )
+        },
+        "barriers.source_priority": "str_list",
+        "barriers.dedupe_distance_m": "float",
+        "barriers.dedupe_max_angle_deg": "float",
+        "barriers.dedupe_min_overlap": "float",
+        "barriers.osm_tags_walls": "table",
+        "barriers.osm_tags_crossings": "table",
+        "barriers.osm_wall_candidates": "table",
+        "coarse.coarse_resolution_m": "float",
+        "coarse.coarse_min_area_km2": "float",
+        "coarse.coarse_match_distance_m": "float",
+        "review.top_n": "int",
+        "review.flag_weights": "table",
     }
+    CONTEXTS = ("industrial", "dense_urban", "urban", "rural")
     ALLOWED = {
         "country.dtm_conversion": {"A", "B"},
         "country.dtm_compress": {"ZSTD", "DEFLATE", "LZW"},
@@ -3218,6 +3519,14 @@ class Config:
             return value, None
         if kind == "table":
             return value, None if isinstance(value, dict) else "expected a table"
+        if kind == "str_list":
+            if not isinstance(value, list) or not all(
+                isinstance(v, str) for v in value
+            ):
+                return value, f"expected a list of strings, got {value!r}"
+            return value, None
+        if kind == "list":
+            return value, None if isinstance(value, list) else "expected a list"
         return value, f"unknown kind {kind}"
 
     @staticmethod
@@ -3307,6 +3616,16 @@ class Config:
             and cfg["sources"]["gfm_screen_resolution_m"] <= 0
         ):
             errors.append("sources.gfm_screen_resolution_m must be positive")
+        if "country.context.order" in keys:
+            order = c["context"]["order"]
+            if sorted(order) != sorted(Config.CONTEXTS):
+                errors.append(
+                    f"context.order must list each of {list(Config.CONTEXTS)} exactly once"
+                )
+            elif order[-1] != "rural":
+                errors.append(
+                    "context.order must end with rural (rural is the rest of the corridor)"
+                )
         lulc = c.get("lulc", {})
         for table in ["worldcover_categories", "urban_atlas_categories"]:
             if f"country.lulc.{table}" not in keys:

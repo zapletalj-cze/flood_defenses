@@ -177,6 +177,7 @@ def country_table(
     return f"""
 [countries.{code}]
 dtm = {json.dumps(dtm_list or dtm_files)}
+dsm = []
 levees = {json.dumps(levee_files)}
 rivers = {json.dumps(river_files)}
 working_resolution_m = 2.0

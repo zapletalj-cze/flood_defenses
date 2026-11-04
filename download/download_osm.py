@@ -1,7 +1,8 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
-# Downloads the country OpenStreetMap extract (Geofabrik .osm.pbf) and extracts hydraulic structures (as points)
-# and drain lines inside the DTM footprint into single-layer GeoPackages with GDAL.
+# Downloads the country OpenStreetMap extract (Geofabrik .osm.pbf) and extracts hydraulic structures (as points),
+# drains, buildings, water polygons, road and railway crossings, flood walls and industrial areas inside the DTM
+# footprint into single-layer GeoPackages with GDAL; logs counts of candidate wall tags.
 
 from pathlib import Path
 
@@ -25,15 +26,59 @@ KEYS = [
     "sources.geofabrik_url_template",
     "sources.osm_tags_hydraulic",
     "sources.osm_tags_drains",
+    "sources.osm_tags_water",
+    "country.building_footprints",
+    "country.water_polygons",
+    "country.context.osm_industrial",
+    "barriers.osm_tags_walls",
+    "barriers.osm_tags_crossings",
+    "barriers.osm_wall_candidates",
     "sources.request_pause_s",
     "sources.max_retries",
 ]
 OSM_CONFIG = Path(__file__).resolve().parents[1] / "config" / "osmconf.ini"
 # Columns the custom osmconf.ini exposes per OSM layer (checked against the tag lists of the config).
 EXPOSED = {
-    "points": ["name", "man_made", "waterway", "lock", "building"],
-    "lines": ["name", "man_made", "waterway", "building", "intermittent"],
-    "multipolygons": ["name", "man_made", "waterway", "building"],
+    "points": [
+        "name",
+        "man_made",
+        "waterway",
+        "lock",
+        "building",
+        "barrier",
+        "highway",
+    ],
+    "lines": [
+        "name",
+        "man_made",
+        "waterway",
+        "building",
+        "intermittent",
+        "highway",
+        "railway",
+        "barrier",
+        "wall",
+    ],
+    "multipolygons": [
+        "name",
+        "man_made",
+        "waterway",
+        "building",
+        "landuse",
+        "natural",
+        "water",
+        "barrier",
+        "wall",
+    ],
+}
+# Layer each tag table is matched in (the hydraulic table is matched in all three layers).
+LAYER_OF = {
+    "drains": "lines",
+    "water": "multipolygons",
+    "crossings": "lines",
+    "walls": "lines",
+    "wall_candidates": "lines",
+    "industrial": "multipolygons",
 }
 
 if __name__ == "__main__":
@@ -48,6 +93,11 @@ if __name__ == "__main__":
     tags = {
         "hydraulic": sources["osm_tags_hydraulic"],
         "drains": sources["osm_tags_drains"],
+        "water": sources["osm_tags_water"],
+        "crossings": cfg["barriers"]["osm_tags_crossings"],
+        "walls": cfg["barriers"]["osm_tags_walls"],
+        "wall_candidates": cfg["barriers"]["osm_wall_candidates"],
+        "industrial": country["context"]["osm_industrial"],
     }
     for name, table in tags.items():
         for key, values in table.items():
@@ -63,7 +113,12 @@ if __name__ == "__main__":
             for k in tags["hydraulic"]
             if any(k not in cols for cols in EXPOSED.values())
         }
-        | {k for k in tags["drains"] if k not in EXPOSED["lines"]}
+        | {
+            k
+            for name, layer in LAYER_OF.items()
+            for k in tags[name]
+            if k not in EXPOSED[layer]
+        }
     )
     if missing:
         raise SystemExit(
@@ -134,9 +189,54 @@ if __name__ == "__main__":
             f"WHERE {condition(tags['drains'], 'lines')}",
             "LINESTRING",
         ),
+        # Stage D: crossings at gaps of protection lines, industrial areas for the context zones.
+        "osm_crossings": (
+            f"SELECT osm_id, {', '.join(sorted(set(tags['crossings']) | {'name'}))}, geometry FROM lines "
+            f"WHERE {condition(tags['crossings'], 'lines')}",
+            "LINESTRING",
+        ),
+        "osm_industrial": (
+            f"SELECT COALESCE(osm_id, osm_way_id) AS osm_id, "
+            f"{', '.join(sorted(set(tags['industrial']) | {'name'}))}, geometry FROM multipolygons "
+            f"WHERE {condition(tags['industrial'], 'multipolygons')}",
+            "MULTIPOLYGON",
+        ),
+        # Counts only: lines with any candidate wall tag (see barriers.osm_wall_candidates).
+        "osm_wall_candidates": (
+            f"SELECT osm_id, {', '.join(sorted(set(tags['wall_candidates']) | {'name'}))}, geometry "
+            f"FROM lines WHERE {condition(tags['wall_candidates'], 'lines')}",
+            "LINESTRING",
+        ),
     }
+    if not country["building_footprints"]:
+        outputs["osm_buildings"] = (
+            "SELECT COALESCE(osm_id, osm_way_id) AS osm_id, building, geometry FROM multipolygons "
+            "WHERE building IS NOT NULL",
+            "MULTIPOLYGON",
+        )
+    if not country["water_polygons"]:
+        outputs["osm_water"] = (
+            f"SELECT COALESCE(osm_id, osm_way_id) AS osm_id, "
+            f"{', '.join(sorted(set(tags['water']) | {'name'}))}, geometry FROM multipolygons "
+            f"WHERE {condition(tags['water'], 'multipolygons')}",
+            "MULTIPOLYGON",
+        )
+    if tags["walls"]:
+        outputs["osm_walls"] = (
+            f"SELECT osm_id, {', '.join(sorted(set(tags['walls']) | {'name'}))}, geometry FROM lines "
+            f"WHERE {condition(tags['walls'], 'lines')}",
+            "LINESTRING",
+        )
+    else:
+        log.info(
+            "barriers.osm_tags_walls is empty: no osm_walls.gpkg; choose the tags from the candidate counts below."
+        )
     for name, (sql, geometry_type) in outputs.items():
-        path = out_dir / f"{name}.gpkg"
+        path = (
+            work_dir / "osm" / f"{name}.gpkg"
+            if name == "osm_wall_candidates"
+            else out_dir / f"{name}.gpkg"
+        )
         if path.exists() and not run["FORCE"]:
             log.info("%s exists; extraction skipped (set FORCE to redo).", path.name)
         else:
@@ -156,7 +256,15 @@ if __name__ == "__main__":
         extracted = gpd.read_file(path)
         log.info("%s: %d features.", path.name, len(extracted))
         # Counts per tag value, to adjust the tag lists in the configuration.
-        table = tags["hydraulic"] if name == "osm_hydraulic_points" else tags["drains"]
+        table = {
+            "osm_hydraulic_points": tags["hydraulic"],
+            "osm_drains": tags["drains"],
+            "osm_crossings": tags["crossings"],
+            "osm_industrial": tags["industrial"],
+            "osm_wall_candidates": tags["wall_candidates"],
+            "osm_water": tags["water"],
+            "osm_walls": tags["walls"],
+        }.get(name, {})
         for key in table:
             if key in extracted.columns:
                 counts = extracted[key].dropna().value_counts()

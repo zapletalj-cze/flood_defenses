@@ -23,6 +23,7 @@ explicitly.
 | B | `download_osm.py`, `osm_hydraulics.py`, `download_ghsl.py`, `rp_index.py` | done, tested on synthetic data; download URLs not verified |
 | C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
+| D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
 
 ---
 
@@ -44,6 +45,7 @@ explicitly.
 14. [Tests](#14-tests)
 15. [Bugs, fixes, limitations, open decisions](#15-bugs-fixes-limitations-open-decisions)
 16. [Data sources and licences](#16-data-sources-and-licences)
+17. [Stage D (in progress): industrial sites, dense urban areas, large systems](#17-stage-d-in-progress-industrial-sites-dense-urban-areas-large-systems)
 
 ---
 
@@ -114,6 +116,7 @@ download/
   download_gfm.py          GFM scene search (STAC), screening, clipped layers per unit
   download_glofas.py       GloFAS daily discharge and upstream area -> compact cell series
   download_worldcover.py   ESA WorldCover tiles over the corridor -> worldcover.vrt
+  download_clms.py         CORINE (legend mapping verified on known pixels) and Urban Atlas from local files
 processing/
   prepare_dtm.py           DTM inspection, footprint, benchmark, estimates, optional conversion
   build_units.py           river corridor, processing units, memory estimate
@@ -121,6 +124,7 @@ processing/
   compartments.py          per-unit compartments in parallel, checkpoints, merging
   rp_index.py              exposure, score, RP per compartment
   HAND_YZ.py               land cover exposure (WorldCover, Urban Atlas) supplementing GHSL
+  context_zones.py         industrial / dense urban / urban / rural zones of the corridor (Stage D)
   gfm_evidence.py          held / flooded tests per compartment and scene; missing-barrier hints
   rp_bounds.py             event return periods, observed bounds, combination with the model
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
@@ -130,6 +134,7 @@ tests/
   test_stage_b.py          end-to-end synthetic country for Stage B (20 checks)
   test_stage_c.py          end-to-end Stage C on the Stage B country (26 checks)
   test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
+  test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -146,8 +151,10 @@ function was modified. The only change to existing lines is the import block.
 | `Raster` | `read_native(src, bounds)` | Direct read of native pixels |
 | `Raster` | `array_to_mem`, `write_array`, `best_compression` | Array ↔ GDAL; tiled compressed GeoTIFF; ZSTD → DEFLATE fallback |
 | `Raster` | `rasterize_geometries`, `polygonize_labels`, `fill_nodata_cells`, `footprint` | Burn geometries; label raster → polygons; `gdal.FillNodata` on selected cells; valid-data footprint |
+| `Raster` | `benchmark_reads(info, polygon, …)`, `map_codes(values, mapping)` | Read benchmark of one raster, shared by DTM and DSM; raster values → codes through a lookup (CORINE legend) |
 | `Vector` | `check_single_layer`, `read_merged`, `write_gpkg`, `length_near_boundary` | Single-layer inputs; merged reads with `source`; single-layer GeoPackage output; levee length near compartment boundaries |
 | `Vector` | `layer_names`, `single_layer_copy(path, layer, out_path)` | Layers of a vector source; one layer of a multi-layer source copied to its own GeoPackage with `gdal.VectorTranslate` |
+| `Vector` | `zones_to_grid(zones, order, shape, geotransform, wkt)` | Context of every cell of a unit grid (position in `context.order`, 0 = none) |
 | `Hydro` | `breach_to_streams(dem, stream, burn, burn_buffer_cells)` | River cell reached downstream (numba) |
 | `Hydro` | `priority_flood(surface, seeds)` | Spill level, seed index and reach order per cell (numba) |
 | `Hydro` | `distance_cells(mask, limit)` | Chamfer distance in cells (numba) |
@@ -216,6 +223,10 @@ Keys beyond the original schema, with the reason for each:
 | `evidence.river_level_percentile`, `hint_margin_m`, `hint_dry_share`, `hint_min_scenes`, `hint_exclusion_m` | Missing-barrier hints (§10.3); the specification fixed 90 % and "most scenes" in words |
 | `country.lulc.*` (table) | Land cover exposure of `HAND_YZ.py` (§9.3): switch, WorldCover and Urban Atlas inputs, class-to-category mappings, values and curves per category |
 | `sources.worldcover_url_template`, `worldcover_grid_url`, `worldcover_tile_field`, `worldcover_version`, `worldcover_year` | ESA WorldCover tiles (§9.3); verified |
+| Stage D tables (`[countries.XX.context]`, `[countries.XX.context.params.<context>]`, `[crest_lines]`, `[barriers]`, `[coarse]`, `[review]`) and inputs (`dsm`, `building_footprints`, `manual_barriers`, `industrial_registry`, `ems_flood_extents`, `water_polygons`) | As specified for Stage D (§17) |
+| `country.corine`, `corine_legend`, `corine_legend_index_field`, `corine_legend_code_field`, `corine_check` | CORINE from local files: the legend maps class indices to codes, verified on known pixels |
+| `sources.osm_tags_water`, `barriers.osm_wall_candidates` | OSM water polygons; wall tags counted in the extract to choose `osm_tags_walls` (taginfo was not reachable) |
+| `sources.ghsl_url_templates.smod`, `.pop` | Optional GHSL settlement model and population (Stage D) |
 
 ## 4. Run order and outputs
 
@@ -228,6 +239,8 @@ Keys beyond the original schema, with the reason for each:
 | 5 | `osm_hydraulics.py` | `rivers_sources.gpkg`, `osm_pumping.gpkg` |
 | 6 | `compartments.py` (first two units, then all) | per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `compartments.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `compartments.gpkg`, `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
 | 7 | `download_ghsl.py` | `ghsl_total.vrt`, `ghsl_non_residential.vrt`, `ghsl_sources.json` |
+| D1 (Stage D) | `prepare_dtm.py` with `dsm`; `download_osm.py`; `download_ghsl.py` with `smod`, `pop` | `dsm_inspection.csv`, `dsm_benchmark.csv`, `dsm_footprint.gpkg`; `osm_buildings.gpkg`, `osm_water.gpkg`, `osm_crossings.gpkg`, `osm_walls.gpkg`, `osm_industrial.gpkg`; `ghsl_smod.vrt`, `ghsl_pop.vrt` |
+| D1 (Stage D) | `download_clms.py`, then `context_zones.py` | `corine_codes.tif`, `urban_atlas.gpkg`, `clms_sources.json`; `zones.gpkg` |
 | 7a (optional) | `download_worldcover.py` | `worldcover.vrt`, `worldcover_sources.json`; tiles in `work/<c>/worldcover/` |
 | 7b (optional) | `HAND_YZ.py` | per unit `hand_yz.csv`, `hand_yz.json`; merged `exposure_lulc.csv` |
 | 8 | `rp_index.py` | per unit `rp_index.csv`, `rp_index.json`; merged `compartments_rp.gpkg` (with `value_ghsl`, `value_lulc`) |
@@ -1140,6 +1153,17 @@ compartments take seconds.
   - **checkpoint hash:** an unchanged rerun skips every unit, doubled values recompute
     them;
   - **`rp_index`:** `value_exposed = value_ghsl + value_lulc`.
+- **`pixi run test-stage-d`** (step D1: 10 checks), on the Stage B country under the code T4D:
+  - **DSM:** inspected and benchmarked like the DTM;
+  - **OSM:** buildings, water, crossings (a footway is excluded), walls, industrial areas (a
+    closed `man_made=works` way counts as an area), candidate wall tag counts;
+  - **GHSL:** SMOD and population of the probed epoch;
+  - **CORINE:** the legend mapping is verified on a known pixel, and a wrong code stops the
+    script;
+  - **Urban Atlas:** taken from a two-layer file;
+  - **context zones:** precedence of the order, small zones falling through to later
+    contexts, rural as the rest, no overlaps, the corridor tiled exactly;
+  - **`zones_to_grid`** on a unit grid.
 - **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
@@ -1347,7 +1371,72 @@ from outside.**
 | Copernicus Emergency Management Service, Global Flood Monitoring (GFM) | held / flooded tests, missing-barrier hints | STAC API, endpoint to be confirmed (§15.4) | Copernicus data policy (free and open); confirm the attribution text on the product page |
 | GloFAS historical river discharge, `cems-glofas-historical` | event return periods | CEMS Early Warning Data Store (dataset page checked) | licence shown on the EWDS dataset page, accepted with the download |
 | ESA WorldCover 10 m 2021 v200 | land cover exposure (§9.3) | public bucket `esa-worldcover` (eu-central-1), verified | CC BY 4.0; attribution from the file: "ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium" |
-| Copernicus Land Monitoring Service, Urban Atlas | land cover exposure where available (§9.3) | manual download from the CLMS portal | Copernicus data policy; confirm the attribution text with the download |
+| Copernicus Land Monitoring Service, Urban Atlas | land cover exposure where available (§9.3); context zones (§17) | manual download from the CLMS portal | Copernicus data policy; confirm the attribution text with the download |
+| Copernicus Land Monitoring Service, CORINE Land Cover (raster) | context zones (§17) | manual download from the CLMS portal | Copernicus data policy; confirm the attribution text with the download |
+| GHSL settlement model (SMOD) and population (GHS-POP) | context zones; population in Stage D4 | GHSL data package (templates not verified) | to be confirmed from the data package, with citation |
 
 For GHSL, record the release, epoch and the citation of the GHSL Data Package 2023 with
 the outputs: `ghsl_sources.json` lists the epoch, tiles and URLs used.
+
+## 17. Stage D (in progress): industrial sites, dense urban areas, large systems
+
+The approved plan, including the measured runtime impact, is in
+[docs/stage_d_plan.md](docs/stage_d_plan.md). Step **D1** is implemented; steps D2–D5
+follow.
+
+### 17.1 New inputs (step D1)
+
+- **DSM (`dsm`).** `prepare_dtm.py` inspects and benchmarks every DSM with the code it
+  uses for the DTM (`Raster.benchmark_reads`).
+  - **Outputs:** `dsm_inspection.csv`, `dsm_benchmark.csv`, `dsm_footprint.gpkg` and
+    `work/<c>/dsm/dsm.vrt`.
+  - **CRS:** the DSM must share the DTM CRS; the script stops otherwise.
+- **OSM (`download_osm.py`).**
+  - **Outputs:**
+    - `osm_buildings.gpkg`, only without `building_footprints`;
+    - `osm_water.gpkg`, only without `water_polygons` (tags `osm_tags_water`);
+    - `osm_crossings.gpkg` (`barriers.osm_tags_crossings`);
+    - `osm_walls.gpkg`, only when `barriers.osm_tags_walls` is set;
+    - `osm_industrial.gpkg` (`context.osm_industrial`).
+  - **Areas.** Closed ways tagged `man_made=works` or `waterway=riverbank` count as areas
+    (`config/osmconf.ini`).
+  - **Choosing the wall tags.** taginfo was not reachable, so the script counts the tags of
+    `barriers.osm_wall_candidates` in the country extract and logs the counts; fill
+    `osm_tags_walls` from them.
+- **GHSL (`download_ghsl.py`).** With templates for `smod` and `pop`, it also mosaics the
+  settlement model and population of the same epoch (`ghsl_smod.vrt`, `ghsl_pop.vrt`).
+  - **SMOD class codes:** 10 water, 11 very low density rural, 12 low density rural,
+    13 rural cluster, 21 suburban or peri-urban, 22 semi-dense urban cluster, 23 dense
+    urban cluster, 30 urban centre.
+  - **Their status:** confirmed in the Earth Engine catalogue entry of GHS-SMOD P2023A, to be
+    confirmed in the GHSL data package.
+- **CLMS (`download_clms.py`).** It downloads nothing: the CLMS portal needs a login, and
+  no download source could be verified here. It prepares local files:
+  - **CORINE:**
+    - class index → three-digit CLC code through the legend shipped with the raster
+      (columns configurable);
+    - verified on known pixels (`corine_check`, required); a mismatch stops the script;
+    - clipped to the corridor: `corine_codes.tif`.
+  - **Urban Atlas:** the configured layer of multi-layer files, merged and reprojected,
+    keeping the polygons that touch the corridor: `urban_atlas.gpkg` with `ua_code`.
+
+### 17.2 Context zones (`context_zones.py`)
+
+1. **Sources per context:**
+   - `industrial`: CORINE industrial codes, Urban Atlas industrial codes, OSM industrial
+     areas;
+   - `dense_urban`: CORINE dense codes, Urban Atlas dense codes, SMOD dense classes;
+   - `urban`: SMOD urban classes;
+   - `rural`: the rest of the corridor; it must be last in `context.order`.
+2. **Order.**
+   - **Construction.** Each context is its sources inside the corridor, minus the zones of
+     earlier contexts.
+   - **Small parts.** Parts below `min_zone_area_m2` are dropped, and their area falls
+     through to later contexts. A small industrial patch inside a town becomes
+     `dense_urban`, not `rural`.
+3. **Output.** `zones.gpkg` (`zone_id`, `context`, `sources`, `area_m2`). The zones do not
+   overlap and tile the corridor exactly (tested).
+4. **Use in later steps.** `gis.Vector.zones_to_grid` rasterizes the zones onto a unit grid
+   for the steps that follow.
+5. **Measured.** 7.3 s on a synthetic corridor of 2829 km² with 50 000 Urban Atlas
+   polygons, 5000 OSM areas, 2 M CORINE pixels and SMOD at 1 km.

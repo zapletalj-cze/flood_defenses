@@ -1,7 +1,8 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
 # Downloads the GHSL built-up volume tiles (total and non-residential, 100 m) intersecting the DTM footprint for the
-# configured or latest available epoch and mosaics each product as a VRT.
+# configured or latest available epoch and mosaics each product as a VRT; with templates, also the settlement model
+# (SMOD) and population (GHS-POP) of the same epoch (Stage D).
 
 import datetime
 import json
@@ -32,6 +33,7 @@ KEYS = [
     "sources.max_retries",
 ]
 PRODUCTS = ["total", "non_residential"]
+OPTIONAL_PRODUCTS = ["smod", "pop"]  # downloaded when their template is set
 FIRST_EPOCH = 1975  # first GHSL epoch; epochs follow in 5-year steps
 
 if __name__ == "__main__":
@@ -123,7 +125,13 @@ if __name__ == "__main__":
 
     # --- Tiles and VRT mosaics ---
     record = {"epoch": epoch, "tiles": tiles, "products": {}}
-    for product in PRODUCTS:
+    optional = [p for p in OPTIONAL_PRODUCTS if templates.get(p)]
+    skipped = [p for p in OPTIONAL_PRODUCTS if not templates.get(p)]
+    if skipped:
+        log.info(
+            "GHSL products without a template (not downloaded): %s.", ", ".join(skipped)
+        )
+    for product in PRODUCTS + optional:
         paths = []
         for tile in tiles:
             url = templates[product].format(epoch=epoch, tile=tile)

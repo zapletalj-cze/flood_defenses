@@ -228,6 +228,9 @@ seed = 1
 
 [countries.T4]
 dtm = "{data / 'dtm.tif'}"
+dsm = []
+building_footprints = []
+water_polygons = []
 levees = "{data / 'levees.gpkg'}"
 rivers = "{data / 'rivers.gpkg'}"
 river_upstream_area_field = "upstream_km2"
@@ -287,6 +290,9 @@ value_total_tolerance = 0.01
 [countries.T4.lulc]
 enabled = false
 
+[countries.T4.context]
+osm_industrial = {{ landuse = ["industrial"], man_made = ["works"] }}
+
 [sources]
 request_pause_s = 0.1
 max_retries = 1
@@ -300,6 +306,12 @@ osm_tags_hydraulic = {{ waterway = ["sluice_gate", "lock_gate", "weir", "dam"], 
 osm_tags_drains = {{ waterway = ["drain", "ditch", "canal"] }}
 osm_tags_closing = {{ waterway = ["sluice_gate", "lock_gate"] }}
 osm_tags_pumping = {{ man_made = ["pumping_station"] }}
+osm_tags_water = {{ natural = ["water"], waterway = ["riverbank"], landuse = ["reservoir", "basin"] }}
+
+[barriers]
+osm_tags_walls = {{}}
+osm_tags_crossings = {{ highway = ["residential", "service"], railway = ["rail"] }}
+osm_wall_candidates = {{ barrier = ["wall"], wall = ["flood_wall"], man_made = ["dyke", "embankment"] }}
 """
 (root / "test.toml").write_text(config)
 

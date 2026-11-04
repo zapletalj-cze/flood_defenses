@@ -118,6 +118,7 @@ seed = 42
 
 [countries.BM]
 dtm = {json.dumps([str(Path(f).resolve()) for f in files])}
+dsm = []
 levees = "{(data / 'levees.gpkg').resolve()}"
 rivers = "{(data / 'rivers.gpkg').resolve()}"
 working_resolution_m = 2.0

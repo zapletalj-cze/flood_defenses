@@ -4,8 +4,8 @@
 
 # Stage D, step D.1: inventory, inputs and plan
 
-Status: **proposal, waiting for approval.** No Stage D code has been written. Prototype kernels were written only
-in a scratch folder, to measure the runtime figures in section 4.
+Status: **approved.** Step D1 is implemented (README §17); D2–D5 follow. The prototype kernels of section 4 were
+written only in a scratch folder, to measure the runtime figures.
 
 ---
 

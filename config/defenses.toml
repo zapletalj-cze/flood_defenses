@@ -27,6 +27,12 @@ placeholders = [
     "sources.gfm_nodata_values",
     "sources.glofas_valid_time_ends_day",
     "country.lulc.worldcover_categories",
+    "country.context.urban_atlas_industrial_codes",
+    "country.context.urban_atlas_dense_urban_codes",
+    "country.context.ghsl_smod_dense_urban",
+    "country.context.ghsl_smod_urban",
+    "country.context.min_zone_area_m2",
+    "sources.osm_tags_water",
 ]
 
 [general]
@@ -73,6 +79,18 @@ keep_intermediate = false       # write dtm, spill, margin, barrier and crest ra
 geofabrik_region = ""           # Geofabrik region path of the country (e.g. continent/country), used by the URL template
 osm_pbf = ""                    # optional local .osm.pbf instead of the download
 endpoint_elevation_radius_m = 5.0   # DTM sampled within this radius at river line ends (downstream end detection)
+# Stage D inputs (all optional)
+dsm = []                        # surface model files in the DTM CRS (flood walls classified as non-ground)
+building_footprints = []        # building polygons; OSM buildings are used if empty
+manual_barriers = []            # reviewed barrier lines; crest from Z or field crest_m
+industrial_registry = []        # points of regulated sites, e.g. EEA industrial reporting (verify the licence)
+ems_flood_extents = []          # manually downloaded Copernicus EMS flood delineations
+water_polygons = []             # water surfaces; OSM water polygons are used if empty
+corine = []                     # CORINE Land Cover raster (class index per pixel), local copy from the CLMS portal
+corine_legend = ""              # legend table shipped with the raster: class index -> three-digit CLC code
+corine_legend_index_field = ""  # NOT VERIFIED: legend column with the raster value (check your legend file)
+corine_legend_code_field = ""   # NOT VERIFIED: legend column with the CLC code
+corine_check = []               # known pixels [[x, y, code], ...] in the raster CRS; the mapping is verified on them
 
 [countries.XX.compartments]
 gap_tolerance_m = 20.0
@@ -106,6 +124,67 @@ max_damage_csv = ""                          # user provided (JRC global depth-d
 depth_damage_csv = ""                        # user provided
 value_total_tolerance = 0.01                 # allowed relative difference of value totals after warping
 
+# Context zones (context_zones.py): earlier classes of `order` win where sources overlap.
+[countries.XX.context]
+order = ["industrial", "dense_urban", "urban", "rural"]
+corine_industrial_codes = [121, 123]
+corine_dense_urban_codes = [111]
+urban_atlas_industrial_codes = []    # verify in the data
+urban_atlas_dense_urban_codes = []   # verify in the data
+ghsl_smod_dense_urban = [30]         # verify class codes in the GHSL data package
+ghsl_smod_urban = [21, 22, 23]       # verify class codes in the GHSL data package
+osm_industrial = { landuse = ["industrial"], man_made = ["works"] }
+min_zone_area_m2 = 20000.0
+
+# Processing parameters per context (placeholders). rural keeps the country values of stages A to C.
+[countries.XX.context.params.industrial]
+working_resolution_m = 2.0
+unit_core_size_m = 5000.0
+gap_tolerance_m = 20.0
+closure_gap_max_m = 40.0
+crest_lines = true
+rp_distribution_classes = [50, 100, 200, 500]
+rp_distribution_shares = [0.2, 0.4, 0.3, 0.1]
+score_weight_value = 0.4
+score_weight_population = 0.4
+score_weight_upstream = 0.2
+
+[countries.XX.context.params.dense_urban]
+working_resolution_m = 2.0
+unit_core_size_m = 5000.0
+gap_tolerance_m = 20.0
+closure_gap_max_m = 40.0
+crest_lines = true
+rp_distribution_classes = [50, 100, 200, 500]
+rp_distribution_shares = [0.2, 0.4, 0.3, 0.1]
+score_weight_value = 0.4
+score_weight_population = 0.4
+score_weight_upstream = 0.2
+
+[countries.XX.context.params.urban]
+working_resolution_m = 5.0
+unit_core_size_m = 20000.0
+gap_tolerance_m = 20.0
+closure_gap_max_m = 20.0
+crest_lines = false
+rp_distribution_classes = [20, 50, 100, 200]
+rp_distribution_shares = [0.2, 0.3, 0.4, 0.1]
+score_weight_value = 0.4
+score_weight_population = 0.3
+score_weight_upstream = 0.3
+
+[countries.XX.context.params.rural]
+working_resolution_m = 5.0
+unit_core_size_m = 20000.0
+gap_tolerance_m = 20.0
+closure_gap_max_m = 20.0
+crest_lines = false
+rp_distribution_classes = [20, 50, 100, 200]
+rp_distribution_shares = [0.2, 0.3, 0.4, 0.1]
+score_weight_value = 0.5
+score_weight_population = 0.0
+score_weight_upstream = 0.5
+
 # HAND_YZ: land use / land cover exposure that supplements the GHSL building value (processing/HAND_YZ.py).
 # Category values must cover only assets that GHSL buildings do not hold (crops, roads, rails, open-air equipment),
 # otherwise buildings are counted twice.
@@ -130,7 +209,7 @@ geofabrik_url_template = ""     # NOT VERIFIED: pattern with {region}, from the 
 # GHSL built-up volume (R2023A, 100 m): URL templates with {epoch} and {tile}, tiling schema (vector file or URL,
 # zipped shapefile allowed) and the schema attribute holding the tile id. NOT VERIFIED: fill from the JRC GHSL
 # documentation (tile naming not confirmed).
-ghsl_url_templates = { total = "", non_residential = "" }
+ghsl_url_templates = { total = "", non_residential = "", smod = "", pop = "" }   # smod and pop optional (Stage D)
 ghsl_tile_schema = ""
 ghsl_tile_field = ""
 ghsl_epoch = 0                  # 0 = latest epoch not after the current year that the server provides
@@ -183,6 +262,7 @@ worldcover_version = "v200"
 worldcover_year = 2021
 osm_tags_hydraulic = { waterway = ["sluice_gate", "lock_gate", "weir", "dam"], man_made = ["pumping_station"] }
 osm_tags_drains = { waterway = ["drain", "ditch", "canal"] }
+osm_tags_water = { natural = ["water"], waterway = ["riverbank"], landuse = ["reservoir", "basin"] }   # placeholder
 osm_tags_closing = { waterway = ["sluice_gate", "lock_gate"] }   # structures that close a river at a levee crossing
 osm_tags_pumping = { man_made = ["pumping_station"] }
 
@@ -201,3 +281,39 @@ hint_margin_m = 0.5             # placeholder: a cell is clearly below the scene
 hint_dry_share = 0.8            # placeholder: share of tested scenes in which a hint cell stays dry
 hint_min_scenes = 3             # placeholder: minimum number of tested scenes per hint cell
 hint_exclusion_m = 40.0         # placeholder: cells this close to a barrier line or compartment are not tested
+
+# --- Stage D ---
+[crest_lines]
+transect_spacing_m = 10.0
+transect_length_m = 300.0
+max_bank_distance_m = 150.0
+min_drop_m = 0.4
+landward_window_m = 50.0
+width_drop_m = 0.3
+max_wall_width_m = 2.0
+min_wall_height_m = 0.4
+building_buffer_m = 2.0
+max_crest_std_m = 0.15
+link_max_m = 25.0
+link_max_dz_m = 0.5
+min_line_length_m = 50.0
+
+[barriers]
+source_priority = ["manual", "crest_dsm", "ml", "osm", "crest_dtm"]
+dedupe_distance_m = 5.0
+dedupe_max_angle_deg = 20.0
+dedupe_min_overlap = 0.7
+osm_tags_walls = {}               # fill from the candidate counts that download_osm.py logs
+osm_tags_crossings = { highway = ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "service", "unclassified"], railway = ["rail", "tram", "light_rail"] }
+# Tags counted in the country extract to choose osm_tags_walls (taginfo was not reachable): documented OSM tags
+# for walls and dykes; counts only, nothing is extracted from this list.
+osm_wall_candidates = { barrier = ["wall", "retaining_wall"], wall = ["flood_wall"], man_made = ["dyke", "embankment"] }
+
+[coarse]
+coarse_resolution_m = 25.0
+coarse_min_area_km2 = 5.0
+coarse_match_distance_m = 100.0
+
+[review]
+top_n = 50
+flag_weights = { closure_gap = 1.0, crest_dsm = 0.5, truncated = 1.0, obs_conflict = 1.5, model_obs_conflict = 1.0, urban_no_test = 0.5, no_levee = 1.0 }
