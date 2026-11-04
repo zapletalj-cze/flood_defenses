@@ -124,7 +124,7 @@ results.append(
     )
 )
 entry = np.unravel_index(
-    np.argmin(np.where(inside, order_def, np.iinfo(np.int64).max)), (rows, cols)
+    np.argmin(np.where(inside, order_def, np.iinfo(order_def.dtype).max)), (rows, cols)
 )
 results.append(
     (

@@ -149,6 +149,9 @@ gated_crossings = false
 fill_nodata_holes = true
 stream_burn_m = 5.0
 stream_burn_buffer_m = 100.0
+preserve_river_cells = true
+cap_river_holes = true
+max_fill_distance_m = 500.0
 
 [countries.BM.rp]
 levee_adjacent_distance_m = 10.0

@@ -59,6 +59,9 @@ KEYS = [
     "country.compartments.fill_nodata_holes",
     "country.compartments.stream_burn_m",
     "country.compartments.stream_burn_buffer_m",
+    "country.compartments.preserve_river_cells",
+    "country.compartments.cap_river_holes",
+    "country.compartments.max_fill_distance_m",
     "country.rp.levee_adjacent_distance_m",
 ]
 UNIT_COLUMNS = {
@@ -74,6 +77,7 @@ UNIT_COLUMNS = {
     "source_y": "float64",
     "truncated": "bool",
     "touches_corridor_edge": "bool",
+    "touches_dtm_edge": "bool",
 }
 OUTPUT_COLUMNS = [
     "compartment_id",
@@ -88,6 +92,7 @@ OUTPUT_COLUMNS = [
     "source_y",
     "truncated",
     "touches_corridor_edge",
+    "touches_dtm_edge",
     "has_pumping",
     "no_levee",
     "unit_id",
@@ -137,31 +142,108 @@ def process_unit(task):
         )
         > 0
     )
+    data = ~np.isnan(dtm)
     dtm[~domain] = np.nan
     counts["domain_cells"] = int(domain.sum())
-    if p["fill_nodata_holes"]:
-        # DTM nodata enclosed by data inside the domain (e.g. lidar water surfaces) would act as a wall.
-        nan_parts, _ = ndimage.label(np.isnan(dtm))
-        open_parts = np.unique(
-            np.concatenate(
-                [
-                    nan_parts[0],
-                    nan_parts[-1],
-                    nan_parts[:, 0],
-                    nan_parts[:, -1],
-                    nan_parts[~domain],
-                ]
-            )
+    rivers = gpd.read_file(task["rivers_used"], bbox=bounds)
+    river_cells = (
+        gis.Raster.rasterize_geometries(
+            rivers.geometry, np.ones(len(rivers)), shape, gt, wkt, False, np.uint8
         )
-        holes = (nan_parts > 0) & ~np.isin(nan_parts, open_parts)
-        if holes.any():
-            slices = ndimage.find_objects(np.where(holes, nan_parts, 0))
-            size = max(
-                max(s.stop - s.start for s in obj) for obj in slices if obj is not None
-            )
-            dtm, unfilled = gis.Raster.fill_nodata_cells(dtm, holes, gt, wkt, size)
-            counts["filled_hole_cells"] = int(holes.sum()) - unfilled
-        del nan_parts
+        > 0
+    )
+    if p["fill_nodata_holes"]:
+        # Nodata inside the DTM coverage (lidar water surfaces, data gaps) would act as a wall and
+        # leave rivers without cells; it is interpolated, also where it reaches the window edge.
+        # Nodata outside the coverage stays a wall (flagged by touches_dtm_edge).
+        # Coverage = morphological closing of the data cells (two chamfer distance passes): gaps
+        # narrower than twice max_fill_distance_m are inside it, a straight coverage edge stays.
+        # Cells beyond the window are unknown and count as no data (padding), so that a coverage
+        # edge near the window border is not closed against the border.
+        radius = max(p["max_fill_distance_m"] / res, 1.0)
+        pad = int(np.ceil(radius)) + 1
+        grown = gis.Hydro.distance_cells(np.pad(data, pad), radius + 1) <= radius
+        covered = (gis.Hydro.distance_cells(~grown, radius + 1) > radius)[
+            pad:-pad, pad:-pad
+        ]
+        del grown
+        gaps = np.isnan(dtm) & domain & covered
+        del covered
+        if gaps.any():
+            rows_any = np.flatnonzero(gaps.any(axis=1))
+            cols_any = np.flatnonzero(gaps.any(axis=0))
+            q0, q1 = max(rows_any[0] - 2, 0), min(rows_any[-1] + 3, shape[0])
+            p0, p1 = max(cols_any[0] - 2, 0), min(cols_any[-1] + 3, shape[1])
+            limit = max(p["max_fill_distance_m"] / res, 1.0)
+            # Distance from gap cells to the nearest valid cell: half-width of the gaps.
+            to_valid = gis.Hydro.distance_cells(~np.isnan(dtm[q0:q1, p0:p1]), limit)
+            reach = int(np.ceil(to_valid[gaps[q0:q1, p0:p1]].max())) + 2
+            del to_valid
+            before = dtm
+            dtm, unfilled = gis.Raster.fill_nodata_cells(before, gaps, gt, wkt, reach)
+            counts["filled_gap_cells"] = int(gaps.sum()) - unfilled
+            river_gap = gaps & river_cells
+            if p["cap_river_holes"] and river_gap.any():
+                # Water surfaces: interpolation from the banks lies above the water. River cells are
+                # interpolated along each river line between valid river cells (the river profile).
+                along = np.zeros(shape, bool)
+                for geometry in rivers.geometry:
+                    for part in shapely.get_parts(geometry):
+                        steps = np.append(
+                            np.arange(0.0, part.length, res / 2), part.length
+                        )
+                        xy = shapely.get_coordinates(
+                            shapely.line_interpolate_point(part, steps)
+                        )
+                        cols = np.floor((xy[:, 0] - gt[0]) / res).astype(np.int64)
+                        rows = np.floor((gt[3] - xy[:, 1]) / res).astype(np.int64)
+                        inside = (
+                            (rows >= 0)
+                            & (rows < shape[0])
+                            & (cols >= 0)
+                            & (cols < shape[1])
+                        )
+                        steps, rows, cols = steps[inside], rows[inside], cols[inside]
+                        known = ~np.isnan(before[rows, cols])
+                        missing = river_gap[rows, cols]
+                        if known.any() and missing.any():
+                            dtm[rows[missing], cols[missing]] = np.interp(
+                                steps[missing],
+                                steps[known],
+                                before[rows[known], cols[known]],
+                            )
+                            along[rows[missing], cols[missing]] = True
+                counts["river_cells_interpolated_along"] = int(along.sum())
+                # Without valid river cells (whole river nodata in the window), and for the other cells
+                # of gaps crossed by a river, the fill is capped at the lowest valid cell within reach:
+                # the waterline at the edge of the gap.
+                gap_parts, _ = ndimage.label(gaps)
+                river_parts = np.setdiff1d(np.unique(gap_parts[river_gap]), [0])
+                target = np.isin(gap_parts, river_parts) & ~along
+                del gap_parts
+                if target.any():
+                    rows_any = np.flatnonzero(target.any(axis=1))
+                    cols_any = np.flatnonzero(target.any(axis=0))
+                    r0, r1 = max(rows_any[0] - reach, 0), min(
+                        rows_any[-1] + 1 + reach, shape[0]
+                    )
+                    c0, c1 = max(cols_any[0] - reach, 0), min(
+                        cols_any[-1] + 1 + reach, shape[1]
+                    )
+                    original = before[r0:r1, c0:c1]
+                    lowest = ndimage.minimum_filter(
+                        np.where(np.isnan(original), np.inf, original),
+                        size=2 * reach + 1,
+                        mode="constant",
+                        cval=np.inf,
+                    )
+                    cap = target[r0:r1, c0:c1] & np.isfinite(lowest)
+                    window = dtm[r0:r1, c0:c1]
+                    window[cap] = np.minimum(window[cap], lowest[cap])
+                    counts["capped_gap_cells"] = int(cap.sum())
+            del before, river_gap
+        del gaps
+    del data
     valid = ~np.isnan(dtm)
     times["domain"] = time.perf_counter() - t
 
@@ -330,13 +412,8 @@ def process_unit(task):
 
     # --- Rivers, enclosed streams, water sources ---
     t = time.perf_counter()
-    rivers = gpd.read_file(task["rivers_used"], bbox=bounds)
-    stream = (
-        gis.Raster.rasterize_geometries(
-            rivers.geometry, np.ones(len(rivers)), shape, gt, wkt, False, np.uint8
-        )
-        > 0
-    ) & valid
+    stream = river_cells & valid
+    del river_cells
     barrier_full = barrier.copy()
     counts.update(
         {
@@ -348,8 +425,9 @@ def process_unit(task):
     # Zones separated by barriers (crossings counted as barrier). Streams entering the window edge belong to the
     # main network; streams in other zones are enclosed by levees (e.g. tributaries with flap gates).
     zones, _ = ndimage.label(~barrier_full & valid)
-    stream_edge = np.zeros(shape, bool)
-    stream_edge[[0, -1], :] = stream[[0, -1], :]
+    # Rivers on the window edge or next to nodata (missing DTM coverage) enter from outside.
+    stream_edge = stream & ndimage.binary_dilation(~valid)
+    stream_edge[[0, -1], :] |= stream[[0, -1], :]
     stream_edge[:, [0, -1]] |= stream[:, [0, -1]]
     outer_zones = np.setdiff1d(np.unique(zones[stream_edge]), [0])
     stream_zones = np.setdiff1d(np.unique(zones[stream]), [0])
@@ -417,6 +495,10 @@ def process_unit(task):
                 <= p["barrier_removal_width_m"]
             )
             removal &= valid
+            if p["preserve_river_cells"]:
+                # River cells next to a levee keep their elevation (the bed); only crossing cells,
+                # where the DTM shows the levee body, are interpolated.
+                removal &= ~(stream & ~barrier_full)
             dtm_undef, unfilled = gis.Raster.fill_nodata_cells(
                 dtm,
                 removal,
@@ -474,7 +556,7 @@ def process_unit(task):
         river_ref = hand_undef = spill_undef = spill_def = margin = np.full(
             shape, np.nan, np.float32
         )
-        seed_def = order_def = np.full(shape, -1, np.int64)
+        seed_def = order_def = np.full(shape, -1, np.int32)
 
     # --- Protected compartments ---
     t = time.perf_counter()
@@ -514,6 +596,10 @@ def process_unit(task):
             np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
         )
         touching = np.unique(labels[ndimage.binary_dilation(~domain) & (labels > 0)])
+        # Missing DTM coverage acts as a wall: such compartments may be closed artificially.
+        at_dtm_edge = np.unique(
+            labels[ndimage.binary_dilation(np.isnan(dtm) & domain) & (labels > 0)]
+        )
         stats = pd.DataFrame(
             {
                 "unit_label": ids,
@@ -531,6 +617,7 @@ def process_unit(task):
                 "source_y": gt[3] - (seed_rows + 0.5) * res,
                 "truncated": np.isin(ids, border),
                 "touches_corridor_edge": np.isin(ids, touching),
+                "touches_dtm_edge": np.isin(ids, at_dtm_edge),
             }
         ).astype(UNIT_COLUMNS)
         del frame, grouped
@@ -918,9 +1005,8 @@ if __name__ == "__main__":
                     "source_y",
                 ]:
                     merged[column] = lowest[column]
-                merged["touches_corridor_edge"] = (
-                    members["touches_corridor_edge"].astype(bool).any()
-                )
+                for column in ["touches_corridor_edge", "touches_dtm_edge"]:
+                    merged[column] = members[column].astype(bool).any()
                 chosen.append(merged)
         final = gpd.GeoDataFrame(
             pd.concat(chosen, ignore_index=True), geometry="geometry", crs=wkt
@@ -988,6 +1074,7 @@ if __name__ == "__main__":
         {
             "truncated": bool,
             "touches_corridor_edge": bool,
+            "touches_dtm_edge": bool,
             "has_pumping": bool,
             "no_levee": bool,
         }

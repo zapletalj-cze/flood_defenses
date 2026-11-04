@@ -19,6 +19,8 @@ from osgeo import gdal, osr
 from shapely import affinity
 from shapely.geometry import LineString, Point
 
+import gis
+
 gdal.UseExceptions()
 
 EPSG = 32633  # synthetic test data only
@@ -74,6 +76,10 @@ levees = {
     "F_outer": (ring(1900, 600, 2250, 900), 3.0),
     "F_inner": (ring(2000, 680, 2150, 830), 1.5),
     "G_long": (ring(100, 1400, 2900, 1480), 2.5),
+    # B2: levee on the river bank; its removal zone reaches the river cells.
+    "H_bank": (LineString([(100, 1008), (500, 1008)]), 2.5),
+    # B3/B4: U-shaped levee open towards a strip without DTM coverage (x >= 2960).
+    "U_open": (LineString([(2960, 600), (2700, 600), (2700, 800), (2960, 800)]), 2.5),
 }
 probes = {  # local point -> expected number of compartments covering it
     "A_seam": ((1020, 1250), 1),
@@ -85,6 +91,8 @@ probes = {  # local point -> expected number of compartments covering it
     "F_inner": ((2075, 755), 1),
     "F_outer": ((1950, 880), 1),
     "G_long": ((1500, 1440), 1),
+    "U_open": ((2830, 700), 1),
+    "L1_hole_artifact": ((2700, 1550), 0),
 }
 
 # Terrain: valley rising 0.5 % away from the river and 0.1 % downstream to upstream, 2 m deep channel,
@@ -106,29 +114,37 @@ for name, (line, height) in levees.items():
     sub = shapely.points(xx[r0:r1, c0:c1].ravel(), yy[r0:r1, c0:c1].ravel())
     mask = shapely.dwithin(line, sub, 1.5).reshape(r1 - r0, c1 - c0)
     dtm[r0:r1, c0:c1][mask] += height
-# Narrower than the 10 m channel bed, so that the interpolation draws on the bed (see README, limitation on
-# water-surface holes).
-dtm[(np.abs(yy - RIVER_Y) <= 2) & (xx > 2600) & (xx < 2800)] = -9999.0
+# L1: water-surface hole over the river; interpolation from the banks would raise the river cells.
+dtm[(np.abs(yy - RIVER_Y) <= 4) & (xx > 2600) & (xx < 2800)] = -9999.0
+# B3/B4: no DTM coverage east of x = 2960.
+dtm[xx >= 2960] = -9999.0
 
 srs = osr.SpatialReference()
 srs.ImportFromEPSG(EPSG)
-dtm_files = []
-for k, (c0, c1) in enumerate([(0, cols // 2), (cols // 2, cols)]):
-    path = data / f"dtm_block_{k}.tif"
-    ds = gdal.GetDriverByName("GTiff").Create(
-        str(path),
-        c1 - c0,
-        rows,
-        1,
-        gdal.GDT_Float32,
-        ["COMPRESS=DEFLATE", "PREDICTOR=3"],
-    )  # strip layout, no overviews
-    ds.SetGeoTransform([X0 + c0 * NATIVE, NATIVE, 0, Y_TOP, 0, -NATIVE])
-    ds.SetProjection(srs.ExportToWkt())
-    ds.GetRasterBand(1).SetNoDataValue(-9999.0)
-    ds.GetRasterBand(1).WriteArray(dtm[:, c0:c1])
-    ds = None
-    dtm_files.append(str(path))
+dtm_files, dtm_files_dry = [], []
+# T3: the whole river channel without DTM data (lidar water surface along the entire river).
+dtm_dry = dtm.copy()
+dtm_dry[np.abs(yy - RIVER_Y) <= 4] = -9999.0
+for name, array, files in [
+    ("dtm_block", dtm, dtm_files),
+    ("dtm_water", dtm_dry, dtm_files_dry),
+]:
+    for k, (c0, c1) in enumerate([(0, cols // 2), (cols // 2, cols)]):
+        path = data / f"{name}_{k}.tif"
+        ds = gdal.GetDriverByName("GTiff").Create(
+            str(path),
+            c1 - c0,
+            rows,
+            1,
+            gdal.GDT_Float32,
+            ["COMPRESS=DEFLATE", "PREDICTOR=3"],
+        )  # strip layout, no overviews
+        ds.SetGeoTransform([X0 + c0 * NATIVE, NATIVE, 0, Y_TOP, 0, -NATIVE])
+        ds.SetProjection(srs.ExportToWkt())
+        ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+        ds.GetRasterBand(1).WriteArray(array[:, c0:c1])
+        ds = None
+        files.append(str(path))
 
 levee_names = list(levees)
 half = len(levee_names) // 2
@@ -146,14 +162,23 @@ river = LineString([(WIDTH_M, RIVER_Y), (0, RIVER_Y)])
 gpd.GeoDataFrame({"name": ["main"]}, geometry=[world(river)], crs=EPSG).to_file(
     data / "rivers.gpkg", driver="GPKG"
 )
+# B4: tributary entering from the area without DTM coverage into the U-shaped levee.
+gpd.GeoDataFrame(
+    {"name": ["trib_east"]},
+    geometry=[world(LineString([(2995, 700), (2750, 700)]))],
+    crs=EPSG,
+).to_file(data / "rivers_trib.gpkg", driver="GPKG")
 
 
-def country_table(code, levee_files, convert, option):
+def country_table(
+    code, levee_files, convert, option, river_files=None, gated=False, dtm_list=None
+):
+    river_files = river_files or [str(data / "rivers.gpkg")]
     return f"""
 [countries.{code}]
-dtm = {json.dumps(dtm_files)}
+dtm = {json.dumps(dtm_list or dtm_files)}
 levees = {json.dumps(levee_files)}
-rivers = "{data / 'rivers.gpkg'}"
+rivers = {json.dumps(river_files)}
 working_resolution_m = 2.0
 corridor_buffer_m = 500.0
 unit_core_size_m = 1000.0
@@ -179,10 +204,13 @@ barrier_removal_width_m = 10.0
 min_margin_m = 0.3
 max_level_m = 20.0
 min_area_m2 = 10000.0
-gated_crossings = false
+gated_crossings = {str(gated).lower()}
 fill_nodata_holes = true
 stream_burn_m = 5.0
 stream_burn_buffer_m = 20.0
+preserve_river_cells = true
+cap_river_holes = true
+max_fill_distance_m = 100.0
 
 [countries.{code}.rp]
 levee_adjacent_distance_m = 10.0
@@ -214,6 +242,21 @@ seed = 1
         "B",
     )
     text += country_table("T0", str(data / "levees_empty.gpkg"), convert, "A")
+    text += country_table(
+        "T2",
+        [str(data / "levees_ml.gpkg"), str(data / "levees_osm.gpkg")],
+        False,
+        "A",
+        river_files=[str(data / "rivers.gpkg"), str(data / "rivers_trib.gpkg")],
+        gated=True,
+    )
+    text += country_table(
+        "T3",
+        [str(data / "levees_ml.gpkg"), str(data / "levees_osm.gpkg")],
+        False,
+        "A",
+        dtm_list=dtm_files_dry,
+    )
     (root / "test.toml").write_text(text)
 
 
@@ -239,7 +282,7 @@ def run(script, country, **variables):
 
 results = []
 write_config(convert=False)
-for country in ["T1", "T0"]:
+for country in ["T1", "T0", "T2", "T3"]:
     proc = run("prepare_dtm", country)
     results.append(
         (
@@ -299,7 +342,88 @@ for label, ((px, py), expected) in probes.items():
             hits == expected,
         )
     )
-results.append((f"T1: total compartments 8, found {len(final)}", len(final) == 8))
+results.append((f"T1: total compartments 9, found {len(final)}", len(final) == 9))
+u_open = final[final.covers(world(Point(2830, 700)))]
+results.append(
+    (
+        "B3: compartment closed by missing DTM coverage kept and flagged touches_dtm_edge",
+        len(u_open) == 1
+        and bool(u_open.touches_dtm_edge.iloc[0])
+        and not bool(u_open.truncated.iloc[0]),
+    )
+)
+others_flagged = int(final.touches_dtm_edge.astype(bool).sum()) - len(u_open)
+results.append(
+    ("B3: no other compartment flagged touches_dtm_edge", others_flagged == 0)
+)
+
+# B2: river cells under the removal zone of the bank levee keep their elevation.
+unit = root / "work" / "T1" / "units" / "000_000"
+ds = gdal.Open(str(unit / "dtm.tif"))
+unit_gt, unit_dtm = ds.GetGeoTransform(), ds.ReadAsArray()
+unit_undef = gdal.Open(str(unit / "dtm_undefended.tif")).ReadAsArray()
+unit_stream = (
+    gis.Raster.rasterize_geometries(
+        [world(river)],
+        [1],
+        unit_dtm.shape,
+        unit_gt,
+        ds.GetProjection(),
+        False,
+        np.uint8,
+    )
+    > 0
+)
+cell_x = unit_gt[0] + (np.arange(unit_dtm.shape[1]) + 0.5) * unit_gt[1] - X0
+cell_y = (
+    unit_gt[3] + (np.arange(unit_dtm.shape[0]) + 0.5) * unit_gt[5] - (Y_TOP - HEIGHT_M)
+)
+along_h = (cell_x > 150) & (cell_x < 450)
+river_mask = unit_stream & along_h[None, :]
+between = (np.abs(cell_y - 1004) < 1.5)[:, None] & along_h[None, :]
+results.append(
+    (
+        "B2: river cells next to a levee keep their elevation; cells beside them are interpolated",
+        river_mask.any()
+        and float(np.nanmax(np.abs(unit_undef[river_mask] - unit_dtm[river_mask])))
+        < 1e-6
+        and float(np.nanmax(np.abs(unit_undef[between] - unit_dtm[between]))) > 0.01,
+    )
+)
+along = sum(
+    json.loads((d / "done.json").read_text()).get("river_cells_interpolated_along", 0)
+    for d in (root / "work" / "T1" / "units").iterdir()
+)
+hole_unit = root / "work" / "T1" / "units" / "002_000"
+ds = gdal.Open(str(hole_unit / "dtm.tif"))
+hole_gt, hole_dtm = ds.GetGeoTransform(), ds.ReadAsArray()
+hole_stream = (
+    gis.Raster.rasterize_geometries(
+        [world(river)],
+        [1],
+        hole_dtm.shape,
+        hole_gt,
+        ds.GetProjection(),
+        False,
+        np.uint8,
+    )
+    > 0
+)
+hx = hole_gt[0] + (np.arange(hole_dtm.shape[1]) + 0.5) * hole_gt[1] - X0
+hy = hole_gt[3] + (np.arange(hole_dtm.shape[0]) + 0.5) * hole_gt[5] - (Y_TOP - HEIGHT_M)
+hxx, hyy = np.meshgrid(hx, hy)
+in_hole = hole_stream & (hxx > 2610) & (hxx < 2790)
+bed = 100.0 + 0.001 * hxx - 2.0
+deviation = (
+    float(np.abs(hole_dtm[in_hole] - bed[in_hole]).max()) if in_hole.any() else 99.0
+)
+results.append(
+    (
+        f"L1: river cells in the gap follow the river profile ({along} cells, max deviation "
+        f"from the bed {deviation:.2f} m)",
+        along > 0 and deviation < 0.1,
+    )
+)
 long = final[final.covers(world(Point(1500, 1440)))]
 results.append(
     (
@@ -379,11 +503,46 @@ results.append(
     )
 )
 filled = sum(
-    json.loads((d / "done.json").read_text()).get("filled_hole_cells", 0)
+    json.loads((d / "done.json").read_text()).get("filled_gap_cells", 0)
     for d in unit_dirs
 )
 results.append(
     (f"nodata hole over the river interpolated ({filled} cells)", filled > 0)
+)
+
+# B4: in gated mode a tributary entering from missing DTM coverage is a water source.
+proc = run("compartments", "T2")
+gated_final = gpd.read_file(root / "output" / "T2" / "compartments.gpkg")
+u_gated = int(gated_final.covers(world(Point(2830, 700))).sum())
+others_same = all(
+    int(gated_final.covers(world(Point(*xy))).sum()) == expected
+    for label, (xy, expected) in probes.items()
+    if label != "U_open"
+)
+results.append(
+    (
+        f"B4: tributary from missing coverage floods the U in gated mode ({u_gated} compartments "
+        f"at the U, other probes unchanged: {others_same})",
+        proc.returncode == 0 and u_gated == 0 and others_same,
+    )
+)
+
+# T3: the whole river is nodata; gaps are filled and the river cells capped at the waterline.
+proc = run("compartments", "T3")
+water_final = gpd.read_file(root / "output" / "T3" / "compartments.gpkg")
+water_hits = {
+    label: int(water_final.covers(world(Point(*xy))).sum())
+    for label, (xy, expected) in probes.items()
+}
+water_ok = all(
+    water_hits[label] == expected for label, (xy, expected) in probes.items()
+)
+results.append(
+    (
+        f"T3 river entirely nodata: same compartments as T1 ({len(water_final)}; probes "
+        f"{'ok' if water_ok else water_hits})",
+        proc.returncode == 0 and water_ok and len(water_final) == 9,
+    )
 )
 
 proc = run("compartments", "T0")

@@ -2046,46 +2046,64 @@ class Hydro:
         """
         Stream cell reached downstream by every cell. Routing runs on a conditioned
         copy of dem: tapered stream burning (cells lowered by burn at the stream,
-        decreasing linearly to zero at burn_buffer_cells), complete breaching
-        (priority flood from the stream cells, depressions carved along the flood path,
-        flats given an eps gradient), then D8 steepest descent. Without the burning,
-        paths can run along channel cells parallel to the rasterized stream and reach
-        it only far downstream. The input dem is not modified.
+        decreasing linearly to zero at burn_buffer_cells, chamfer distance), complete
+        breaching (priority flood from the stream cells, depressions carved along the
+        flood path, flats given an eps gradient), then D8 steepest descent. Without the
+        burning, paths can run along channel cells parallel to the rasterized stream and
+        reach it only far downstream. The input dem is not modified.
         :param dem: 2D float array, NaN = nodata
         :param stream: 2D bool array of stream cells (the only outlets)
         :param burn: lowering of the stream cells in the conditioned copy
         :param burn_buffer_cells: distance in cells over which the lowering tapers off
         :param eps: elevation step used for carving and flats
-        :return: 2D int64 array of flat indices of the stream cell reached, -1 if none
+        :return: 2D int32 array of flat indices of the stream cell reached, -1 if none
         """
-        conditioned = np.ascontiguousarray(dem, dtype=np.float32)
-        if burn > 0 and stream.any():
-            distance = ndimage.distance_transform_edt(~stream)
-            taper = np.clip(1.0 - distance / max(float(burn_buffer_cells), 1.0), 0, 1)
-            conditioned = (conditioned - burn * taper).astype(np.float32)
-            del distance, taper
+        if dem.size >= 2**31:
+            raise ValueError(
+                "Window too large for 32-bit cell indices; use smaller units."
+            )
         return _breach_to_streams(
-            conditioned, np.ascontiguousarray(stream, dtype=np.bool_), eps
+            np.ascontiguousarray(dem, dtype=np.float32),
+            np.ascontiguousarray(stream, dtype=np.bool_),
+            float(burn),
+            float(burn_buffer_cells),
+            eps,
         )
 
     @staticmethod
     def priority_flood(surface, seeds):
         """
         Lowest level at which water starting at the seeds reaches each cell
-        (4-connected, spill = max(spill of the previous cell, surface)).
+        (4-connected, spill = max(spill of the previous cell, surface)). Cells reached at
+        the current minimal level go through a plain queue (improved priority flood).
         :param surface: 2D float array, NaN = impassable
         :param seeds: 2D bool array of seed cells (level 0)
         :return: (spill float32 with NaN where unreached,
-                  seed int64 flat index of the seed each minimal path starts from,
-                  order int64 in which cells were reached, -1 where unreached)
+                  seed int32 flat index of the seed each minimal path starts from,
+                  order int32 in which cells were reached, -1 where unreached)
         """
+        if surface.size >= 2**31:
+            raise ValueError(
+                "Window too large for 32-bit cell indices; use smaller units."
+            )
         spill, seed, order = _priority_flood(
             np.ascontiguousarray(surface, dtype=np.float32),
             np.ascontiguousarray(seeds, dtype=np.bool_),
         )
-        spill = spill.astype(np.float32)
         spill[~np.isfinite(spill)] = np.nan
         return spill, seed, order
+
+    @staticmethod
+    def distance_cells(mask, limit):
+        """
+        Chamfer distance (weights 1 and sqrt 2) in cells to the nearest True cell
+        :param mask: 2D bool array
+        :param limit: distances are capped at this value
+        :return: 2D float32 array
+        """
+        return _chamfer_distance(
+            np.ascontiguousarray(mask, dtype=np.bool_), np.float32(limit)
+        )
 
 
 class MosaicRasters:
@@ -2575,30 +2593,142 @@ class MosaicRasters:
 
 
 @njit(cache=True)
-def _breach_to_streams(dem, stream, eps):
+def _heap_push(keys, vals, size, key, val):
+    # 4-ary min-heap on parallel arrays; ties broken by value (cell index) for determinism.
+    if size == keys.shape[0]:
+        grown_keys = np.empty(2 * keys.shape[0], keys.dtype)
+        grown_vals = np.empty(2 * vals.shape[0], vals.dtype)
+        grown_keys[:size] = keys[:size]
+        grown_vals[:size] = vals[:size]
+        keys, vals = grown_keys, grown_vals
+    i = size
+    while i > 0:
+        p = (i - 1) >> 2
+        if keys[p] < key or (keys[p] == key and vals[p] <= val):
+            break
+        keys[i] = keys[p]
+        vals[i] = vals[p]
+        i = p
+    keys[i] = key
+    vals[i] = val
+    return keys, vals, size + 1
+
+
+@njit(cache=True)
+def _heap_pop(keys, vals, size):
+    key, val = keys[0], vals[0]
+    size -= 1
+    last_key, last_val = keys[size], vals[size]
+    i = 0
+    while True:
+        first = 4 * i + 1
+        if first >= size:
+            break
+        best = first
+        for child in range(first + 1, min(first + 4, size)):
+            if keys[child] < keys[best] or (
+                keys[child] == keys[best] and vals[child] < vals[best]
+            ):
+                best = child
+        if keys[best] < last_key or (keys[best] == last_key and vals[best] < last_val):
+            keys[i] = keys[best]
+            vals[i] = vals[best]
+            i = best
+        else:
+            break
+    keys[i] = last_key
+    vals[i] = last_val
+    return key, val, size
+
+
+@njit(cache=True)
+def _fifo_push(fifo, tail, value):
+    if tail == fifo.shape[0]:
+        grown = np.empty(2 * fifo.shape[0], fifo.dtype)
+        grown[:tail] = fifo[:tail]
+        fifo = grown
+    fifo[tail] = value
+    return fifo, tail + 1
+
+
+@njit(cache=True)
+def _chamfer_distance(mask, limit):
+    # Two-pass chamfer distance (weights 1 and sqrt 2, in cells) to the nearest True cell, capped at limit.
+    rows, cols = mask.shape
+    d = np.full((rows, cols), limit, np.float32)
+    diag = np.float32(sqrt(2.0))
+    for i in range(rows):
+        for j in range(cols):
+            if mask[i, j]:
+                d[i, j] = 0.0
+                continue
+            v = d[i, j]
+            if i > 0:
+                v = min(v, d[i - 1, j] + 1.0)
+                if j > 0:
+                    v = min(v, d[i - 1, j - 1] + diag)
+                if j < cols - 1:
+                    v = min(v, d[i - 1, j + 1] + diag)
+            if j > 0:
+                v = min(v, d[i, j - 1] + 1.0)
+            d[i, j] = v
+    for i in range(rows - 1, -1, -1):
+        for j in range(cols - 1, -1, -1):
+            v = d[i, j]
+            if i < rows - 1:
+                v = min(v, d[i + 1, j] + 1.0)
+                if j > 0:
+                    v = min(v, d[i + 1, j - 1] + diag)
+                if j < cols - 1:
+                    v = min(v, d[i + 1, j + 1] + diag)
+            if j < cols - 1:
+                v = min(v, d[i, j + 1] + 1.0)
+            d[i, j] = v
+    return d
+
+
+@njit(cache=True)
+def _breach_to_streams(dem, stream, burn, burn_cells, eps):
     rows, cols = dem.shape
     n = rows * cols
     flat = dem.ravel()
     is_stream = stream.ravel()
     z = np.empty(n, np.float64)
-    for c in range(n):
-        z[c] = flat[c]
-    parent = np.full(n, -1, np.int64)
+    if burn > 0:
+        # Tapered burning: stream cells lowered by burn, decreasing linearly to 0 at burn_cells.
+        distance = _chamfer_distance(stream, np.float32(max(burn_cells, 1.0))).ravel()
+        for c in range(n):
+            taper = 1.0 - distance[c] / max(burn_cells, 1.0)
+            z[c] = flat[c] - burn * taper if taper > 0 else flat[c]
+    else:
+        for c in range(n):
+            z[c] = flat[c]
+    parent = np.full(n, -1, np.int32)
     seen = np.zeros(n, np.bool_)
     di = np.array([-1, -1, -1, 0, 0, 1, 1, 1])
     dj = np.array([-1, 0, 1, -1, 1, -1, 0, 1])
     dist = np.array([sqrt(2.0), 1.0, sqrt(2.0), 1.0, 1.0, sqrt(2.0), 1.0, sqrt(2.0)])
-    heap = [(0.0, np.int64(0))]
-    heap.pop()
+    keys = np.empty(1 << 16, np.float64)
+    vals = np.empty(1 << 16, np.int32)
+    size = 0
+    fifo = np.empty(1 << 16, np.int32)
+    head = 0
+    tail = 0
     for c in range(n):
         if is_stream[c] and not np.isnan(z[c]):
             seen[c] = True
-            heap.append((z[c], np.int64(c)))
-    heapq.heapify(heap)
-    while len(heap) > 0:
-        _, c = heapq.heappop(heap)
+            keys, vals, size = _heap_push(keys, vals, size, z[c], np.int32(c))
+    while size > 0 or tail > head:
+        if tail > head:
+            c = fifo[head]
+            head += 1
+            if head == tail:
+                head = 0
+                tail = 0
+        else:
+            _, c, size = _heap_pop(keys, vals, size)
         ci = c // cols
-        cj = c % cols
+        cj = c - ci * cols
         for k in range(8):
             ni = ci + di[k]
             nj = cj + dj[k]
@@ -2613,29 +2743,29 @@ def _breach_to_streams(dem, stream, eps):
                 if z[c] - z[nb] < eps:
                     # flat: a small gradient towards the outlet
                     z[nb] = z[c] + eps
-                else:
-                    # pit: carve the path back towards the outlet below the pit level
-                    target = z[nb] - eps
-                    p = c
-                    while p >= 0 and z[p] > target:
-                        z[p] = target
-                        target -= eps
-                        p = parent[p]
-            heapq.heappush(heap, (z[nb], nb))
+                    keys, vals, size = _heap_push(keys, vals, size, z[nb], np.int32(nb))
+                    continue
+                # pit: carve the path back towards the outlet below the pit level; the pit lies
+                # below every queued cell, so it goes to the plain queue (improved priority flood)
+                target = z[nb] - eps
+                p = c
+                while p >= 0 and z[p] > target:
+                    z[p] = target
+                    target -= eps
+                    p = parent[p]
+                fifo, tail = _fifo_push(fifo, tail, np.int32(nb))
+            else:
+                keys, vals, size = _heap_push(keys, vals, size, z[nb], np.int32(nb))
 
-    # D8 steepest descent on the conditioned surface; receivers are always lower,
-    # so processing cells by increasing elevation resolves every path in one pass.
-    reached = np.full(n, -1, np.int64)
-    for c in np.argsort(z):
-        if not seen[c]:
-            continue
-        if is_stream[c]:
-            reached[c] = c
+    # D8 steepest descent on the conditioned surface (receivers stored in parent); every
+    # receiver is lower, so paths are acyclic and resolved in O(n) with path assignment.
+    for c in range(n):
+        if not seen[c] or is_stream[c]:
             continue
         ci = c // cols
-        cj = c % cols
+        cj = c - ci * cols
         best = 0.0
-        receiver = -1
+        receiver = parent[c]
         for k in range(8):
             ni = ci + di[k]
             nj = cj + dj[k]
@@ -2648,9 +2778,23 @@ def _breach_to_streams(dem, stream, eps):
             if slope > best:
                 best = slope
                 receiver = nb
-        if receiver < 0:
-            receiver = parent[c]
-        reached[c] = reached[receiver]
+        parent[c] = receiver
+    reached = np.full(n, -1, np.int32)
+    for c in range(n):
+        if is_stream[c] and seen[c]:
+            reached[c] = c
+    for c in range(n):
+        if not seen[c] or reached[c] >= 0:
+            continue
+        p = c
+        while reached[p] < 0:
+            p = parent[p]
+        target_cell = reached[p]
+        q = c
+        while reached[q] < 0:
+            following = parent[q]
+            reached[q] = target_cell
+            q = following
     return reached.reshape(rows, cols)
 
 
@@ -2660,26 +2804,41 @@ def _priority_flood(surface, seeds):
     n = rows * cols
     flat = surface.ravel()
     is_seed = seeds.ravel()
-    spill = np.full(n, np.inf)
-    seed = np.full(n, -1, np.int64)
-    order = np.full(n, -1, np.int64)
-    heap = [(0.0, np.int64(0))]
-    heap.pop()
+    spill = np.full(n, np.inf, np.float32)
+    seed = np.full(n, -1, np.int32)
+    order = np.full(n, -1, np.int32)
+    keys = np.empty(1 << 16, np.float32)
+    vals = np.empty(1 << 16, np.int32)
+    size = 0
+    fifo = np.empty(1 << 16, np.int32)
+    head = 0
+    tail = 0
     for c in range(n):
         if is_seed[c] and not np.isnan(flat[c]):
             spill[c] = 0.0
             seed[c] = c
-            heap.append((0.0, np.int64(c)))
-    heapq.heapify(heap)
+            keys, vals, size = _heap_push(
+                keys, vals, size, np.float32(0.0), np.int32(c)
+            )
     counter = 0
-    while len(heap) > 0:
-        level, c = heapq.heappop(heap)
-        if level > spill[c] or order[c] >= 0:
+    while size > 0 or tail > head:
+        if tail > head:
+            c = fifo[head]
+            head += 1
+            if head == tail:
+                head = 0
+                tail = 0
+            level = spill[c]
+        else:
+            level, c, size = _heap_pop(keys, vals, size)
+            if level > spill[c]:
+                continue
+        if order[c] >= 0:
             continue
         order[c] = counter
         counter += 1
         ci = c // cols
-        cj = c % cols
+        cj = c - ci * cols
         for k in range(4):
             if k == 0:
                 if ci == 0:
@@ -2700,11 +2859,16 @@ def _priority_flood(surface, seeds):
             value = flat[nb]
             if np.isnan(value) or order[nb] >= 0:
                 continue
-            new_level = level if level > value else value
-            if new_level < spill[nb]:
-                spill[nb] = new_level
+            if value <= level:
+                # Reached at the current, minimal level: final at once, no heap needed.
+                if level < spill[nb]:
+                    spill[nb] = level
+                    seed[nb] = seed[c]
+                    fifo, tail = _fifo_push(fifo, tail, np.int32(nb))
+            elif value < spill[nb]:
+                spill[nb] = value
                 seed[nb] = seed[c]
-                heapq.heappush(heap, (new_level, nb))
+                keys, vals, size = _heap_push(keys, vals, size, value, np.int32(nb))
     return (
         spill.reshape(rows, cols),
         seed.reshape(rows, cols),
@@ -2769,6 +2933,9 @@ class Config:
         "country.compartments.fill_nodata_holes": "bool",
         "country.compartments.stream_burn_m": "float",
         "country.compartments.stream_burn_buffer_m": "float",
+        "country.compartments.preserve_river_cells": "bool",
+        "country.compartments.cap_river_holes": "bool",
+        "country.compartments.max_fill_distance_m": "float",
         "country.rp.classes": "int_list",
         "country.rp.distribution_classes": "int_list",
         "country.rp.distribution_shares": "float_list",
