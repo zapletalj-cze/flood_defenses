@@ -21,7 +21,7 @@ written only in a scratch folder, to measure the runtime figures.
 - **Additions outside the main prompt:**
   - `download_nld.py` (earlier request);
   - `processing/HAND_YZ.py` and `download/download_worldcover.py` (land cover exposure supplementing GHSL);
-  - `docs/vysvetleni_cs.md` (Czech explanation).
+  - `docs/navod_cs.md` (short Czech guide to the scripts).
 - **Tests.** 109 checks: kernels 16, pipeline 40, Stage B 20, Stage C 26, HAND_YZ 7. All pass from scratch.
 
 ### 1.2 Configuration

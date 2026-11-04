@@ -8,9 +8,8 @@ model output, local hazard dataset or FABDEM is used anywhere. Satellite flood e
 (GFM) and reanalysed discharge (GloFAS) enter only as *observations* that bound the
 modelled return period; they never draw a compartment.
 
-**Czech explanation:** [docs/vysvetleni_cs.md](docs/vysvetleni_cs.md) starts with a simple
-step-by-step guide to running the package, then describes how the method works and the
-reasoning behind every step, in Czech.
+**Czech quick guide:** [docs/navod_cs.md](docs/navod_cs.md): a short guide to running the
+scripts.
 
 **Error priority: recall.** When the evidence is ambiguous, a compartment is kept rather
 than dropped. Every design choice below that trades precision for recall says so
@@ -108,7 +107,7 @@ only if you install it (§11.1); otherwise it reads files downloaded through the
 gis.py                     shared GIS library (existing; new functions appended, nothing changed)
 config/defenses.toml       configuration template
 config/osmconf.ini         OSM driver configuration exposing the tag keys used
-docs/vysvetleni_cs.md      how it works and why, in Czech
+docs/navod_cs.md           short guide to running the scripts, in Czech
 docs/stage_d_plan.md       Stage D, step D.1: inventory, inputs, plan and measured runtime impact
 download/
   download_osm.py          Geofabrik extract -> hydraulic points, drains (single-layer GeoPackages)
