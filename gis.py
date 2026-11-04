@@ -8,6 +8,8 @@ import shutil
 import sys
 import time
 import tomllib
+import urllib.error
+import urllib.request
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from math import acos, ceil, degrees, floor, sqrt
@@ -1075,6 +1077,7 @@ class Raster:
         warp_memory_mb=512,
         overview="AUTO",
         multithread=True,
+        dst_wkt=None,
     ):
         """
         Reads a map window resampled to a grid aligned with bounds (gdal.Warp to MEM).
@@ -1088,6 +1091,7 @@ class Raster:
         :param warp_memory_mb: warp working buffer in MB
         :param overview: "AUTO", "NONE" or overview index
         :param multithread: warp with a worker thread (GDAL_NUM_THREADS)
+        :param dst_wkt: target CRS as WKT when it differs from the source CRS
         :return: (float32 array with NaN as nodata, geotransform)
         """
         ds = (
@@ -1110,6 +1114,8 @@ class Raster:
         }
         if band.GetNoDataValue() is not None:
             kwargs["srcNodata"] = band.GetNoDataValue()
+        if dst_wkt:
+            kwargs["dstSRS"] = dst_wkt
         out = gdal.Warp("", ds, options=gdal.WarpOptions(**kwargs))
         array = out.GetRasterBand(1).ReadAsArray()
         scale, offset = band.GetScale(), band.GetOffset()
@@ -1854,7 +1860,7 @@ class Vector:
         :param wkt: target CRS as WKT
         :param bbox: optional (xmin, ymin, xmax, ymax) in the target CRS
         :param where: optional SQL WHERE clause
-        :param keep_columns: attribute columns to keep when present
+        :param keep_columns: attribute columns to keep when present; True keeps all
         :return: gpd.GeoDataFrame with keep_columns, source and geometry
         """
         frames = []
@@ -1871,7 +1877,10 @@ class Vector:
                 gdf = gdf.set_crs(wkt)
             gdf = gdf.to_crs(wkt)
             gdf["source"] = os.path.splitext(os.path.basename(str(path)))[0]
-            columns = [c for c in (keep_columns or []) if c in gdf.columns]
+            if keep_columns is True:
+                columns = [c for c in gdf.columns if c not in ("source", "geometry")]
+            else:
+                columns = [c for c in (keep_columns or []) if c in gdf.columns]
             frames.append(gdf[columns + ["source", "geometry"]])
         gdf = gpd.GeoDataFrame(
             pd.concat(frames, ignore_index=True), geometry="geometry", crs=wkt
@@ -2948,6 +2957,22 @@ class Config:
         "country.rp.storey_height_m": "float",
         "country.rp.max_damage_csv": "path",
         "country.rp.depth_damage_csv": "path",
+        "country.rp.value_total_tolerance": "float",
+        "country.geofabrik_region": "str",
+        "country.osm_pbf": "opt_path",
+        "country.endpoint_elevation_radius_m": "float",
+        "sources.geofabrik_url_template": "str",
+        "sources.osm_tags_hydraulic": "table",
+        "sources.osm_tags_drains": "table",
+        "sources.osm_tags_closing": "table",
+        "sources.osm_tags_pumping": "table",
+        "sources.request_pause_s": "float",
+        "sources.max_retries": "int",
+        "sources.ghsl_url_templates": "table",
+        "sources.ghsl_tile_schema": "str",
+        "sources.ghsl_tile_field": "str",
+        "sources.ghsl_epoch": "int",
+        "sources.ghsl_nodata_as_zero": "bool",
     }
     ALLOWED = {
         "country.dtm_conversion": {"A", "B"},
@@ -3136,6 +3161,22 @@ class Config:
             set(rp["classes"])
         ):
             errors.append("rp.classes must be strictly ascending")
+        if {"country.rp.classes", "country.rp.distribution_classes"} <= keys:
+            if not set(rp["distribution_classes"]) <= set(rp["classes"]):
+                errors.append("rp.distribution_classes must be values of rp.classes")
+        if {"country.rp.classes", "country.rp.cap_rp", "country.rp.max_rp"} <= keys:
+            if not set(rp["cap_rp"]) | {rp["max_rp"]} <= set(rp["classes"]):
+                errors.append("rp.cap_rp and rp.max_rp must be values of rp.classes")
+        sources = cfg.get("sources", {})
+        for subset in ["sources.osm_tags_closing", "sources.osm_tags_pumping"]:
+            if {subset, "sources.osm_tags_hydraulic"} <= keys:
+                for key, values in sources[subset.split(".")[1]].items():
+                    known = sources["osm_tags_hydraulic"].get(key, [])
+                    if not set(values) <= set(known):
+                        errors.append(
+                            f"{subset}.{key} values {sorted(set(values) - set(known))} "
+                            "are not in sources.osm_tags_hydraulic"
+                        )
         return errors
 
     @staticmethod
@@ -3314,3 +3355,96 @@ class Run:
                     Run.format_seconds(eta),
                 )
         return results, failed
+
+
+class Http:
+    @staticmethod
+    def download(url, path, retries=4, pause_s=1.0, headers=None, timeout_s=120):
+        """
+        Downloads url to path through a temporary file. Skipped when path exists with
+        the size the server reports (Content-Length). Retries with exponential backoff.
+        file:// URLs are supported (tests, local mirrors).
+        :param url: source URL
+        :param path: destination file
+        :param retries: number of retries after the first attempt
+        :param pause_s: base pause; attempt k waits pause_s * 2**k seconds
+        :param headers: optional request headers (e.g. authorisation from an env variable)
+        :return: path
+        """
+        headers = headers or {}
+        expected = None
+        try:
+            request = urllib.request.Request(url, method="HEAD", headers=headers)
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                length = response.headers.get("Content-Length")
+                expected = int(length) if length else None
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            log.info(
+                "No size from %s (%s); downloading without size check.", url, error
+            )
+        if (
+            exists(str(path))
+            and expected is not None
+            and os.path.getsize(path) == expected
+        ):
+            log.info("%s exists with the expected size; download skipped.", path)
+            return str(path)
+        os.makedirs(os.path.dirname(str(path)) or ".", exist_ok=True)
+        temporary = f"{path}.part"
+        for attempt in range(retries + 1):
+            try:
+                request = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                    with open(temporary, "wb") as target:
+                        shutil.copyfileobj(response, target, 2**22)
+                size = os.path.getsize(temporary)
+                if expected is not None and size != expected:
+                    raise OSError(f"incomplete download ({size} of {expected} bytes)")
+                os.replace(temporary, str(path))
+                log.info("Downloaded %s (%.1f MB).", url, size / 1e6)
+                return str(path)
+            except (urllib.error.URLError, OSError) as error:
+                if attempt == retries:
+                    raise RuntimeError(f"Download of {url} failed: {error}") from error
+                wait = pause_s * 2**attempt
+                log.warning(
+                    "Download of %s failed (%s); retry in %.0f s.", url, error, wait
+                )
+                time.sleep(wait)
+        return str(path)
+
+
+class Stats:
+    @staticmethod
+    def percentile_rank(values):
+        """
+        Percentile rank in (0, 1] (average rank for ties); NaN stays NaN, -inf ranks lowest
+        :param values: array-like
+        :return: numpy array
+        """
+        return (
+            pd.Series(np.asarray(values, dtype=float))
+            .rank(method="average", pct=True)
+            .to_numpy()
+        )
+
+    @staticmethod
+    def quantile_classes(scores, classes, shares):
+        """
+        Assigns classes by score so that the class shares match shares (ascending scores
+        get ascending classes); ties get the same class. NaN scores get NaN.
+        :param scores: array-like
+        :param classes: class values, ascending
+        :param shares: share per class, summing to 1
+        :return: float numpy array of class values
+        """
+        rank = Stats.percentile_rank(scores)
+        bounds = np.cumsum(shares)
+        bounds[-1] = 1.0
+        index = np.searchsorted(bounds, rank - 1e-9, side="left")
+        result = np.full(len(rank), np.nan)
+        known = ~np.isnan(rank)
+        result[known] = np.asarray(classes, dtype=float)[
+            np.minimum(index[known], len(classes) - 1)
+        ]
+        return result

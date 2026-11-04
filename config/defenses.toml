@@ -59,6 +59,9 @@ drop_contradicted_truncated = true  # drop compartments truncated everywhere if 
 contradiction_ratio = 0.5       # share of such a compartment that silent neighbouring windows must cover
 id_rounding_m = 10.0            # rounding of the representative point in compartment_id
 keep_intermediate = false       # write dtm, spill, margin, barrier and crest rasters per unit
+geofabrik_region = ""           # Geofabrik region path of the country (e.g. continent/country), used by the URL template
+osm_pbf = ""                    # optional local .osm.pbf instead of the download
+endpoint_elevation_radius_m = 5.0   # DTM sampled within this radius at river line ends (downstream end detection)
 
 [countries.XX.compartments]
 gap_tolerance_m = 20.0
@@ -90,11 +93,20 @@ levee_adjacent_distance_m = 10.0
 storey_height_m = 3.0
 max_damage_csv = ""                          # user provided (JRC global depth-damage based)
 depth_damage_csv = ""                        # user provided
+value_total_tolerance = 0.01                 # allowed relative difference of value totals after warping
 
 [sources]
-geofabrik_url_template = ""     # NOT VERIFIED: fill from the official Geofabrik documentation
-ghsl_url_templates = []         # NOT VERIFIED: tile naming of the JRC GHSL FTP to be confirmed
-ghsl_epoch = 0                  # 0 = latest available unless set
+request_pause_s = 1.0           # pause between requests; retry k waits request_pause_s * 2**k
+max_retries = 4
+geofabrik_url_template = ""     # NOT VERIFIED: pattern with {region}, from the official Geofabrik documentation
+# GHSL built-up volume (R2023A, 100 m): URL templates with {epoch} and {tile}, tiling schema (vector file or URL,
+# zipped shapefile allowed) and the schema attribute holding the tile id. NOT VERIFIED: fill from the JRC GHSL
+# documentation (tile naming not confirmed).
+ghsl_url_templates = { total = "", non_residential = "" }
+ghsl_tile_schema = ""
+ghsl_tile_field = ""
+ghsl_epoch = 0                  # 0 = latest epoch not after the current year that the server provides
+ghsl_nodata_as_zero = true      # GHSL nodata (ocean, outside coverage) counts as no building volume
 gfm_stac_url = ""               # NOT VERIFIED: GFM STAC API endpoint
 gfm_date_from = "2015-01-01"
 gfm_date_to = ""
@@ -103,6 +115,8 @@ glofas_dataset_id = ""          # NOT VERIFIED: EWDS dataset identifier
 glofas_min_upstream_area_km2 = 0   # placeholder
 osm_tags_hydraulic = { waterway = ["sluice_gate", "lock_gate", "weir", "dam"], man_made = ["pumping_station"] }
 osm_tags_drains = { waterway = ["drain", "ditch", "canal"] }
+osm_tags_closing = { waterway = ["sluice_gate", "lock_gate"] }   # structures that close a river at a levee crossing
+osm_tags_pumping = { man_made = ["pumping_station"] }
 
 [evidence]
 comparison_distance_m = 2000.0
