@@ -23,6 +23,7 @@ explicitly.
 | C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
+| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | plan (step E.2) waiting for approval |
 
 ---
 
@@ -109,6 +110,7 @@ config/defenses.toml       configuration template
 config/osmconf.ini         OSM driver configuration exposing the tag keys used
 docs/navod_cs.md           short guide to running the scripts, in Czech
 docs/stage_d_plan.md       Stage D, step D.1: inventory, inputs, plan and measured runtime impact
+docs/stage_e_plan.md       Stage E, step E.2: outputs check, corridor read benchmark, plan (waiting for approval)
 download/
   download_osm.py          Geofabrik extract -> hydraulic points, drains (single-layer GeoPackages)
   download_ghsl.py         GHSL building volume tiles -> VRT mosaics

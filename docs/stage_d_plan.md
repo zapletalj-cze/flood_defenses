@@ -126,7 +126,7 @@ written only in a scratch folder, to measure the runtime figures.
 | D5 | `processing/gfm_evidence.py` | `context` per test, `no_test_urban`, EMS scenes (`source`) |
 | D5 | `processing/raised_sites.py` (new) | `raised_sites.gpkg` (diagnostic only) |
 | D1–D5 | `tests/test_stage_d.py` (new) | the checks of D.6, added step by step |
-| D5 | `README.md`, `docs/vysvetleni_cs.md` | method, reasoning, review loop, sources, licences |
+| D5 | `README.md`, `docs/navod_cs.md` | method, reasoning, review loop, sources, licences (the Czech guide only gets the new steps) |
 
 ### 3.2 gis.py additions
 
