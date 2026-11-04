@@ -106,6 +106,7 @@ gis.py                     shared GIS library (existing; new functions appended,
 config/defenses.toml       configuration template
 config/osmconf.ini         OSM driver configuration exposing the tag keys used
 docs/vysvetleni_cs.md      how it works and why, in Czech
+docs/stage_d_plan.md       Stage D, step D.1: inventory, inputs, plan and measured runtime impact
 download/
   download_osm.py          Geofabrik extract -> hydraulic points, drains (single-layer GeoPackages)
   download_ghsl.py         GHSL building volume tiles -> VRT mosaics
