@@ -309,7 +309,11 @@ class Plots:
         """
         for kind, list_entry in self.entries.items():
             (self.run_dir / kind / "manifest.json").write_text(
-                json.dumps(list_entry, indent=1)
+                json.dumps(
+                    list_entry,
+                    indent=1,
+                    default=lambda o: o.item() if hasattr(o, "item") else str(o),
+                )
             )
         for fig in self.open:
             self.plt.close(fig)

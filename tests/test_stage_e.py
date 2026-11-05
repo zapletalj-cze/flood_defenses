@@ -16,6 +16,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import shapely
 from osgeo import gdal, osr
 from shapely import affinity
@@ -30,8 +31,9 @@ WIDTH_M, HEIGHT_M, NATIVE = 8000, 3200, 1.0
 RES = 2.0  # implied.snap.resolution_m of the test configuration
 WORK_RES = 5.0  # working_resolution_m of stage A
 # Levee rings (local x0, y0, x1, y1) on the north bank of the main river: A partly covers the town of the E3/E4
-# checks, B covers nearly all of a second built reach.
-RINGS = [(4600.0, 1600.0, 5100.0, 1880.0), (6950.0, 1180.0, 7650.0, 1880.0)]
+# checks; B, 10 m high, protects nearly all of a second built reach.
+RINGS = [(4600.0, 1600.0, 5100.0, 1880.0), (6950.0, 1180.0, 7650.0, 2150.0)]
+RING_HEIGHTS = [3.0, 10.0]  # B protects its whole envelope (HAND up to envelope_hand_m)
 repo = Path(__file__).resolve().parents[1]
 root = Path(
     os.environ.get("DEFENSES_TEST_DIR") or tempfile.mkdtemp(prefix="defenses_stage_e_")
@@ -104,6 +106,38 @@ list_res.append(
     )
 )
 
+g, used, br = gis.Stats.merge_levels(
+    np.array([0, 1, 2, 3, 4, 7, 8]),
+    np.array([True, True, False, True, True, True, True]),
+    np.array([2.0, 2.1, np.nan, 2.2, 2.0, 2.1, 3.5]),
+    0.5,
+    1,
+)
+list_res.append(
+    (
+        f"merging: three similar subsegments around one park gap form one group with the gap bridged "
+        f"(groups {g.tolist()}, bridged {np.flatnonzero(br).tolist()}); a gap of two and a level step start new groups",
+        g[:5].tolist() == [0, 0, 0, 0, 0]
+        and br.tolist() == [False, False, True, False, False, False, False]
+        and abs(used[2] - 2.15) < 1e-9
+        and g[5] == 1
+        and g[6] == 2,
+    )
+)
+edges_t = np.arange(0, 10.01, 0.25)
+env_t = np.full((2, 40), 4000.0)
+built_t = np.zeros((2, 40))
+built_t[0, 16:] = 0.5 * env_t[0, 16:]
+built_t[1, 8:] = np.linspace(0.02, 0.5, 32) * env_t[1, 8:]
+ob, sm = gis.Stats.onset(built_t / env_t, 3, 0.5, 4)
+sh = gis.Stats.sharpness(sm, ob, 4)
+list_res.append(
+    (
+        f"sharpness: a sharp step {sh[0]:.2f}, a gradual rise {sh[1]:.2f} (sharp_high 0.5)",
+        sh[0] >= 0.5 and sh[1] < 0.5,
+    )
+)
+
 # --- Synthetic country T5 (1 m DTM written in row blocks) ---
 # Main river: valley along x, thalweg y = thalweg(x), falling 0.5 m/km to the east; its line runs 15 m north of the
 # thalweg. A ditch 3 m deep (deeper than the 2 m channel) runs 40 m south of the line, outside max_offset_m = 30 m.
@@ -142,8 +176,8 @@ if not dtm_path.exists():
         z_zig = 100.6 + 0.0005 * (8000.0 - xx) + 0.01 * np.abs(yy - 400.0)
         z_zig -= 2.0 * np.maximum(0.0, 1.0 - dz / 6.0)
         z = np.where((xx > 4300) & (xx < 6700) & (yy < 700), np.minimum(z, z_zig), z)
-        for x0, y0, x1, y1 in RINGS:
-            # 3 m embankments 6 m wide along the ring rectangles
+        for (x0, y0, x1, y1), height in zip(RINGS, RING_HEIGHTS):
+            # embankments 6 m wide along the ring rectangles
             on_x = (
                 ((np.abs(xx - x0) <= 3) | (np.abs(xx - x1) <= 3))
                 & (yy >= y0 - 3)
@@ -154,7 +188,7 @@ if not dtm_path.exists():
                 & (xx >= x0 - 3)
                 & (xx <= x1 + 3)
             )
-            z = np.where(on_x | on_y, z + 3.0, z)
+            z = np.where(on_x | on_y, z + height, z)
         z += rng.normal(0.0, 0.03, z.shape)
         wet = (np.abs(yy - 2600.0) <= 35.0) & (xx > 3900.0) & (xx < 7700.0)
         z[wet] = -9999.0
@@ -181,6 +215,9 @@ gdf_rn = gpd.GeoDataFrame(
 )
 gis.Vector.write_gpkg(gdf_rn, out / "rivers_sources.gpkg")
 gis.Vector.write_gpkg(gdf_rn, data / "rivers.gpkg")
+pd.DataFrame(
+    {"country": ["T5"], "residential": [1000.0], "non_residential": [800.0]}
+).to_csv(data / "max_damage.csv", index=False)
 gis.Vector.write_gpkg(
     gpd.GeoDataFrame(
         {"name": [f"ring_{k}" for k in range(len(RINGS))]},
@@ -242,6 +279,7 @@ levees = "{(data / 'levees.gpkg').as_posix()}"
 rivers = "{(data / 'rivers.gpkg').as_posix()}"
 water_polygons = "{(data / 'water.gpkg').as_posix()}"
 building_footprints = {v["footprints"]}
+river_upstream_area_field = ""
 working_resolution_m = {WORK_RES}
 corridor_buffer_m = 1000.0
 unit_core_size_m = 2000.0
@@ -277,9 +315,32 @@ max_fill_distance_m = 100.0
 
 [countries.T5.rp]
 levee_adjacent_distance_m = 10.0
+classes = [10, 20, 50, 100, 200, 500]
+storey_height_m = 3.0
+max_damage_csv = "{(data / 'max_damage.csv').as_posix()}"
 
 [countries.T5.context]
 order = ["industrial", "dense_urban", "urban", "rural"]
+
+[countries.T5.context.params.industrial]
+score_weight_value = 0.5
+score_weight_population = 0.3
+score_weight_upstream = 0.2
+
+[countries.T5.context.params.dense_urban]
+score_weight_value = 0.5
+score_weight_population = 0.3
+score_weight_upstream = 0.2
+
+[countries.T5.context.params.urban]
+score_weight_value = 0.5
+score_weight_population = 0.3
+score_weight_upstream = 0.2
+
+[countries.T5.context.params.rural]
+score_weight_value = 0.5
+score_weight_population = 0.3
+score_weight_upstream = 0.2
 
 [implied]
 units = {v["units"]}
@@ -835,6 +896,102 @@ if stage_a_ok and (out / "subsegments.gpkg").exists():
         )
     else:
         list_res.append(("implied_protection (A-B) runs", False))
+
+# --- E4: implied compartments, precedence, temporal signal, corroboration, RP ---
+imp_path = out / "implied" / "base" / "implied_compartments.gpkg"
+if stage_a_ok and imp_path.exists():
+    gdf_ic = gpd.read_file(imp_path)
+    gdf_comp = gpd.read_file(out / "compartments.gpkg")
+    ring_a = gdf_comp[gdf_comp.intersects(world(shapely.box(*RINGS[0])))]
+    town_c = gdf_ic[
+        (gdf_ic["river_id"] == main_id)
+        & (gdf_ic["side"] == "left")
+        & (gdf_ic["k_from"] <= park_k)
+        & (gdf_ic["k_to"] >= park_k)
+    ]
+    list_res.append(
+        (
+            f"merging: the town forms {len(town_c)} implied compartment over subsegments "
+            f"{town_c['k_from'].tolist()}-{town_c['k_to'].tolist()}, {town_c['n_bridged'].tolist()} bridged (park)",
+            len(town_c) == 1 and int(town_c["n_bridged"].iloc[0]) >= 1,
+        )
+    )
+    inside_a = (
+        float(
+            shapely.intersection(
+                town_c.geometry.iloc[0], shapely.union_all(ring_a.geometry.values)
+            ).area
+        )
+        if len(town_c) and len(ring_a)
+        else -1
+    )
+    list_res.append(
+        (
+            (
+                f"precedence: the town clipped by ring A (overlap share {town_c['explicit_overlap_share'].iloc[0]:.3f}, "
+                f"{inside_a:.0f} m2 left inside it)"
+                if len(town_c)
+                else "precedence: town compartment missing"
+            ),
+            len(town_c) == 1
+            and 0 < town_c["explicit_overlap_share"].iloc[0] < 0.8
+            and 0 <= inside_a < 1.0,
+        )
+    )
+    dropped = pd.read_csv(out / "implied" / "base" / "implied_dropped.csv")
+    reach_b_c = gdf_ic[
+        (gdf_ic["river_id"] == main_id)
+        & (gdf_ic["side"] == "left")
+        & (gdf_ic["k_to"] < town["k"].min())
+    ]
+    list_res.append(
+        (
+            f"precedence: the reach inside ring B dropped ({'; '.join(dropped['reason'])})",
+            len(reach_b_c) == 0
+            and dropped["reason"].str.contains("explicit_overlap_share").any(),
+        )
+    )
+    if len(town_c):
+        r = town_c.iloc[0]
+        list_res.append(
+            (
+                f"temporal: onset per epoch {r['onset_epochs']}, growth below the onset {r['growth_low_share']:.3f}, "
+                f"historic low core {bool(r['historic_low_core'])}",
+                bool(r["historic_low_core"])
+                and not bool(r["growth_into_floodplain"])
+                and abs(r["delta_onset_m"]) <= 0.5,
+            )
+        )
+        list_res.append(
+            (
+                f"RP: crest support {r['crest_support']:.2f}, corroborated {bool(r['corroborated'])}, rp {r['rp']:.0f} "
+                f"({r['rp_low']:.0f}-{r['rp_high']:.0f}), cap {r['cap_reason']}, confidence {r['confidence']}",
+                r["rp_source"] == "implied"
+                and r["confidence"] == "low"
+                and r["rp"] <= 20
+                and r["rp_low"] >= 10
+                and r["rp_low"] <= r["rp"] <= r["rp_high"],
+            )
+        )
+    run_dir = out / "plots" / "implied" / "base"
+    counts = {
+        k: len(list((run_dir / k).glob("*.png")))
+        for k in ("longitudinal", "temporal", "compartment_map")
+    }
+    index = (run_dir / "index.html").read_text()
+    list_res.append(
+        (
+            f"plots: {counts} figures, listed in index.html with their metrics",
+            counts["longitudinal"] == 4
+            and counts["temporal"] == len(gdf_ic)
+            and counts["compartment_map"] == len(gdf_ic)
+            and "crest_support" in index,
+        )
+    )
+else:
+    list_res.append(
+        ("implied_protection (C-F) writes implied_compartments.gpkg", False)
+    )
 
 print("Timings (s): " + ", ".join(f"{k} {v:.1f}" for k, v in timings.items()))
 for label, ok in list_res:

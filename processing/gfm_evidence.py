@@ -104,30 +104,7 @@ def evidence_unit(task):
 
     # Comparison zone per compartment: outside all compartments, within the comparison distance, not higher than
     # the median HAND inside the compartment and not above max_level_m.
-    zones = {}
-    for label, comp_id in kept.items():
-        inside = labels == label
-        if not inside.any():
-            continue
-        rows_any, cols_any = np.flatnonzero(inside.any(axis=1)), np.flatnonzero(
-            inside.any(axis=0)
-        )
-        q0, q1 = max(rows_any[0] - reach, 0), min(
-            rows_any[-1] + 1 + reach, labels.shape[0]
-        )
-        p0, p1 = max(cols_any[0] - reach, 0), min(
-            cols_any[-1] + 1 + reach, labels.shape[1]
-        )
-        part = (slice(q0, q1), slice(p0, p1))
-        near = gis.Hydro.distance_cells(inside[part], reach + 1) <= reach
-        level = np.nanmedian(hand[part][inside[part]])
-        zone = (
-            near
-            & (labels[part] == 0)
-            & (hand[part] <= level)
-            & (hand[part] <= p["max_level_m"])
-        )
-        zones[label] = (comp_id, part, inside[part], zone)
+    zones = gis.Evidence.comparison_zones(labels, hand, kept, reach, p["max_level_m"])
 
     if task["hints"]:
         gdf_rn = gpd.read_file(task["rivers_used"], bbox=bounds)
@@ -164,67 +141,29 @@ def evidence_unit(task):
         dry_count = np.zeros(labels.shape, np.uint16)
         test_count = np.zeros(labels.shape, np.uint16)
 
-    nodata = p["nodata_values"][0] if p["nodata_values"] else None
     list_rows = []
     for scene in task["scenes"]:
-        layers = {}
-        for role in ["flood", "exclusion", "reference_water"]:
-            layers[role], _ = gis.Raster.read_window(
-                scene[f"{role}_path"],
-                bounds,
-                res,
-                "near",
-                task["warp_memory_mb"],
-                dst_wkt=wkt,
-                src_nodata=nodata,
-            )
-        flood = layers["flood"]
-        valid = (
-            np.isfinite(flood)
-            & ~np.isin(flood, p["nodata_values"])
-            & ~np.isin(layers["exclusion"], p["exclusion_values"])
-            & ~np.isin(layers["reference_water"], p["reference_water_values"])
-            & np.isfinite(hand)
+        valid, wet, reference = gis.Evidence.scene_masks(
+            scene, bounds, res, wkt, hand, p, task["warp_memory_mb"]
         )
-        wet = valid & np.isin(flood, p["flood_values"])
-        for label, (comp_id, part, inside, zone) in zones.items():
-            inside_valid = int((inside & valid[part]).sum())
-            inside_wet = int((inside & wet[part]).sum())
-            comp_valid = int((zone & valid[part]).sum())
-            comp_wet = int((zone & wet[part]).sum())
-            inside_frac = inside_wet / inside_valid if inside_valid else np.nan
-            comp_frac = comp_wet / comp_valid if comp_valid else np.nan
-            # A dry compartment counts only if the undefended floodplain around it is wet in the same scene.
-            if (
-                inside_valid < p["min_valid_pixels"]
-                or comp_valid < p["min_valid_pixels"]
-                or not comp_frac >= p["f_wet_comparison"]
-            ):
-                outcome = "no_test"
-            elif inside_frac <= p["f_dry_inside"]:
-                outcome = "held"
-            elif inside_frac >= p["f_wet_inside"]:
-                outcome = "flooded"
-            else:
-                outcome = "inconclusive"
+        for t in gis.Evidence.test_regions(zones, valid, wet, p):
             list_rows.append(
                 [
-                    comp_id,
+                    t["region"],
                     task["unit_id"],
                     scene["item_id"],
                     scene["datetime"],
-                    inside_valid,
-                    inside_frac,
-                    comp_valid,
-                    comp_frac,
-                    outcome,
+                    t["inside_valid"],
+                    t["inside_frac"],
+                    t["comp_valid"],
+                    t["comp_frac"],
+                    t["outcome"],
                 ]
             )
         if task["hints"]:
             # Scene water level in HAND: percentile of HAND among wet valid cells connected to the river. The
             # river itself is permanent water (not valid, never "wet"), so connectivity runs through the wet
             # cells, the reference water and the river lines.
-            reference = np.isin(layers["reference_water"], p["reference_water_values"])
             parts, _ = ndimage.label(wet | reference | stream)
             touching = np.unique(parts[stream])
             connected = np.isin(parts, touching[touching > 0]) & wet

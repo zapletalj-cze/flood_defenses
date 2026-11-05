@@ -3361,6 +3361,144 @@ def _least_cost_path(cost, start, end):
     return path, dist[end]
 
 
+class Evidence:
+    """
+    Tests of protected regions against flood scenes (the logic of gfm_evidence.py,
+    shared with Stage E): a region counts as held when it is dry while its comparison
+    zone, the undefended floodplain around it at the same height, is wet.
+    """
+
+    @staticmethod
+    def scene_masks(scene, bounds, resolution, wkt, hand, params, warp_memory_mb):
+        """
+        Valid and wet cells of one scene on a grid
+        :param scene: dict with flood_path, exclusion_path, reference_water_path
+        :param bounds: grid bounds in wkt
+        :param resolution: cell size
+        :param wkt: grid CRS
+        :param hand: HAND on the grid (nodata cells are not valid)
+        :param params: dict with nodata_values, exclusion_values, reference_water_values,
+                       flood_values
+        :param warp_memory_mb: warp memory in MB
+        :return: (valid, wet, reference water) bool arrays
+        """
+        nodata = params["nodata_values"][0] if params["nodata_values"] else None
+        layers = {}
+        for role in ["flood", "exclusion", "reference_water"]:
+            layers[role], _ = Raster.read_window(
+                scene[f"{role}_path"],
+                bounds,
+                resolution,
+                "near",
+                warp_memory_mb,
+                dst_wkt=wkt,
+                src_nodata=nodata,
+            )
+        flood = layers["flood"]
+        reference = np.isin(layers["reference_water"], params["reference_water_values"])
+        valid = (
+            np.isfinite(flood)
+            & ~np.isin(flood, params["nodata_values"])
+            & ~np.isin(layers["exclusion"], params["exclusion_values"])
+            & ~reference
+            & np.isfinite(hand)
+        )
+        return valid, valid & np.isin(flood, params["flood_values"]), reference
+
+    @staticmethod
+    def comparison_zones(labels, hand, regions, reach, max_level_m, outside=None):
+        """
+        Comparison zone per region: cells outside all regions (labels == 0, and inside
+        outside where given) within reach cells of the region, with HAND not above the
+        median HAND inside it and not above max_level_m
+        :param labels: region labels, 0 = none
+        :param hand: HAND on the same grid
+        :param regions: dict label -> region id
+        :param reach: comparison distance in cells
+        :param max_level_m: highest HAND of the zone
+        :param outside: optional bool mask of cells allowed in zones
+        :return: dict label -> (region id, (row slice, column slice), inside mask of the
+                 slice, zone mask of the slice)
+        """
+        free = labels == 0 if outside is None else (labels == 0) & outside
+        zones = {}
+        for label, region in regions.items():
+            inside = labels == label
+            if not inside.any():
+                continue
+            rows_any = np.flatnonzero(inside.any(axis=1))
+            cols_any = np.flatnonzero(inside.any(axis=0))
+            part = (
+                slice(
+                    max(rows_any[0] - reach, 0),
+                    min(rows_any[-1] + 1 + reach, labels.shape[0]),
+                ),
+                slice(
+                    max(cols_any[0] - reach, 0),
+                    min(cols_any[-1] + 1 + reach, labels.shape[1]),
+                ),
+            )
+            near = Hydro.distance_cells(inside[part], reach + 1) <= reach
+            level = np.nanmedian(hand[part][inside[part]])
+            zone = (
+                near & free[part] & (hand[part] <= level) & (hand[part] <= max_level_m)
+            )
+            zones[label] = (region, part, inside[part], zone)
+        return zones
+
+    @staticmethod
+    def outcome(inside_valid, inside_wet, comp_valid, comp_wet, params):
+        """
+        Outcome of one region in one scene from cell counts
+        :param params: dict with min_valid_pixels, f_wet_comparison, f_dry_inside,
+                       f_wet_inside
+        :return: held, flooded, inconclusive or no_test
+        """
+        inside_frac = inside_wet / inside_valid if inside_valid else np.nan
+        comp_frac = comp_wet / comp_valid if comp_valid else np.nan
+        # A dry region counts only if the undefended floodplain around it is wet in the same scene.
+        if (
+            inside_valid < params["min_valid_pixels"]
+            or comp_valid < params["min_valid_pixels"]
+            or not comp_frac >= params["f_wet_comparison"]
+        ):
+            return "no_test"
+        if inside_frac <= params["f_dry_inside"]:
+            return "held"
+        if inside_frac >= params["f_wet_inside"]:
+            return "flooded"
+        return "inconclusive"
+
+    @staticmethod
+    def test_regions(zones, valid, wet, params):
+        """
+        Tests every region of comparison_zones in one scene
+        :return: list of dicts: region, inside_valid, inside_wet, inside_frac,
+                 comp_valid, comp_wet, comp_frac, outcome
+        """
+        out = []
+        for label, (region, part, inside, zone) in zones.items():
+            counts = [
+                int((inside & valid[part]).sum()),
+                int((inside & wet[part]).sum()),
+                int((zone & valid[part]).sum()),
+                int((zone & wet[part]).sum()),
+            ]
+            out.append(
+                {
+                    "region": region,
+                    "inside_valid": counts[0],
+                    "inside_wet": counts[1],
+                    "inside_frac": counts[1] / counts[0] if counts[0] else np.nan,
+                    "comp_valid": counts[2],
+                    "comp_wet": counts[3],
+                    "comp_frac": counts[3] / counts[2] if counts[2] else np.nan,
+                    "outcome": Evidence.outcome(*counts, params),
+                }
+            )
+        return out
+
+
 class Config:
     """
     TOML configuration of the Defenses package. Keys are dotted names; the prefix
@@ -4406,3 +4544,44 @@ class Stats:
         result = np.divide(up - down, peak, out=np.full(n, np.nan), where=peak > 0)
         result[np.asarray(onset_bin) < 0] = np.nan
         return result
+
+    @staticmethod
+    def merge_levels(k, eligible, level, max_dlevel, max_gap):
+        """
+        Groups of subsegments along one river side. Consecutive eligible subsegments
+        whose levels differ by at most max_dlevel form a group; a run of at most max_gap
+        positions without an eligible subsegment between two such neighbours is bridged
+        with the mean of their levels.
+        :param k: subsegment positions (unique)
+        :param eligible: bool per subsegment
+        :param level: level per subsegment (used where eligible)
+        :param max_dlevel: largest level difference within a group
+        :param max_gap: longest bridged run of positions
+        :return: (group per subsegment, -1 = none; level used, NaN = none; bridged flag)
+        """
+        k = np.asarray(k)
+        order = np.argsort(k)
+        ks = k[order]
+        el = np.asarray(eligible, bool)[order]
+        lv = np.asarray(level, float)[order]
+        n = len(ks)
+        group = np.full(n, -1, np.int64)
+        used = np.full(n, np.nan)
+        bridged = np.zeros(n, bool)
+        g, last = -1, -1
+        for i in np.flatnonzero(el):
+            if last >= 0:
+                gap = ks[i] - ks[last] - 1
+                if gap <= max_gap and abs(lv[i] - lv[last]) <= max_dlevel:
+                    between = np.arange(last + 1, i)
+                    group[between] = g
+                    used[between] = (lv[i] + lv[last]) / 2
+                    bridged[between] = True
+                    group[i], used[i], last = g, lv[i], i
+                    continue
+            g += 1
+            group[i], used[i], last = g, lv[i], i
+        out = [np.empty_like(a) for a in (group, used, bridged)]
+        for a, b in zip(out, (group, used, bridged)):
+            a[order] = b
+        return out[0], out[1], out[2]

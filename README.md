@@ -23,7 +23,7 @@ explicitly.
 | C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
-| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E3 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`, `implied_protection.py` A–B; 29 checks); E4–E5 in progress |
+| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E4 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`, `implied_protection.py`; 37 checks); E5 in progress |
 
 ---
 
@@ -141,7 +141,7 @@ tests/
   test_stage_c.py          end-to-end Stage C on the Stage B country (26 checks)
   test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
-  test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7 checks)
+  test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7, E4: 8 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -176,6 +176,8 @@ function was modified. The only change to existing lines is the import block.
 | `Vector` | `chaikin(line, iterations, max_shift)`, `interpolate_xy(line, distances)` | Chaikin smoothing that keeps vertices which would move more than `max_shift`; points along a line in one numpy pass |
 | `Raster` | `hillshade(array, geotransform, wkt)` | Hillshade with `gdal.DEMProcessing` to MEM (plots) |
 | `Stats` | `binned_quantiles(area, edges, quantiles)`, `onset(share, smooth_bins, fraction, persist_bins)`, `sharpness(smoothed, onset_bin, window_bins)` | Area-weighted quantiles within bins; onset and sharpness of a built-share curve (Stage E) |
+| `Stats` | `merge_levels(k, eligible, level, max_dlevel, max_gap)` | Groups of subsegments along a river side, short gaps bridged (Stage E) |
+| `Evidence` | `scene_masks`, `comparison_zones`, `outcome`, `test_regions` | GFM tests of regions, moved from `gfm_evidence.py`; Stage E tests implied compartments with them |
 
 ### Naming in the code
 
@@ -1189,7 +1191,7 @@ compartments take seconds.
   - **context zones:** precedence of the order, small zones falling through to later
     contexts, rural as the rest, no overlaps, the corridor tiled exactly;
   - **`zones_to_grid`** on a unit grid.
-- **`pixi run test-stage-e`** (E1: 16, E2: 6, E3: 7 checks), on its own synthetic country T5 (8 × 3.2 km, 1 m DTM, two levee rings):
+- **`pixi run test-stage-e`** (E1: 16, E2: 6, E3: 7, E4: 8 checks), on its own synthetic country T5 (8 × 3.2 km, 1 m DTM, two levee rings):
   - **kernels:** least-cost path through the only gap of a wall; Chaikin keeps its end points, moves no
     vertex more than `max_shift` and keeps a sharper corner; hillshade with nodata 0;
   - **snapping:** a valley minimum 15 m off the line is found within one cell (2 m); a ditch 1 m deeper
@@ -1215,6 +1217,16 @@ compartments take seconds.
     - the park and the unbuilt right bank not eligible; the town labelled `dense_urban`;
     - the boathouse excluded through `exclude_building_tags` and logged; `curves.npz` with two GHSL epochs;
     - `curve` and `summary` figures listed in `index.html`.
+  - **E4:**
+    - `merge_levels`: three similar subsegments around one gap form one group, the gap bridged with the mean
+      level; a gap of two and a level step start new groups;
+    - sharpness: a sharp step above and a gradual rise below `sharp_high`;
+    - the town forms one implied compartment over the park subsegment (`n_bridged` = 1);
+    - precedence: ring A (3 m) clips the town, overlap share 0.08, nothing left inside the ring; ring B (10 m)
+      protects the whole envelope of the second reach, which is dropped (share 0.98 > 0.8);
+    - temporal signal from GHSL 1990/2020: onset unchanged, growth below the onset 1.5 %, `historic_low_core`;
+    - RP: uncorroborated and historic, so rp 20 (the class above `regional_sop_rp`), `rp_low` 10, confidence low;
+    - `longitudinal`, `temporal` and `compartment_map` figures in `index.html` with their metrics.
 - **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
@@ -1633,3 +1645,64 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
 8. **Measured** on the two pilot units of the benchmark world (30.25 M cells each) with 100 000 synthetic
    buildings per core: about 5 s per unit (reads 1.1 s, rasterization of the footprints at 0.5 m 3.7 s, curves
    0.3 s). Peak RAM 1.05 GB per worker; figures 0.28 s each.
+
+### 18.4 Implied compartments (`implied_protection.py`, parts C–F, step E4)
+
+1. **Merging** (`gis.Stats.merge_levels`), per river and side along `k`:
+   - consecutive eligible subsegments whose primary levels differ by at most `merge_max_dlevel_m` form a group;
+   - a run of at most `merge_max_gap` positions without an eligible subsegment between two such neighbours is
+     bridged with the mean of their levels (`bridged`);
+   - `implied_subsegments.gpkg` gets `group`, `level_used_m` and `bridged`.
+2. **Implied cells** (pass 2, per unit): HAND between the level used and `envelope_hand_m` in the subsegments of
+   a group. Components are 4-connected within one group and joined across units. Joined parts with less than
+   `component_built_min_m2` of built area are dropped.
+3. **Precedence.**
+   - **Explicit compartments:** `compartments_rp.gpkg`, or `compartments.gpkg` of stage A when it is missing.
+   - **Effect:** their cells are subtracted, and `explicit_overlap_share` is stored.
+   - **Drop:** above `explicit_overlap_max`; the reason goes to `implied_dropped.csv`.
+4. **Temporal signal**, from the GHSL epochs and only for subsegments with at least `min_cells_temporal` GHSL
+   cells:
+   - **Onset per epoch** with the curve method of E3;
+   - **`delta_onset_m`** = onset of the first epoch − onset of the last;
+   - **`growth_low_share`:** built area added after `epoch_cutoff` below the onset of the last epoch up to the
+     cutoff, as a share of the last epoch's built area;
+   - **`growth_into_floodplain`** and **`historic_low_core`** as specified.
+5. **Corroboration.**
+   - **Edge cells:** implied cells with a 4-neighbour outside the implied area whose HAND is below the level.
+   - **`crest_support`:** share of edge cells within `corroboration_distance_m` of `barriers_all.gpkg` or
+     `crest_lines.gpkg`. Until D2 exists, the stage A barrier lines (`barriers.gpkg`) are used, which is logged.
+   - **`closure_support`:** barriers with `closure_gap` = true near the edge; this needs `barriers_all.gpkg` of D2.
+   - **GFM:** the logic of Stage C, now in `gis.Evidence` and shared, with the comparison zone outside both the
+     implied and the explicit compartments. Counts are summed over units per group and scene; tests go to
+     `implied_gfm_evidence.csv`, and the result to `gfm_held`, `gfm_flooded`, `gfm_no_test`.
+   - **`corroborated`** = crest support ≥ `corroboration_min`, or a closure barrier, or a held GFM test.
+6. **RP, stratum "implied".**
+   - **Inputs:**
+     - V: GHSL building volume × max damage per m² ÷ storey height, as in stage B but without depth weighting;
+     - P: `ghsl_pop.vrt`; `L_front` = chainage span of the group;
+     - V and P are summed outside explicit compartments.
+   - **Score:** weighted mean of the percentile ranks of V/`L_front`, P/`L_front` and upstream area, with the
+     weights of the context (`none` takes `rural`). A missing term drops out of the mean.
+   - **Classes:** quantile mapping to `rp_distribution_classes` / `rp_distribution_shares`.
+   - **Caps:**
+     - the class above `regional_sop_rp` when uncorroborated, or when historic with the cap flag;
+     - `implied_corroborated_max_rp` when corroborated;
+     - `rp_high` at most the event RP of a flooded test, once `event_rp.csv` (Stage F) holds the implied ids.
+   - **Interval and confidence:**
+     - `rp_low` = max(`regional_sop_rp`, class below); `rp_high` = class above within the caps;
+     - confidence high / medium / low as specified;
+     - `rp_source` = "implied".
+7. **Outputs** in `implied/<RUN_ID>/`: `implied_compartments.gpkg`, `implied_dropped.csv`,
+   `implied_gfm_evidence.csv`.
+8. **Plots:**
+   - **`longitudinal`** per river: levels along chainage per bank, eligible / not eligible, groups shaded,
+     bridged subsegments marked.
+   - **`temporal`** per compartment: onset level per GHSL epoch.
+   - **`compartment_map`:** hillshade, built fraction, implied and explicit outlines, barrier lines, rivers, and
+     edge cells marked supported or not, by marker shape and colour.
+   - **`summary`:** its fourth panel now counts compartments per context and confidence.
+9. **Measured** on the two pilot units of the benchmark world (30.25 M cells each, 100 000 synthetic buildings
+   per core, 11 implied compartments, 32.9 km²):
+   - **Pass 2:** 9.5 s per unit, peak 1.8 GB per worker. Counts run over implied cells only, and the distance
+     to barrier lines uses the chamfer distance in a window around the edge cells.
+   - **Plots:** 92 figures in 53 s.
