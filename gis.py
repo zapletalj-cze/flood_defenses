@@ -4298,3 +4298,111 @@ class Stats:
             np.minimum(index[known], len(classes) - 1)
         ]
         return result
+
+    @staticmethod
+    def binned_quantiles(area, edges, quantiles):
+        """
+        Area-weighted quantiles of a variable given as area per bin, interpolated
+        linearly within the bin that reaches the quantile
+        :param area: (n, n_bins) area per bin and row
+        :param edges: (n_bins + 1,) bin edges
+        :param quantiles: quantiles in [0, 1]
+        :return: (n, len(quantiles)) values; NaN for rows without area
+        """
+        area = np.atleast_2d(np.asarray(area, dtype=float))
+        edges = np.asarray(edges, dtype=float)
+        rows = np.arange(len(area))
+        total = area.sum(axis=1)
+        cum = np.divide(
+            np.cumsum(area, axis=1),
+            total[:, None],
+            out=np.zeros_like(area),
+            where=total[:, None] > 0,
+        )
+        out = np.full((len(area), len(quantiles)), np.nan)
+        for j, q in enumerate(quantiles):
+            b = np.argmax(cum >= q - 1e-12, axis=1)
+            before = np.where(b > 0, cum[rows, np.maximum(b - 1, 0)], 0.0)
+            here = np.divide(
+                area[rows, b], total, out=np.zeros(len(area)), where=total > 0
+            )
+            t = np.divide(q - before, here, out=np.zeros(len(area)), where=here > 0)
+            out[:, j] = edges[b] + np.clip(t, 0.0, 1.0) * (edges[b + 1] - edges[b])
+        out[total <= 0] = np.nan
+        return out
+
+    @staticmethod
+    def onset(share, smooth_bins, fraction, persist_bins):
+        """
+        Onset of a share curve per row: the lowest bin where the smoothed share (centred
+        moving average over smooth_bins, NaN ignored) is at least fraction times its
+        maximum and stays so for persist_bins consecutive bins
+        :param share: (n, n_bins) share per bin, NaN for bins that are too small
+        :param smooth_bins: width of the moving average in bins
+        :param fraction: share of the maximum that starts the onset
+        :param persist_bins: consecutive bins that must stay above it, the onset bin included
+        :return: (onset bin per row, -1 where none; smoothed share (n, n_bins), NaN where
+                  the bin itself is NaN)
+        """
+        share = np.atleast_2d(np.asarray(share, dtype=float))
+        n, m = share.shape
+        valid = np.isfinite(share)
+        before = smooth_bins // 2
+        after = smooth_bins - 1 - before
+        pad = ((0, 0), (before + 1, after))
+        sums = np.cumsum(np.pad(np.where(valid, share, 0.0), pad), axis=1)
+        counts = np.cumsum(np.pad(valid.astype(float), pad), axis=1)
+        win_sum = sums[:, smooth_bins:] - sums[:, :m]
+        win_count = counts[:, smooth_bins:] - counts[:, :m]
+        smoothed = np.divide(
+            win_sum, win_count, out=np.full((n, m), np.nan), where=win_count > 0
+        )
+        smoothed[~valid] = np.nan
+        peak = np.nanmax(np.where(np.isfinite(smoothed), smoothed, -np.inf), axis=1)
+        above = np.isfinite(smoothed) & (smoothed >= fraction * peak[:, None])
+        above &= peak[:, None] > 0
+        run = np.zeros((n, m + 1), np.int64)
+        for i in range(m - 1, -1, -1):
+            run[:, i] = np.where(above[:, i], run[:, i + 1] + 1, 0)
+        ok = run[:, :m] >= persist_bins
+        return np.where(ok.any(axis=1), np.argmax(ok, axis=1), -1), smoothed
+
+    @staticmethod
+    def sharpness(smoothed, onset_bin, window_bins):
+        """
+        Sharpness of an onset: (mean smoothed share in [onset, onset + window) - mean in
+        [onset - window, onset)) / maximum smoothed share; NaN bins are ignored, an empty
+        window below the onset counts as 0
+        :param smoothed: (n, n_bins) smoothed share (Stats.onset)
+        :param onset_bin: onset bin per row, -1 = none (NaN result)
+        :param window_bins: window width in bins
+        :return: (n,) sharpness
+        """
+        smoothed = np.atleast_2d(np.asarray(smoothed, dtype=float))
+        n, m = smoothed.shape
+        valid = np.isfinite(smoothed)
+        sums = np.concatenate(
+            [np.zeros((n, 1)), np.cumsum(np.where(valid, smoothed, 0.0), axis=1)],
+            axis=1,
+        )
+        counts = np.concatenate([np.zeros((n, 1)), np.cumsum(valid, axis=1)], axis=1)
+        rows = np.arange(n)
+        o = np.clip(np.asarray(onset_bin), 0, m)
+        hi = np.minimum(o + window_bins, m)
+        lo = np.maximum(o - window_bins, 0)
+        up = np.divide(
+            sums[rows, hi] - sums[rows, o],
+            counts[rows, hi] - counts[rows, o],
+            out=np.full(n, np.nan),
+            where=counts[rows, hi] - counts[rows, o] > 0,
+        )
+        down = np.divide(
+            sums[rows, o] - sums[rows, lo],
+            counts[rows, o] - counts[rows, lo],
+            out=np.zeros(n),
+            where=counts[rows, o] - counts[rows, lo] > 0,
+        )
+        peak = np.nanmax(np.where(valid, smoothed, -np.inf), axis=1)
+        result = np.divide(up - down, peak, out=np.full(n, np.nan), where=peak > 0)
+        result[np.asarray(onset_bin) < 0] = np.nan
+        return result

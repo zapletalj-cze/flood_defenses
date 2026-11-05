@@ -216,6 +216,7 @@ def write_config(name, **kw):
         "length": 500.0,
         "recompute": "false",
         "footprints": "[]",
+        "built_source": "footprints",
     }
     v.update(kw)
     (root / name).write_text(f"""[general]
@@ -277,11 +278,46 @@ max_fill_distance_m = 100.0
 [countries.T5.rp]
 levee_adjacent_distance_m = 10.0
 
+[countries.T5.context]
+order = ["industrial", "dense_urban", "urban", "rural"]
+
 [implied]
 units = {v["units"]}
 recompute_hand = {v["recompute"]}
 envelope_hand_m = 10.0
 subsegment_length_m = {v["length"]}
+subsegment_length_grid = [500.0, 1000.0]
+built_source = "{v["built_source"]}"
+exclude_building_tags = {{ building = ["boathouse", "houseboat"], man_made = ["wastewater_plant", "water_works"] }}
+built_share_min = 0.3
+built_share_min_grid = [0.2, 0.3]
+built_area_min_m2 = 20000.0
+hand_bin_m = 0.25
+min_bin_area_m2 = 2000.0
+smooth_bins = 3
+onset_fraction = 0.5
+onset_persist_bins = 4
+quantiles = [0.02, 0.05, 0.10]
+primary_level_method = "onset"
+sharp_window_m = 1.0
+sharp_high = 0.5
+component_built_min_m2 = 5000.0
+merge_max_dlevel_m = 0.5
+merge_max_gap = 1
+corroboration_distance_m = 50.0
+corroboration_min = 0.3
+explicit_overlap_max = 0.8
+regional_sop_rp = 10
+implied_corroborated_max_rp = 100
+historic_low_core_uncorroborated_cap = true
+ghsl_epochs = [1990, 2020]
+epoch_cutoff = 1990
+growth_low_share_min = 0.1
+min_cells_temporal = 20
+rp_distribution_classes = [20, 50, 100]
+rp_distribution_shares = [0.4, 0.4, 0.2]
+include_implied = false
+include_in_review = true
 
 [implied.snap]
 step_m = 5.0
@@ -618,6 +654,187 @@ if stage_a_ok:
         )
     else:
         list_res.append(("implied_segments runs", False))
+
+# --- E3: buildings laid out from the subsegments of E2, GHSL epochs, zones; implied_protection parts A-B ---
+if stage_a_ok and (out / "subsegments.gpkg").exists():
+    gdf_seg = gpd.read_file(out / "subsegments.gpkg")
+    gdf_snap = gpd.read_file(out / "rivers_snapped.gpkg").set_index("name")
+    main_id = int(gdf_snap.loc["main", "river_id"])
+    left = gdf_seg[
+        (gdf_seg["river_id"] == main_id) & (gdf_seg["side"] == "left")
+    ].copy()
+    cx = left.geometry.centroid.x.to_numpy() - X0
+    town = left[(cx > 2600) & (cx < 5400)].sort_values("k")
+    park_k = int(town["k"].iloc[len(town) // 2])
+    mills_k = int(town["k"].iloc[1])
+    reach_b = left[(cx > 7000) & (cx < 7600)]
+    gx, gy = np.meshgrid(
+        np.arange(0.0, WIDTH_M, 20.0) + 10.0, np.arange(0.0, HEIGHT_M, 20.0) + 10.0
+    )
+    gx, gy = gx.ravel(), gy.ravel()
+    d = gy - thalweg(gx)
+    pts = shapely.points(gx + X0, gy + Y0)
+    list_b, list_tag = [], []
+
+    def in_segments(segs):
+        tree = shapely.STRtree(segs.geometry.values)
+        hit = np.zeros(len(pts), bool)
+        hit[np.unique(tree.query(pts, predicate="within")[0])] = True
+        return hit
+
+    town_cells = in_segments(town[town["k"] != park_k]) & (d >= 200) & (d <= 750)
+    mills_cells = (
+        in_segments(town[town["k"] == mills_k])
+        & (d >= 10)
+        & (d < 190)
+        & (np.arange(len(gx)) % 5 == 0)
+    )
+    reach_cells = in_segments(reach_b) & (d >= 150) & (d <= 750)
+    for mask, half in ((town_cells, 8.0), (mills_cells, 8.0), (reach_cells, 8.0)):
+        list_b.append(
+            shapely.box(
+                gx[mask] + X0 - half,
+                gy[mask] + Y0 - half,
+                gx[mask] + X0 + half,
+                gy[mask] + Y0 + half,
+            )
+        )
+    boat_x = float(town["geometry"].iloc[2].centroid.x)
+    boat = shapely.box(
+        boat_x - 6,
+        Y0 + thalweg(boat_x - X0) + 12,
+        boat_x + 6,
+        Y0 + thalweg(boat_x - X0) + 20,
+    )
+    geoms_b = np.concatenate(list_b + [[boat]])
+    gdf_b = gpd.GeoDataFrame(
+        {
+            "building": ["yes"] * (len(geoms_b) - 1) + ["boathouse"],
+            "man_made": [None] * len(geoms_b),
+        },
+        geometry=geoms_b,
+        crs=f"EPSG:{EPSG}",
+    )
+    gis.Vector.write_gpkg(gdf_b, data / "buildings.gpkg")
+    # GHSL built-up surface per epoch (m2 per 100 m cell): 1990 without the mills and the second reach.
+    cells_x = np.arange(0.0, WIDTH_M, 100.0)
+    cells_y = np.arange(0.0, HEIGHT_M, 100.0)
+    for epoch, parts in ((1990, [list_b[0]]), (2020, list_b)):
+        union = shapely.union_all(np.concatenate(parts))
+        boxes = shapely.box(
+            cells_x[None, :] + X0,
+            (HEIGHT_M - cells_y[:, None] - 100.0) + Y0,
+            cells_x[None, :] + X0 + 100.0,
+            (HEIGHT_M - cells_y[:, None]) + Y0,
+        )
+        area = shapely.area(shapely.intersection(boxes, union)).astype(np.float32)
+        tif = data / f"ghsl_built_s_{epoch}.tif"
+        gis.Raster.write_array(
+            tif, area, (X0, 100.0, 0.0, Y0 + HEIGHT_M, 0.0, -100.0), wkt, nodata=-1.0
+        )
+        gdal.BuildVRT(str(out / f"ghsl_built_s_{epoch}.vrt"), [str(tif)])
+    zone_town = world(shapely.box(2500.0, 1250.0, 5500.0, 2100.0))
+    corridor = shapely.union_all(gpd.read_file(out / "corridor.gpkg").geometry.values)
+    gis.Vector.write_gpkg(
+        gpd.GeoDataFrame(
+            {
+                "zone_id": [0, 1],
+                "context": ["dense_urban", "rural"],
+                "sources": ["test", "test"],
+            },
+            geometry=[zone_town.intersection(corridor), corridor.difference(zone_town)],
+            crs=f"EPSG:{EPSG}",
+        ),
+        out / "zones.gpkg",
+    )
+    write_config("test_e.toml", footprints=f'"{(data / "buildings.gpkg").as_posix()}"')
+    proc = run("protection", "test_e.toml", "processing.implied_protection")
+    if proc.returncode == 0:
+        gdf_imp = gpd.read_file(
+            out / "implied" / "base" / "implied_subsegments.gpkg"
+        ).set_index("subsegment_id")
+        # Expected onset: stage A HAND at the lower edge of the town (200 m from the thalweg), sampled from the
+        # unit rasters. Stage A measures HAND from the river line as drawn, 15 m off the channel.
+        list_h = []
+        for path in sorted((root / "work" / "T5" / "units").glob("*/hand_undef.tif")):
+            ds = gdal.Open(str(path))
+            hgt, harr = ds.GetGeoTransform(), ds.GetRasterBand(1).ReadAsArray()
+            ex = np.arange(2700.0, 5300.0, 50.0)
+            col = ((ex + X0 - hgt[0]) / hgt[1]).astype(int)
+            row = ((hgt[3] - (thalweg(ex) + 200.0 + Y0)) / -hgt[5]).astype(int)
+            ok = (row >= 0) & (row < harr.shape[0]) & (col >= 0) & (col < harr.shape[1])
+            list_h.append(harr[row[ok], col[ok]])
+        edge = float(np.nanmedian(np.concatenate(list_h)))
+        t_ids = [f"{main_id}_left_{k}" for k in town["k"] if k != park_k]
+        t = gdf_imp.loc[t_ids]
+        list_res.append(
+            (
+                f"onset at the town edge: {len(t)} town subsegments eligible {int(t['eligible'].sum())}, onset "
+                f"{t['level_onset_m'].min():.2f}-{t['level_onset_m'].max():.2f} m (edge at HAND {edge:.2f} m)",
+                bool(t["eligible"].all())
+                and bool((t["level_onset_m"] - edge).abs().max() <= 0.5),
+            )
+        )
+        mill = gdf_imp.loc[f"{main_id}_left_{mills_k}"]
+        list_res.append(
+            (
+                f"isolated low buildings: onset {mill['level_onset_m']:.2f} m ignores them, q0.05 "
+                f"{mill['level_q0_05_m']:.2f} m and q0.02 {mill['level_q0_02_m']:.2f} m follow them",
+                abs(mill["level_onset_m"] - edge) <= 0.5
+                and mill["level_q0_05_m"] < edge - 0.25,
+            )
+        )
+        list_res.append(
+            (
+                f"sharp town edge: sharpness {t['sharpness'].min():.2f}-{t['sharpness'].max():.2f} (sharp_high 0.5)",
+                bool((t["sharpness"] >= 0.5).all()),
+            )
+        )
+        park = gdf_imp.loc[f"{main_id}_left_{park_k}"]
+        right = gdf_imp[(gdf_imp["river_id"] == main_id) & (gdf_imp["side"] == "right")]
+        list_res.append(
+            (
+                f"eligibility: the park subsegment not eligible ({park['reason']}); {int(right['eligible'].sum())} "
+                "eligible subsegments on the unbuilt right bank",
+                not bool(park["eligible"]) and int(right["eligible"].sum()) == 0,
+            )
+        )
+        list_res.append(
+            (
+                f"context: town subsegments labelled {sorted(set(t['context']))}",
+                set(t["context"]) == {"dense_urban"},
+            )
+        )
+        log_text = proc.stderr
+        curves = np.load(out / "implied" / "base" / "curves.npz")
+        list_res.append(
+            (
+                "exclusions and curves: the boathouse excluded and logged; curves.npz with "
+                f"{curves['envelope_area'].shape} envelope bins and {curves['built_area_epochs'].shape[0]} GHSL epochs",
+                "1 with building in ['boathouse', 'houseboat'] excluded" in log_text
+                and curves["envelope_area"].shape == (len(gdf_imp), 40)
+                and curves["built_area_epochs"].shape[0] == 2,
+            )
+        )
+        run_dir = out / "plots" / "implied" / "base"
+        n_curve = len(list((run_dir / "curve").glob("*.png")))
+        index = (run_dir / "index.html").read_text()
+        list_res.append(
+            (
+                f"plots: {n_curve} curve figures and the summary; index.html lists curve, summary and the snap types",
+                n_curve == min(200, len(gdf_imp))
+                and (run_dir / "summary" / "summary.png").exists()
+                and all(
+                    k in index for k in ("curve", "summary", "snap_map", "level_onset")
+                ),
+            )
+        )
+        print(
+            "implied_protection: "
+            + (re.search(r"Timings: (.*)", log_text) or [None, ""])[1]
+        )
+    else:
+        list_res.append(("implied_protection (A-B) runs", False))
 
 print("Timings (s): " + ", ".join(f"{k} {v:.1f}" for k, v in timings.items()))
 for label, ok in list_res:

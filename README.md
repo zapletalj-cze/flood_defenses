@@ -23,7 +23,7 @@ explicitly.
 | C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
-| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E2 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`; 22 checks); E3–E5 in progress |
+| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E3 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`, `implied_protection.py` A–B; 29 checks); E4–E5 in progress |
 
 ---
 
@@ -130,6 +130,7 @@ processing/
   context_zones.py         industrial / dense urban / urban / rural zones of the corridor (Stage D)
   snap_rivers.py           river lines snapped to the thalweg, river points with chainage (Stage E1)
   implied_segments.py      bank subsegments: envelope, nearest river point, side, chainage bins (Stage E2)
+  implied_protection.py    built-up fraction, HAND curves and levels per subsegment (E3), implied compartments (E4)
   gfm_evidence.py          held / flooded tests per compartment and scene; missing-barrier hints
   rp_bounds.py             event return periods, observed bounds, combination with the model
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
@@ -140,7 +141,7 @@ tests/
   test_stage_c.py          end-to-end Stage C on the Stage B country (26 checks)
   test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
-  test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16 checks, E2: 6 checks)
+  test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -174,6 +175,7 @@ function was modified. The only change to existing lines is the import block.
 | `Hydro` | `hand_above_streams(dem, stream, burn, burn_buffer_cells, valid)` | HAND code path of `compartments.py`, moved here so that Stage E recomputes HAND the same way |
 | `Vector` | `chaikin(line, iterations, max_shift)`, `interpolate_xy(line, distances)` | Chaikin smoothing that keeps vertices which would move more than `max_shift`; points along a line in one numpy pass |
 | `Raster` | `hillshade(array, geotransform, wkt)` | Hillshade with `gdal.DEMProcessing` to MEM (plots) |
+| `Stats` | `binned_quantiles(area, edges, quantiles)`, `onset(share, smooth_bins, fraction, persist_bins)`, `sharpness(smoothed, onset_bin, window_bins)` | Area-weighted quantiles within bins; onset and sharpness of a built-share curve (Stage E) |
 
 ### Naming in the code
 
@@ -1187,7 +1189,7 @@ compartments take seconds.
   - **context zones:** precedence of the order, small zones falling through to later
     contexts, rural as the rest, no overlaps, the corridor tiled exactly;
   - **`zones_to_grid`** on a unit grid.
-- **`pixi run test-stage-e`** (E1: 16 checks, E2: 6 checks), on its own synthetic country T5 (8 × 3.2 km, 1 m DTM, two levee rings):
+- **`pixi run test-stage-e`** (E1: 16, E2: 6, E3: 7 checks), on its own synthetic country T5 (8 × 3.2 km, 1 m DTM, two levee rings):
   - **kernels:** least-cost path through the only gap of a wall; Chaikin keeps its end points, moves no
     vertex more than `max_shift` and keeps a sharper corner; hillshade with nodata 0;
   - **snapping:** a valley minimum 15 m off the line is found within one cell (2 m); a ditch 1 m deeper
@@ -1205,6 +1207,14 @@ compartments take seconds.
     - 1000 m subsegments aggregated from 500 m equal a direct computation at 1000 m;
     - a second run skips all units through their checkpoints;
     - `recompute_hand` gives HAND 0 on the snapped rivers through the stage A code path.
+  - **E3, with a town laid out from the subsegments of E2** (left bank, from 200 m off the thalweg upward, one
+    park subsegment without buildings, isolated low mills, a boathouse, synthetic GHSL epochs, zones):
+    - the onset of every town subsegment within 0.5 m of the HAND at the town edge, sampled from the rasters;
+    - mills of about 6 % of the built area: the onset ignores them, q0.05 and q0.02 follow them;
+    - sharpness of the town edge above `sharp_high`;
+    - the park and the unbuilt right bank not eligible; the town labelled `dense_urban`;
+    - the boathouse excluded through `exclude_building_tags` and logged; `curves.npz` with two GHSL epochs;
+    - `curve` and `summary` figures listed in `index.html`.
 - **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
@@ -1579,3 +1589,47 @@ input times; `FORCE = True` recomputes).
    - **Per unit:** about 10 s: HAND read 6 s, envelope 0.5 s, allocation (EDT with indices) 3 s, writing 0.9 s.
    - **Memory:** peak RAM 1.1 GB per worker.
    - **Output:** 80 subsegments of 500 m, envelope 34.4 km².
+
+### 18.3 Built-up curves and levels (`implied_protection.py`, parts A–B, step E3)
+
+Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configuration used), plots to
+`plots/implied/<RUN_ID>/`.
+
+1. **Built-up fraction per unit cell** (pass 1, per unit in the process pool), saved as `implied_built.tif`:
+   - **footprints:**
+     - sources: the national footprints (`building_footprints`) and the OSM buildings (`osm_buildings.gpkg`,
+       now always extracted by `download_osm.py`, with `building` and `man_made`);
+     - features matching `exclude_building_tags` are dropped, with counts logged per tag;
+     - rasterized at a quarter of the working cell without all-touched, in tiles of 4096² fine cells, and
+       block-averaged.
+   - **ghsl:** the GHSL built-up surface (m² per cell) averaged onto the grid as a share of its cell. The file is
+     `ghsl_built_s_10m.vrt` if present, else the latest of the epochs.
+   - **max:** the larger of the two per cell. Industrial land use is never treated as built-up; `zones.gpkg`
+     only labels the context.
+2. **Curves.** Bins from 0 to `envelope_hand_m` by `hand_bin_m`. Envelope and built area per (subsegment, bin)
+   with `np.bincount`, per unit, summed over units in the main process. Built area is also counted per GHSL
+   epoch of `ghsl_epochs`, for the temporal signal of E4. All of it goes to `curves.npz`.
+3. **Levels per subsegment** (`gis.Stats`):
+   - **quantile levels:** area-weighted HAND quantiles of the built area, interpolated within the bin;
+   - **onset:**
+     - share = built / envelope per bin, NaN for bins below `min_bin_area_m2`;
+     - smoothed with a centred moving average over `smooth_bins`, ignoring NaN;
+     - onset = the lower edge of the lowest bin where the smoothed share is at least `onset_fraction` × its
+       maximum and stays so for `onset_persist_bins` bins;
+   - **sharpness:** (mean smoothed share in [onset, onset + `sharp_window_m`] − mean below) / maximum.
+4. **Eligibility.** `built_share_total` ≥ `built_share_min` and built area ≥ `built_area_min_m2`, and an onset
+   exists; the reason is stored when not eligible.
+5. **Context.** Majority zone by area (`zones.gpkg`), else `none`.
+6. **Output.** `implied_subsegments.gpkg`: the subsegments of E2 with `built_area_m2`, `built_share_total`,
+   `eligible`, `reason`, `sharpness`, `level_onset_m`, `level_q0_02_m`, … , `level_m` (primary method),
+   `context`.
+7. **Plots.**
+   - **`curve`** per subsegment. Upper panel: envelope area per bin (bars), built share and smoothed share on the
+     secondary axis (as specified), lines at every level. Lower panel: cumulative built fraction against HAND.
+   - **`summary`:** histograms of levels, sharpness and built share, stacked by context; subsegments per context.
+   - **Flagged first:** eligible with low sharpness, eligible with onset and lowest quantile more than
+     `sharp_window_m` apart, onset found but not eligible.
+   - **Colours:** each level method keeps its colour and dash pattern in every figure.
+8. **Measured** on the two pilot units of the benchmark world (30.25 M cells each) with 100 000 synthetic
+   buildings per core: about 5 s per unit (reads 1.1 s, rasterization of the footprints at 0.5 m 3.7 s, curves
+   0.3 s). Peak RAM 1.05 GB per worker; figures 0.28 s each.

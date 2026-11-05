@@ -17,10 +17,29 @@ import numpy as np
 import gis
 
 # Validated categorical palette (light surface), fixed per entity and never assigned by rank.
+CATEGORICAL = [
+    "#2a78d6",
+    "#eb6834",
+    "#1baf7a",
+    "#eda100",
+    "#e87ba4",
+    "#008300",
+    "#6250d6",
+    "#e34948",
+]
+DASHES = ["-", (0, (4, 2)), (0, (1, 1.5)), (0, (6, 2, 1, 2)), (0, (2, 2))]
 COLOURS = {
-    "water": "#2a78d6",
-    "snapped": "#eb6834",
-    "original": "#1baf7a",
+    "water": CATEGORICAL[0],
+    "snapped": CATEGORICAL[1],
+    "original": CATEGORICAL[2],
+    # contexts of zones.gpkg, slots in the fixed order; no zone is neutral
+    "context": {
+        "none": "#c3c2b7",
+        "industrial": CATEGORICAL[0],
+        "dense_urban": CATEGORICAL[1],
+        "urban": CATEGORICAL[2],
+        "rural": CATEGORICAL[3],
+    },
 }
 # Ink and chrome: text never takes a data colour.
 INK = {
@@ -119,6 +138,24 @@ class Plots:
         return sys.platform in ("win32", "darwin") or bool(
             os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
         )
+
+    @staticmethod
+    def method_styles(methods):
+        """
+        Line style per level method (onset first, then the quantiles): one categorical
+        slot and one dash pattern each, in the order given, so a method keeps its style
+        in every figure of a run
+        :param methods: method names in a fixed order
+        :return: dict name -> matplotlib line keyword arguments
+        """
+        return {
+            m: {
+                "color": CATEGORICAL[i % len(CATEGORICAL)],
+                "ls": DASHES[i % len(DASHES)],
+                "lw": LINE_WIDTH + (0.4 if i == 0 else 0.0),
+            }
+            for i, m in enumerate(methods)
+        }
 
     @staticmethod
     def halo():

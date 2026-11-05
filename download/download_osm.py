@@ -208,12 +208,12 @@ if __name__ == "__main__":
             "LINESTRING",
         ),
     }
-    if not country["building_footprints"]:
-        outputs["osm_buildings"] = (
-            "SELECT COALESCE(osm_id, osm_way_id) AS osm_id, building, geometry FROM multipolygons "
-            "WHERE building IS NOT NULL",
-            "MULTIPOLYGON",
-        )
+    # Always extracted: Stage E combines OSM buildings with national footprints; man_made serves its exclusions.
+    outputs["osm_buildings"] = (
+        "SELECT COALESCE(osm_id, osm_way_id) AS osm_id, building, man_made, geometry FROM multipolygons "
+        "WHERE building IS NOT NULL",
+        "MULTIPOLYGON",
+    )
     if not country["water_polygons"]:
         outputs["osm_water"] = (
             f"SELECT COALESCE(osm_id, osm_way_id) AS osm_id, "
