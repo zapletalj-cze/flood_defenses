@@ -1045,8 +1045,8 @@ float32, for a country box of 7° × 3°:
    `min_upstream_area_km2` (after `upstream_area_to_km2`).
    - **Identifier.** `cell_id` = row × columns + column on the grid of that file.
    - **Memory.** The series need days × cells × 4 bytes per source. With the template value
-     of 100 km², EFAS keeps roughly a fifth of the land cells (estimate; about 0.6 GB for a
-     country and 30 years). With 0 km², every land cell of the box is kept (about 3 GB).
+     of 50 km² (your choice), EFAS keeps roughly a quarter of the land cells (estimate;
+     about 0.8 GB for a country and 30 years). With 0 km², every land cell of the box is kept (about 3 GB).
 2. **Reading.** GDAL only, one window per band.
    - **GRIB:** the band's `GRIB_VALID_TIME`.
    - **NetCDF:** a `valid_time` dimension, otherwise the only time dimension. A `step`
@@ -1130,7 +1130,10 @@ record length; regional pooling of cells would be the next step.
    - with an upstream area ratio (cell / river) within [`upstream_ratio_min`,
      `upstream_ratio_max`].
 4. **Same river.** A candidate is on the same river when its centre lies within
-   `match_river_distance_m` of the site's river line. The lines come from
+   `match_river_distance_m` of the site's river line. The distance is set per source:
+   3000 m for GloFAS (about half a 0.05° cell diagonal) and 500 m for EFAS (1 arcmin
+   cells). An older configuration with one `discharge.match_river_distance_m` is read for
+   both sources, with a warning. The lines come from
    `rivers_snapped.gpkg` (Stage E1) if it exists, otherwise from `rivers_sources.gpkg`.
 5. **Choice:**
    1. same-river candidates first;
@@ -1147,9 +1150,9 @@ similar size: with the preference, the main river cell wins; without it, the tri
 cell.
 
 **GloFAS cells are large.** At 50° N a 0.05° cell measures about 3.6 × 5.6 km. Its centre
-rarely lies within 500 m of the river line, so with the template value most GloFAS matches
-are `weak`. They are still used: the quality is a flag, and only matters when there is a
-choice. See §15.4.
+rarely lies within 500 m of the river line, which is why GloFAS has its own, larger
+distance. Weak matches are still used: the quality is a flag, and only matters when there
+is a choice.
 
 ### 11.6 Event return periods and combination of the sources
 
@@ -1687,14 +1690,15 @@ from outside.**
    - **EFAS inputs:** the upstream area file (source, variable, units), and access with
      your account.
    - **Licence:** the wording on the licence page.
-   - **`match_river_distance_m` = 500 m** makes most GloFAS matches `weak` (§11.5). A
-     per-source value, for example half a GloFAS cell diagonal (about 3 km), is an option.
+   - **Decided:**
+     - `match_river_distance_m` per source: GloFAS 3000 m, EFAS 500 m (§11.5);
+     - `min_upstream_area_km2` = 50 km² for both sources;
+     - EFAS stays 6-hourly, as in the specification: it keeps `daily_max` available, and
+       the 24-hourly variable can still be requested later with `step_hours = 24`;
+     - Stage E reads the combined event RP per test (§11.6), so `source_mode` applies to
+       implied compartments as to explicit ones.
    - **`prefer_*` reading:** the preferred source unless only its match is weak and the
      other one is good.
-   - **EFAS step:** 6-hourly (`daily_max` possible; one request per month) or the 24-hourly
-     variable of the dataset page (a quarter of the volume, one request per year).
-   - **`min_upstream_area_km2` = 100 km²** is a placeholder; 0 keeps every cell of the box
-     (memory, §11.3).
 9. **Combination rules** (§11.5). The specification leaves these open; the following
    readings were taken:
    - rp snaps to a class *inside* the combined interval;

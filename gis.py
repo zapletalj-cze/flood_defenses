@@ -3990,7 +3990,6 @@ class Config:
         "discharge.max_parallel_requests": "int",
         "discharge.bbox_buffer_deg": "float",
         "discharge.rp_disagreement_ratio": "float",
-        "discharge.match_river_distance_m": "float",
         **{
             f"discharge.{src}.{key}": kind
             for src in ("glofas", "efas")
@@ -4014,6 +4013,7 @@ class Config:
                 ("search_radius_km", "float"),
                 ("upstream_ratio_min", "float"),
                 ("upstream_ratio_max", "float"),
+                ("match_river_distance_m", "float"),
             )
         },
     }
@@ -4046,6 +4046,9 @@ class Config:
         "discharge.glofas.upstream_ratio_min": "evidence.upstream_ratio_min",
         "discharge.glofas.upstream_ratio_max": "evidence.upstream_ratio_max",
         "discharge.flooded_window_days": "evidence.flooded_window_days",
+        # one value for both sources until 2026-11-05; now per source (GloFAS cells are much larger)
+        "discharge.glofas.match_river_distance_m": "discharge.match_river_distance_m",
+        "discharge.efas.match_river_distance_m": "discharge.match_river_distance_m",
     }
     CONTEXTS = ("industrial", "dense_urban", "urban", "rural")
     ALLOWED = {

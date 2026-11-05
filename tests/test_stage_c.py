@@ -445,7 +445,6 @@ flooded_window_days = 3
 max_parallel_requests = 2
 bbox_buffer_deg = 0.1
 rp_disagreement_ratio = 3.0
-match_river_distance_m = 500.0
 
 [discharge.glofas]
 dataset_id = "cems-glofas-historical"
@@ -467,6 +466,7 @@ min_upstream_area_km2 = 5.0
 search_radius_km = 5.0
 upstream_ratio_min = 0.7
 upstream_ratio_max = 1.3
+match_river_distance_m = 500.0
 
 [discharge.efas]
 dataset_id = "efas-historical"
@@ -488,6 +488,7 @@ min_upstream_area_km2 = 0
 search_radius_km = 2.0
 upstream_ratio_min = 0.7
 upstream_ratio_max = 1.3
+match_river_distance_m = 500.0
 """
 evidence = """
 [evidence]

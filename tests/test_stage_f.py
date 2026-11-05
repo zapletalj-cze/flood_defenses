@@ -338,6 +338,7 @@ min_upstream_area_km2 = 100.0
 search_radius_km = {radius}
 upstream_ratio_min = 0.7
 upstream_ratio_max = 1.3
+match_river_distance_m = 500.0
 """
 
     (root / name).write_text(
@@ -366,7 +367,6 @@ flooded_window_days = 0
 max_parallel_requests = 4
 bbox_buffer_deg = 0.1
 rp_disagreement_ratio = 3.0
-match_river_distance_m = 500.0
 """
         + source("glofas", "year", 24, 5.0, 2001)
         + source("efas", "month", 6, 2.0, 2001)

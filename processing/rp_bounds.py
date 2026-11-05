@@ -46,11 +46,15 @@ KEYS = [
     "discharge.max_rp_extrapolation",
     "discharge.flooded_window_days",
     "discharge.rp_disagreement_ratio",
-    "discharge.match_river_distance_m",
     *[
         f"discharge.{s}.{k}"
         for s in ("glofas", "efas")
-        for k in ("search_radius_km", "upstream_ratio_min", "upstream_ratio_max")
+        for k in (
+            "search_radius_km",
+            "upstream_ratio_min",
+            "upstream_ratio_max",
+            "match_river_distance_m",
+        )
     ],
     *[
         f"implied.plots.{k}"
@@ -248,7 +252,7 @@ if __name__ == "__main__":
         for i, site in sites.iterrows():
             same = (
                 shapely.distance(gdf_line.geometry.values[site["river"]], cell_pts)
-                <= dis["match_river_distance_m"]
+                <= c["match_river_distance_m"]
             )
             m = gis.Discharge.match(
                 site["lon"],
@@ -611,9 +615,6 @@ if __name__ == "__main__":
             )
             origin = np.array([site["x"], site["y"]])
             own = shapely.intersection(gdf_line.geometry.values[site["river"]], box)
-            band = shapely.intersection(
-                shapely.buffer(own, dis["match_river_distance_m"]), box
-            )
             fig, axes = plt.subplots(
                 1,
                 len(sources),
@@ -622,13 +623,16 @@ if __name__ == "__main__":
                 squeeze=False,
             )
             for ax, s in zip(axes[0], sources):
+                band = shapely.intersection(
+                    shapely.buffer(own, dis[s]["match_river_distance_m"]), box
+                )
                 for g in shapely.get_parts(band):
                     if shapely.get_type_id(g) == 3 and not g.is_empty:
                         ax.fill(
                             *((np.asarray(g.exterior.coords) - origin) / 1000).T,
                             color=INK["grid"],
                             lw=0,
-                            label=f"same-river band ({dis['match_river_distance_m']:g} m)",
+                            label="same-river band",
                         )
                 for g in shapely.get_parts(
                     shapely.intersection(gdf_line.geometry.values, box)
@@ -714,7 +718,7 @@ if __name__ == "__main__":
                 ax.set_xlabel("Easting from the site (km)")
                 ax.set_title(
                     f"{SOURCE_NAMES[s]} · radius {c['search_radius_km']:g} km · ratio "
-                    f"{c['upstream_ratio_min']:g}–{c['upstream_ratio_max']:g}\n"
+                    f"{c['upstream_ratio_min']:g}–{c['upstream_ratio_max']:g} · same river ≤ {c['match_river_distance_m']:g} m\n"
                     + (
                         f"cell {int(d['npz']['cell_id'][k])}: {site[f'{s}_match_quality']}, ratio "
                         f"{site[f'{s}_ratio']:.2f}, {site[f'{s}_distance_km']:.2f} km"

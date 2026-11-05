@@ -82,7 +82,8 @@ placeholders = [
     "discharge.flooded_window_days",
     "discharge.bbox_buffer_deg",
     "discharge.rp_disagreement_ratio",
-    "discharge.match_river_distance_m",
+    "discharge.glofas.match_river_distance_m",
+    "discharge.efas.match_river_distance_m",
     "discharge.glofas.min_upstream_area_km2",
     "discharge.glofas.search_radius_km",
     "discharge.glofas.upstream_ratio_min",
@@ -436,7 +437,6 @@ flooded_window_days = 3
 max_parallel_requests = 2
 bbox_buffer_deg = 0.1
 rp_disagreement_ratio = 3.0
-match_river_distance_m = 500.0             # cell centre to the river line; GloFAS cells (0.05 deg) are mostly farther
 
 [discharge.glofas]
 dataset_id = "cems-glofas-historical"      # verified
@@ -454,10 +454,11 @@ netcdf_variable = ""                       # variable of the downloaded NetCDF f
 upstream_area_file = ""                    # glofas_upArea.nc (Documentation tab of the dataset)
 upstream_area_variable = ""                # variable of glofas_upArea.nc
 upstream_area_to_km2 = 1e-6                # verified: glofas_upArea.nc is in m2
-min_upstream_area_km2 = 100.0              # cells kept for matching; memory of the series = days x cells x 4 B
+min_upstream_area_km2 = 50.0               # cells kept for matching; memory of the series = days x cells x 4 B
 search_radius_km = 5.0
 upstream_ratio_min = 0.7
 upstream_ratio_max = 1.3
+match_river_distance_m = 3000.0            # cell centre to the river line: about half a 0.05 deg cell diagonal
 
 [discharge.efas]
 dataset_id = "efas-historical"             # verified; access to verify
@@ -475,7 +476,8 @@ netcdf_variable = ""
 upstream_area_file = ""                    # EFAS static upstream area, source to verify
 upstream_area_variable = ""
 upstream_area_to_km2 = 0                   # units of the EFAS upstream area file, to verify (0 stops discharge_prepare.py)
-min_upstream_area_km2 = 100.0              # 0 keeps every land cell of the box (about 3 GB of series for a country)
+min_upstream_area_km2 = 50.0               # 0 keeps every land cell of the box (about 3 GB of series for a country)
 search_radius_km = 2.0
 upstream_ratio_min = 0.7
 upstream_ratio_max = 1.3
+match_river_distance_m = 500.0             # cell centre to the river line (1 arcmin cells)
