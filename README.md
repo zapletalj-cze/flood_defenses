@@ -23,7 +23,7 @@ explicitly.
 | C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
-| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E4 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`, `implied_protection.py`; 37 checks); E5 in progress |
+| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E5 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`, `implied_protection.py`, `implied_evaluate.py`; 44 checks); integration with D4 outputs once they exist |
 
 ---
 
@@ -131,6 +131,7 @@ processing/
   snap_rivers.py           river lines snapped to the thalweg, river points with chainage (Stage E1)
   implied_segments.py      bank subsegments: envelope, nearest river point, side, chainage bins (Stage E2)
   implied_protection.py    built-up fraction, HAND curves and levels per subsegment (E3), implied compartments (E4)
+  implied_evaluate.py      sensitivity grid, recall of built area and wet built area inside implied compartments (E5)
   gfm_evidence.py          held / flooded tests per compartment and scene; missing-barrier hints
   rp_bounds.py             event return periods, observed bounds, combination with the model
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
@@ -141,7 +142,7 @@ tests/
   test_stage_c.py          end-to-end Stage C on the Stage B country (26 checks)
   test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
-  test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7, E4: 8 checks)
+  test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7, E4: 8, E5: 7 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -1191,7 +1192,7 @@ compartments take seconds.
   - **context zones:** precedence of the order, small zones falling through to later
     contexts, rural as the rest, no overlaps, the corridor tiled exactly;
   - **`zones_to_grid`** on a unit grid.
-- **`pixi run test-stage-e`** (E1: 16, E2: 6, E3: 7, E4: 8 checks), on its own synthetic country T5 (8 × 3.2 km, 1 m DTM, two levee rings):
+- **`pixi run test-stage-e`** (E1: 16, E2: 6, E3: 7, E4: 8, E5: 7 checks), on its own synthetic country T5 (8 × 3.2 km, 1 m DTM, two levee rings):
   - **kernels:** least-cost path through the only gap of a wall; Chaikin keeps its end points, moves no
     vertex more than `max_shift` and keeps a sharper corner; hillshade with nodata 0;
   - **snapping:** a valley minimum 15 m off the line is found within one cell (2 m); a ditch 1 m deeper
@@ -1227,6 +1228,17 @@ compartments take seconds.
     - temporal signal from GHSL 1990/2020: onset unchanged, growth below the onset 1.5 %, `historic_low_core`;
     - RP: uncorroborated and historic, so rp 20 (the class above `regional_sop_rp`), `rp_low` 10, confidence low;
     - `longitudinal`, `temporal` and `compartment_map` figures in `index.html` with their metrics.
+  - **E5:**
+    - three GFM scenes wet part of the town:
+      - scene A with event RP 10, at most the compartment RP 20: an error;
+      - scene B with event RP 50: not an error;
+      - scene C without an event RP: potential;
+      - so `wrongly_protected_share` is 1/3;
+    - `recall_built` with implied compartments above the explicit-only value (`implied_gain` > 0);
+    - 16 sensitivity runs, the aggregated 1000 m runs with compartments; the sensitivity plot;
+    - `include_implied`: `defenses_clip.gpkg` features unchanged, implied parts added outside them only;
+    - `include_in_review`: `review_implied.gpkg` with reasons;
+    - `use_snapped_rivers`: `compartments.py` recomputes all units (with `FORCE`) from `rivers_snapped.gpkg`.
 - **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
@@ -1706,3 +1718,51 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
    - **Pass 2:** 9.5 s per unit, peak 1.8 GB per worker. Counts run over implied cells only, and the distance
      to barrier lines uses the chamfer distance in a window around the edge cells.
    - **Plots:** 92 figures in 53 s.
+
+### 18.5 Evaluation and integration (`implied_evaluate.py`, step E5)
+
+1. **Sensitivity grid** (pilot units by default, `[implied] units`):
+   - **Combinations:** each level method (onset and the quantiles) × `built_share_min_grid` ×
+     `subsegment_length_grid` is a `run_id` (for example `onset_bs0.3_L500`).
+   - **Each run** is a run of `implied_protection.py` with run variables:
+     - `CURVES_FROM` = the base run: pass 1 is skipped and the base curves reused;
+     - `SUBSEGMENT_LENGTH_M`: subsegments and curves aggregated as `k // factor`, never recomputed;
+     - `LEVEL_METHOD`, `BUILT_SHARE_MIN`: the varied parameters, stored in `run_overrides.json` next to
+       `run_config.toml`;
+     - `PLOTS = False`.
+   - **Recomputed per run:** only levels, merging, corroboration and RP.
+2. **Positive metric** (needs `reference_protected_areas`):
+   - `recall_built` = built area inside the reference areas covered by explicit plus implied compartments ÷
+     built area inside the reference areas;
+   - `implied_gain` = its increase over explicit compartments alone;
+   - core cells of the units only.
+3. **Negative metric** (needs GFM scenes, `gfm_index.csv`): wet built area inside the implied compartments of
+   every run.
+   - **Error:** the event RP of the scene is at most the compartment's `rp`.
+   - **Potential:** the event RP is unknown.
+   - **Event RP source:** `event_rp.csv` of Stage F, by implied id and scene, else by river and scene.
+   - **`wrongly_protected_share`** = erroneous ÷ all wet built area.
+   - **EMS extents** are not read yet (Stage D5).
+4. **Also reported:** `potential_share`, implied area flagged `historic_low_core`, counts by confidence and
+   context.
+5. **Outputs:**
+   - `sensitivity.csv` (run, parameters, metrics) and `sensitivity_tests.csv` (status per run, compartment
+     and scene);
+   - plot `sensitivity`: `recall_built` against `wrongly_protected_share` per run, coloured by level method,
+     labelled with `built_share_min`, small multiples by subsegment length.
+6. **Integration** (end of `implied_protection.py`):
+   - **`include_implied = true`:** `defenses_clip_with_implied.gpkg` keeps the features of
+     `defenses_clip.gpkg` unchanged. It adds the implied parts outside them, and the overlaps where the implied
+     rp is higher (`overlaps_explicit`), so every location carries the maximum rp. `defenses_clip.gpkg` is a D4
+     output; without it nothing is written, and this is logged.
+   - **`include_in_review = true`:** `review_implied.gpkg` with the reasons uncorroborated, historic low core
+     and low sharpness, for `review_queue.py` of D4 to merge.
+   - **`[countries.XX.compartments] use_snapped_rivers`** (default false; a missing key takes the default, so
+     older configurations stay valid): `compartments.py` takes `rivers_snapped.gpkg` as water sources.
+     Finished units keep their results until `FORCE = True`, and a warning says so. Stage A results are
+     unchanged by default (pipeline tests).
+7. **Measured** on T5 (8 units of 0.25 M cells, 4 implied compartments per run at most): 16 runs in 145 s
+   (9 s each, pass 1 skipped), evaluation of all runs 7.8 s.
+   - **Per pilot run:** the time of passes C–F, about 10 s per 30 M-cell unit (§18.4).
+   - **Full grid of 36 runs on two such units:** about 36 × 20 s = 12 min with 2 workers. This is an estimate
+     from those measurements, not measured on the benchmark world.

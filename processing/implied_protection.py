@@ -25,6 +25,15 @@ CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
 RUN_ID = "base"  # results in <output_dir>/<country>/implied/<RUN_ID>, plots in .../plots/implied/<RUN_ID>
 SHOW_PLOTS = False  # show up to implied.plots.show_max figures per type while running (needs a display)
+CURVES_FROM = (
+    ""  # run id whose pass-1 curves (base length) are reused; empty = compute them
+)
+SUBSEGMENT_LENGTH_M = 0.0  # subsegments aggregated from the base length (k // factor); 0 = the base length
+LEVEL_METHOD = ""  # overrides implied.primary_level_method (sensitivity runs); empty = configuration
+BUILT_SHARE_MIN = (
+    -1.0
+)  # overrides implied.built_share_min (sensitivity runs); negative = configuration
+PLOTS = True  # False: no figures (sensitivity runs)
 
 KEYS = [
     "general.work_dir",
@@ -72,6 +81,8 @@ KEYS = [
             "min_cells_temporal",
             "rp_distribution_classes",
             "rp_distribution_shares",
+            "include_implied",
+            "include_in_review",
         )
     ],
     "country.rivers",
@@ -498,7 +509,15 @@ def implied_unit(task):
 
 if __name__ == "__main__":
     run = gis.Run.env_overrides(
-        CONFIG_PATH=CONFIG_PATH, COUNTRY=COUNTRY, RUN_ID=RUN_ID, SHOW_PLOTS=SHOW_PLOTS
+        CONFIG_PATH=CONFIG_PATH,
+        COUNTRY=COUNTRY,
+        RUN_ID=RUN_ID,
+        SHOW_PLOTS=SHOW_PLOTS,
+        CURVES_FROM=CURVES_FROM,
+        SUBSEGMENT_LENGTH_M=SUBSEGMENT_LENGTH_M,
+        LEVEL_METHOD=LEVEL_METHOD,
+        BUILT_SHARE_MIN=BUILT_SHARE_MIN,
+        PLOTS=PLOTS,
     )
     cfg = gis.Config.load(run["CONFIG_PATH"], run["COUNTRY"], KEYS)
     general, country, imp = cfg["general"], cfg["country"], cfg["implied"]
@@ -512,6 +531,22 @@ if __name__ == "__main__":
         general["gdal_cachemax_mb"], general["gdal_threads_per_worker"]
     )
     shutil.copy(run["CONFIG_PATH"], run_dir / "run_config.toml")
+    overrides = {}
+    if run["LEVEL_METHOD"]:
+        methods_ok = {"onset"} | {f"q{q:.2f}" for q in imp["quantiles"]}
+        if run["LEVEL_METHOD"] not in methods_ok:
+            raise SystemExit(f"LEVEL_METHOD must be one of {sorted(methods_ok)}")
+        imp["primary_level_method"] = overrides["primary_level_method"] = run[
+            "LEVEL_METHOD"
+        ]
+    if run["BUILT_SHARE_MIN"] >= 0:
+        imp["built_share_min"] = overrides["built_share_min"] = run["BUILT_SHARE_MIN"]
+    if run["SUBSEGMENT_LENGTH_M"]:
+        overrides["subsegment_length_m"] = run["SUBSEGMENT_LENGTH_M"]
+    if run["CURVES_FROM"]:
+        overrides["curves_from"] = run["CURVES_FROM"]
+    # run variables that change parameters, next to the configuration copy
+    (run_dir / "run_overrides.json").write_text(json.dumps(overrides, indent=1))
     start = time.perf_counter()
 
     # --- Inputs: required stops, optional ones switch features off ---
@@ -655,31 +690,100 @@ if __name__ == "__main__":
             }
         )
         list_w.append(float(u.est_window_cells))
+    # --- Subsegments of this run: the base length or an aggregation of it (k // factor), never recomputed ---
+    base_len = imp["subsegment_length_m"]
+    length = run["SUBSEGMENT_LENGTH_M"] or base_len
+    factor = int(round(length / base_len))
+    if factor < 1 or abs(factor * base_len - length) > 1e-6:
+        raise SystemExit(
+            f"SUBSEGMENT_LENGTH_M {length} is not a multiple of subsegment_length_m {base_len}."
+        )
+    gdf_base = gpd.read_file(seg_path)
+    if factor > 1:
+        gdf_seg = (
+            gdf_base.assign(k=gdf_base["k"] // factor)
+            .dissolve(
+                by=["river_id", "side", "k"],
+                aggfunc={"envelope_area_m2": "sum", "n_cells": "sum"},
+            )
+            .reset_index()
+        )
+        gdf_seg["chainage_from_m"] = gdf_seg["k"] * length
+        gdf_seg["chainage_to_m"] = (gdf_seg["k"] + 1) * length
+        gdf_seg.insert(
+            0,
+            "subsegment_id",
+            [
+                f"{r}_{s}_{k}"
+                for r, s, k in zip(gdf_seg["river_id"], gdf_seg["side"], gdf_seg["k"])
+            ],
+        )
+        log.info(
+            "Subsegments of %.0f m aggregated from %.0f m: %d.",
+            length,
+            base_len,
+            len(gdf_seg),
+        )
+    else:
+        gdf_seg = gdf_base
+    pos = {s: i for i, s in enumerate(gdf_seg["subsegment_id"])}
+    pos_base = {
+        b: pos[f"{r}_{s}_{k // factor}"]
+        for b, r, s, k in zip(
+            gdf_base["subsegment_id"],
+            gdf_base["river_id"],
+            gdf_base["side"],
+            gdf_base["k"],
+        )
+    }
     t = time.perf_counter()
-    list_res, list_fail = gis.Run.run_units(
-        curves_unit,
-        list_task,
-        general["n_workers"],
-        general["gdal_cachemax_mb"],
-        general["gdal_threads_per_worker"],
-        list_w,
-        log,
-    )
+    if run["CURVES_FROM"]:
+        npz = np.load(out_dir / "implied" / run["CURVES_FROM"] / "curves.npz")
+        if (
+            abs(float(npz["length_m"]) - base_len) > 1e-6
+            or list(npz["epochs"])
+            != sorted(int(e) for e in imp["ghsl_epochs"])[: len(npz["epochs"])]
+        ):
+            raise SystemExit(
+                f"curves.npz of run {run['CURVES_FROM']} is not at the base length with these epochs."
+            )
+        ghsl_epochs = ghsl_epochs[: len(npz["epochs"])]
+        list_res = [
+            {
+                "unit_id": run["CURVES_FROM"],
+                "ids": list(npz["subsegment_id"]),
+                "env": npz["envelope_area"],
+                "built": npz["built_area"],
+                "epochs": npz["built_area_epochs"],
+                "ctx": npz["context_area"],
+                "secs": {"read": 0.0, "built": 0.0, "curves": 0.0},
+                "peak_rss_mb": 0.0,
+            }
+        ]
+        log.info("Curves of run %s reused; pass 1 skipped.", run["CURVES_FROM"])
+    else:
+        list_res, list_fail = gis.Run.run_units(
+            curves_unit,
+            list_task,
+            general["n_workers"],
+            general["gdal_cachemax_mb"],
+            general["gdal_threads_per_worker"],
+            list_w,
+            log,
+        )
+        if list_fail:
+            raise SystemExit(f"Failed units in pass 1: {list_fail}")
     pass1_s = time.perf_counter() - t
-    if list_fail:
-        raise SystemExit(f"Failed units in pass 1: {list_fail}")
 
     # --- B. Curves summed over units per subsegment, levels and eligibility ---
     t = time.perf_counter()
-    gdf_seg = gpd.read_file(seg_path)
-    pos = {s: i for i, s in enumerate(gdf_seg["subsegment_id"])}
     n_seg, n_ep = len(gdf_seg), len(ghsl_epochs)
     env = np.zeros((n_seg, n_bins))
     blt = np.zeros((n_seg, n_bins))
     ep = np.zeros((n_ep, n_seg, n_bins))
     ctx = np.zeros((n_seg, len(country["context"]["order"]) + 1))
     for res_u in list_res:
-        idx = np.array([pos[i] for i in res_u["ids"]], dtype=np.int64)
+        idx = np.array([pos_base[i] for i in res_u["ids"]], dtype=np.int64)
         np.add.at(env, idx, res_u["env"])
         np.add.at(blt, idx, res_u["built"])
         np.add.at(ctx, idx, res_u["ctx"])
@@ -742,6 +846,8 @@ if __name__ == "__main__":
         built_area=blt.astype(np.float32),
         epochs=np.array(sorted(imp["ghsl_epochs"]) if n_ep else [], dtype=np.int64),
         built_area_epochs=ep.astype(np.float32),
+        context_area=ctx.astype(np.float32),
+        length_m=np.float64(length),
     )
     curves_s = time.perf_counter() - t
     log.info(
@@ -887,7 +993,7 @@ if __name__ == "__main__":
         df_lut = pd.read_csv(unit_dir / "subsegments.csv")
         glob_idx = np.array(
             [
-                pos[f"{r}_{s}_{k}"]
+                pos_base[f"{r}_{s}_{k}"]
                 for r, s, k in zip(df_lut["river_id"], df_lut["side"], df_lut["k"])
             ],
             dtype=np.int64,
@@ -1330,6 +1436,82 @@ if __name__ == "__main__":
     pd.DataFrame(list_drop, columns=["group", "reason"]).to_csv(
         run_dir / "implied_dropped.csv", index=False
     )
+
+    # --- Integration, only with the switches; defenses_clip.gpkg is never modified ---
+    if imp["include_implied"]:
+        clip_path = out_dir / "defenses_clip.gpkg"
+        if not clip_path.exists():
+            log.warning(
+                "include_implied: defenses_clip.gpkg (Stage D4) missing; defenses_clip_with_implied.gpkg not written."
+            )
+        elif n_imp:
+            gdf_clip = gpd.read_file(clip_path)
+            gdf_i = gdf_imp.to_crs(gdf_clip.crs)[
+                [
+                    "implied_id",
+                    "rp",
+                    "rp_low",
+                    "rp_high",
+                    "rp_source",
+                    "confidence",
+                    "geometry",
+                ]
+            ]
+            outside = gpd.overlay(gdf_i, gdf_clip[["geometry"]], how="difference")
+            outside["overlaps_explicit"] = False
+            # Where an implied compartment overlaps the clip layer with a higher rp, the overlap is added as well, so
+            # every location carries the maximum rp; the clip features stay unchanged.
+            rp_col = "rp" if "rp" in gdf_clip.columns else None
+            inter = gpd.overlay(
+                gdf_i,
+                gdf_clip[[rp_col, "geometry"]] if rp_col else gdf_clip[["geometry"]],
+                how="intersection",
+            )
+            if rp_col:
+                inter = (
+                    inter[inter["rp_1"] > inter["rp_2"].fillna(-np.inf)]
+                    .rename(columns={"rp_1": "rp"})
+                    .drop(columns="rp_2")
+                )
+            else:
+                inter = inter.iloc[:0]
+            inter["overlaps_explicit"] = True
+            gdf_out = pd.concat([gdf_clip, outside, inter], ignore_index=True)
+            gis.Vector.write_gpkg(
+                gpd.GeoDataFrame(gdf_out, geometry="geometry", crs=gdf_clip.crs),
+                out_dir / "defenses_clip_with_implied.gpkg",
+            )
+            log.info(
+                "defenses_clip_with_implied.gpkg: %d clip features unchanged, %d implied parts outside them, %d overlaps "
+                "with a higher implied rp.",
+                len(gdf_clip),
+                len(outside),
+                len(inter),
+            )
+    if imp["include_in_review"] and n_imp:
+        reasons = [
+            ",".join(
+                r
+                for r, on in (
+                    ("uncorroborated", not a["corroborated"]),
+                    ("historic_low_core", a["historic_low_core"]),
+                    ("low sharpness", not (a["sharpness"] >= imp["sharp_high"])),
+                )
+                if on
+            )
+            for a in attrs
+        ]
+        gdf_rev = gdf_imp[
+            ["implied_id", "rp", "confidence", "context", "geometry"]
+        ].copy()
+        gdf_rev["reasons"] = reasons
+        gdf_rev = gdf_rev[gdf_rev["reasons"] != ""]
+        gis.Vector.write_gpkg(gdf_rev, run_dir / "review_implied.gpkg")
+        log.info(
+            "review_implied.gpkg: %d implied compartments for the review queue (review_queue.py of Stage D4 merges "
+            "them once it exists).",
+            len(gdf_rev),
+        )
     parts_s = time.perf_counter() - t
     if n_imp:
         log.info(
@@ -1343,7 +1525,7 @@ if __name__ == "__main__":
 
     # --- Plots: curve per subsegment, summary ---
     t = time.perf_counter()
-    if imp["plots"]["enabled"]:
+    if imp["plots"]["enabled"] and run["PLOTS"]:
         plots = Plots(
             out_dir / "plots" / "implied" / run["RUN_ID"],
             imp["plots"],
@@ -1364,7 +1546,7 @@ if __name__ == "__main__":
         if imp["plots"]["plot_all_in_units"]:
             for res_u in list_res:
                 for i in res_u["ids"]:
-                    units_of.setdefault(i, []).append(res_u["unit_id"])
+                    units_of.setdefault(sid[pos_base[i]], []).append(res_u["unit_id"])
         centres = (edges[:-1] + edges[1:]) / 2
         for name in plots.select("curve", list(sid), flagged, units_of):
             i = pos[name]

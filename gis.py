@@ -3773,6 +3773,11 @@ class Config:
         "implied.plots.sample_seed": "int",
         "implied.plots.show_max": "int",
         "implied.plots.plot_all_in_units": "str_list",
+        "country.compartments.use_snapped_rivers": "bool",
+    }
+    # Keys added after a stage was done: a missing key takes this default (logged), so older configurations stay valid.
+    DEFAULTS = {
+        "country.compartments.use_snapped_rivers": False,
     }
     CONTEXTS = ("industrial", "dense_urban", "urban", "rural")
     ALLOWED = {
@@ -3842,8 +3847,15 @@ class Config:
             try:
                 value = Config.get(cfg, key)
             except (KeyError, TypeError):
-                list_err.append(f"{key}: missing")
-                continue
+                if key not in Config.DEFAULTS:
+                    list_err.append(f"{key}: missing")
+                    continue
+                value = Config.DEFAULTS[key]
+                node = cfg
+                for part in key.split(".")[:-1]:
+                    node = node.setdefault(part, {})
+                node[key.split(".")[-1]] = value
+                log.info("%s not configured: default %r.", key, value)
             checked, problem = Config._check_value(kind, value)
             if problem:
                 list_err.append(f"{key}: {problem}")

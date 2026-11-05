@@ -153,6 +153,7 @@ stream_burn_buffer_m = 100.0             # taper width of the burning; wider tha
 preserve_river_cells = true              # B2 fix: river cells next to levees keep their elevation in the undefended DTM
 cap_river_holes = true                   # L1 fix: river cells in gaps follow the river profile, other gap cells capped at the waterline
 max_fill_distance_m = 500.0              # largest distance over which gaps are interpolated (half-width of the widest river)
+use_snapped_rivers = false               # Stage E1: rivers_snapped.gpkg as water sources (off: stage A unchanged)
 
 [countries.XX.rp]
 classes = [10, 20, 50, 100, 200, 500]

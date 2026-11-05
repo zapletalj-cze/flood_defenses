@@ -62,6 +62,7 @@ KEYS = [
     "country.compartments.preserve_river_cells",
     "country.compartments.cap_river_holes",
     "country.compartments.max_fill_distance_m",
+    "country.compartments.use_snapped_rivers",
     "country.rp.levee_adjacent_distance_m",
 ]
 UNIT_COLUMNS = {
@@ -852,7 +853,19 @@ if __name__ == "__main__":
 
     # --- Water sources ---
     sources_path = out_dir / "rivers_sources.gpkg"
-    if sources_path.exists():
+    snapped_path = out_dir / "rivers_snapped.gpkg"
+    if country["compartments"]["use_snapped_rivers"]:
+        # Stage E1: the water sources snapped to the thalweg (off by default; stage A results unchanged).
+        if not snapped_path.exists():
+            raise SystemExit(
+                "use_snapped_rivers = true, but rivers_snapped.gpkg is missing; run snap_rivers.py."
+            )
+        gdf_rn = gpd.read_file(snapped_path).to_crs(wkt)
+        log.info(
+            "Water sources: %d rivers snapped to the thalweg (rivers_snapped.gpkg, use_snapped_rivers).",
+            len(gdf_rn),
+        )
+    elif sources_path.exists():
         gdf_rn = gpd.read_file(sources_path).to_crs(wkt)
         n_all = len(gdf_rn)
         gdf_rn = gdf_rn[gdf_rn["is_source"].astype(bool)]
@@ -902,6 +915,12 @@ if __name__ == "__main__":
         len(list_task),
         len(list_skip),
     )
+    if country["compartments"]["use_snapped_rivers"] and list_skip:
+        log.warning(
+            "use_snapped_rivers is on, but %d finished units keep their results with the earlier rivers; set "
+            "FORCE = True to recompute them.",
+            len(list_skip),
+        )
     if list_task:
         # Compile the numba kernels once so that worker processes load them from the cache.
         gis.Hydro.breach_to_streams(np.zeros((3, 3), np.float32), np.eye(3, dtype=bool))

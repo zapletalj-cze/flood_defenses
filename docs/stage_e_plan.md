@@ -4,7 +4,7 @@
 
 # Stage E, step E.2: outputs check, read benchmark and plan
 
-Status: **approved.** Decisions taken:
+Status: **approved; E1–E5 implemented** (README §18). Decisions taken:
 - **Plan:** approved as below.
 - **Order:** E1–E3 now. E4 uses the stage A barrier lines while the D2 outputs are missing. E5 follows D4.
 - **Naming:** stages A–D were renamed to the naming convention of section 3.4.

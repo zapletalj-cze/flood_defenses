@@ -254,6 +254,9 @@ def write_config(name, **kw):
         "recompute": "false",
         "footprints": "[]",
         "built_source": "footprints",
+        "include_implied": "false",
+        "reference": "[]",
+        "snapped": "false",
     }
     v.update(kw)
     (root / name).write_text(f"""[general]
@@ -280,6 +283,7 @@ rivers = "{(data / 'rivers.gpkg').as_posix()}"
 water_polygons = "{(data / 'water.gpkg').as_posix()}"
 building_footprints = {v["footprints"]}
 river_upstream_area_field = ""
+reference_protected_areas = {v["reference"]}
 working_resolution_m = {WORK_RES}
 corridor_buffer_m = 1000.0
 unit_core_size_m = 2000.0
@@ -312,6 +316,7 @@ stream_burn_buffer_m = 20.0
 preserve_river_cells = true
 cap_river_holes = true
 max_fill_distance_m = 100.0
+use_snapped_rivers = {v["snapped"]}
 
 [countries.T5.rp]
 levee_adjacent_distance_m = 10.0
@@ -377,8 +382,21 @@ growth_low_share_min = 0.1
 min_cells_temporal = 20
 rp_distribution_classes = [20, 50, 100]
 rp_distribution_shares = [0.4, 0.4, 0.2]
-include_implied = false
+include_implied = {v["include_implied"]}
 include_in_review = true
+
+[evidence]
+comparison_distance_m = 100.0
+min_valid_pixels = 10
+f_wet_comparison = 0.5
+f_dry_inside = 0.1
+f_wet_inside = 0.5
+
+[sources]
+gfm_flood_values = [1]
+gfm_exclusion_values = [1]
+gfm_reference_water_values = [1]
+gfm_nodata_values = [255]
 
 [implied.snap]
 step_m = 5.0
@@ -991,6 +1009,184 @@ if stage_a_ok and imp_path.exists():
 else:
     list_res.append(
         ("implied_protection (C-F) writes implied_compartments.gpkg", False)
+    )
+
+# --- E5: GFM scenes and event RPs, reference areas, integration, sensitivity grid ---
+if stage_a_ok and imp_path.exists() and len(town_c):
+    town_id = town_c["implied_id"].iloc[0]
+    scene_gt = (X0 + 2500.0, 10.0, 0.0, Y0 + 2200.0, 0.0, -10.0)
+    sx = (np.arange(310) + 0.5) * 10.0 + 2500.0
+    sy = 2200.0 - (np.arange(110) + 0.5) * 10.0
+    wet = (
+        (sx[None, :] > 3200)
+        & (sx[None, :] < 3600)
+        & (sy[:, None] > 1400)
+        & (sy[:, None] < 1700)
+    ).astype(np.uint8)
+    list_idx = []
+    for item, when in (
+        ("SCENE_A", "2020-05-01T10:00:00Z"),
+        ("SCENE_B", "2021-06-01T10:00:00Z"),
+        ("SCENE_C", "2022-07-01T10:00:00Z"),
+    ):
+        paths = {}
+        for role, arr in (
+            ("flood", wet),
+            ("exclusion", np.zeros_like(wet)),
+            ("reference_water", np.zeros_like(wet)),
+            ("likelihood", wet * 90),
+        ):
+            paths[role] = data / f"{item}_{role}.tif"
+            gis.Raster.write_array(paths[role], arr, scene_gt, wkt, nodata=255)
+        for u in pd.read_csv(out / "units.csv", dtype={"unit_id": str}).itertuples():
+            list_idx.append(
+                {
+                    "unit_id": u.unit_id,
+                    "item_id": item,
+                    "datetime": when,
+                    **{f"{k}_path": str(v) for k, v in paths.items()},
+                }
+            )
+    pd.DataFrame(list_idx).to_csv(out / "gfm_index.csv", index=False)
+    pd.DataFrame(
+        {
+            "compartment_id": [town_id, town_id],
+            "item_id": ["SCENE_A", "SCENE_B"],
+            "datetime": ["2020-05-01T10:00:00Z", "2021-06-01T10:00:00Z"],
+            "outcome": ["flooded", "flooded"],
+            "source": ["glofas", "glofas"],
+            "cell_id": [1, 1],
+            "q_event": [100.0, 300.0],
+            "rp_event": [10.0, 50.0],
+            "extrapolated": [False, False],
+        }
+    ).to_csv(out / "event_rp.csv", index=False)
+    gis.Vector.write_gpkg(
+        gpd.GeoDataFrame(
+            {"name": ["town"]},
+            geometry=[world(shapely.box(2700.0, 1250.0, 5300.0, 2000.0))],
+            crs=f"EPSG:{EPSG}",
+        ),
+        data / "reference.gpkg",
+    )
+    gdf_clip = gpd.read_file(out / "compartments.gpkg")[
+        ["compartment_id", "geometry"]
+    ].assign(rp=50.0, rp_source="model")
+    gis.Vector.write_gpkg(gdf_clip, out / "defenses_clip.gpkg")
+    write_config(
+        "test_e.toml",
+        footprints=f'"{(data / "buildings.gpkg").as_posix()}"',
+        include_implied="true",
+        reference=f'"{(data / "reference.gpkg").as_posix()}"',
+    )
+    proc = run("protection_e5", "test_e.toml", "processing.implied_protection")
+    clip_ok = False
+    if proc.returncode == 0 and (out / "defenses_clip_with_implied.gpkg").exists():
+        gdf_cwi = gpd.read_file(out / "defenses_clip_with_implied.gpkg")
+        kept = gdf_cwi[gdf_cwi["compartment_id"].notna()]
+        added = (
+            gdf_cwi[gdf_cwi["implied_id"].notna()]
+            if "implied_id" in gdf_cwi
+            else gdf_cwi.iloc[:0]
+        )
+        clip_ok = (
+            len(kept) == len(gdf_clip)
+            and all(
+                a.equals(b)
+                for a, b in zip(
+                    kept.sort_values("compartment_id").geometry,
+                    gdf_clip.sort_values("compartment_id").geometry,
+                )
+            )
+            and len(added) > 0
+            and float(
+                shapely.intersection(
+                    shapely.union_all(added.geometry.values),
+                    shapely.union_all(gdf_clip.geometry.values),
+                ).area
+            )
+            < 1.0
+        )
+    list_res.append(
+        (
+            "include_implied: defenses_clip.gpkg features unchanged, implied parts added outside them only",
+            clip_ok,
+        )
+    )
+    rev = out / "implied" / "base" / "review_implied.gpkg"
+    list_res.append(
+        (
+            f"include_in_review: review_implied.gpkg with reasons {sorted(set(gpd.read_file(rev)['reasons'])) if rev.exists() else None}",
+            rev.exists()
+            and "uncorroborated" in ",".join(gpd.read_file(rev)["reasons"]),
+        )
+    )
+    proc = run("evaluate", "test_e.toml", "processing.implied_evaluate")
+    if proc.returncode == 0:
+        sens = pd.read_csv(out / "sensitivity.csv")
+        tests_e = pd.read_csv(out / "sensitivity_tests.csv")
+        base_r = sens[
+            (sens["method"] == "onset")
+            & (sens["built_share_min"] == 0.3)
+            & (sens["length_m"] == 500.0)
+        ].iloc[0]
+        t_town = tests_e[
+            (tests_e["run_id"] == base_r["run_id"]) & (tests_e["implied_id"] == town_id)
+        ].set_index("item_id")
+        list_res.append(
+            (
+                f"sensitivity grid: {len(sens)} runs (4 methods x 2 shares x 2 lengths), "
+                f"{int((sens['length_m'] == 1000.0).sum())} at 1000 m with {int(sens.loc[sens['length_m'] == 1000.0, 'implied_compartments'].sum())} compartments",
+                len(sens) == 16
+                and int(
+                    sens.loc[sens["length_m"] == 1000.0, "implied_compartments"].sum()
+                )
+                > 0,
+            )
+        )
+        list_res.append(
+            (
+                f"positive metric: recall_built {base_r['recall_built']:.3f} with implied, {base_r['recall_built_explicit']:.3f} "
+                f"explicit only, implied_gain {base_r['implied_gain']:.3f}",
+                base_r["implied_gain"] > 0
+                and base_r["recall_built"] >= base_r["recall_built_explicit"],
+            )
+        )
+        statuses = t_town["status"].to_dict() if len(t_town) else {}
+        list_res.append(
+            (
+                f"evaluation: wet built cells inside the town (rp {t_town['rp'].iloc[0] if len(t_town) else 'n/a'}): {statuses}; "
+                f"wrongly_protected_share {base_r['wrongly_protected_share']:.3f}, potential {base_r['potential_share']:.3f}",
+                statuses
+                == {"SCENE_A": "error", "SCENE_B": "ok", "SCENE_C": "potential"}
+                and abs(base_r["wrongly_protected_share"] - 1 / 3) < 0.01,
+            )
+        )
+        run_dir = out / "plots" / "implied" / "sensitivity"
+        list_res.append(
+            (
+                "sensitivity plot listed in its index.html",
+                (run_dir / "sensitivity" / "sensitivity.png").exists()
+                and "sensitivity" in (run_dir / "index.html").read_text(),
+            )
+        )
+        print(
+            "implied_evaluate: "
+            + (re.search(r"Timings: (.*)", proc.stderr) or [None, ""])[1]
+        )
+    else:
+        list_res.append(("implied_evaluate runs", False))
+    write_config("test_e_snap.toml", snapped="true")
+    proc = run(
+        "compartments_snapped", "test_e_snap.toml", "processing.compartments", FORCE=1
+    )
+    list_res.append(
+        (
+            "use_snapped_rivers: compartments.py recomputes all units with rivers_snapped.gpkg as water sources",
+            proc.returncode == 0
+            and "rivers snapped to the thalweg" in proc.stderr
+            and "Units: 8 to process" in proc.stderr,
+        )
     )
 
 print("Timings (s): " + ", ".join(f"{k} {v:.1f}" for k, v in timings.items()))

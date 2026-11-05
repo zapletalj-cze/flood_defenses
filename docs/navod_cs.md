@@ -1,5 +1,5 @@
 <!-- Author: Jakub Zapletal -->
-<!-- Date: 2026-11-04 -->
+<!-- Date: 2026-11-05 -->
 <!-- Krátký návod, jak pracovat se skripty balíku flood_defenses. -->
 
 # Krátký návod: práce se skripty
@@ -48,6 +48,13 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 | volitelně | `download-gfm`, `gfm-evidence`, `download-glofas`, `rp-bounds` | `gfm_evidence.gpkg`, `obs_rp_low`, `obs_rp_high` |
 | volitelně | `validate` | `validation.json` |
 | Stage D | `download-clms`, `context-zones` | `corine_codes.tif`, `urban_atlas.gpkg`, `zones.gpkg` |
+| Stage E1 | `snap-rivers` | `rivers_snapped.gpkg`, `river_points.gpkg`, `plots/implied/base/index.html` |
+| Stage E2 | `implied-segments` | `subsegments.gpkg` |
+| Stage E3–E4 | `implied-protection` | `implied/base/implied_subsegments.gpkg`, `implied_compartments.gpkg` |
+| Stage E5 | `implied-evaluate` | `sensitivity.csv`, `plots/implied/sensitivity/index.html` |
+
+**Stage E** je experimentální a nejdřív se pouští na pilotní jednotky (`[implied] units`). Výsledky se do
+`defenses_clip.gpkg` nedostanou, dokud není `include_implied = true`.
 
 ## 4. Po změně spustit znovu
 
@@ -58,6 +65,9 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 | třídy, strop, váhy, ruční zásahy | `rp-index`, pak `rp-bounds` |
 | hodnoty land cover | `hand-yz`, pak `rp-index`, `rp-bounds` |
 | nové satelitní scény | `download-gfm`, `gfm-evidence`, `rp-bounds` |
+| řeky (Stage E) | `snap-rivers`, `implied-segments` s FORCE, `implied-protection` |
+| parametry `[implied]`, budovy | `implied-protection`, pak `implied-evaluate` |
+| `use_snapped_rivers = true` | `compartments` s FORCE, pak navazující kroky |
 
 Po každém `rp-index` znovu `rp-bounds`, pokud se používají pozorování.
 
@@ -73,4 +83,6 @@ Po každém `rp-index` znovu `rp-bounds`, pokud se používají pozorování.
   - **GloFAS:** `glofas_files`.
 - **Pomalé čtení DTM:** `convert_dtm = true` (varianta A), pak znovu `prepare-dtm`.
 - **Kontrola celého řetězce:** `test-pipeline`, `test-stage-b`, `test-stage-c`,
-  `test-hand-yz`, `test-stage-d`.
+  `test-hand-yz`, `test-stage-d`, `test-stage-e`.
+- **Grafy Stage E:** `index.html` ve složce `plots/implied/<běh>/`; zobrazení během výpočtu
+  `$env:DEFENSES_SHOW_PLOTS = "1"`.
