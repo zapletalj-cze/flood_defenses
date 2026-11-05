@@ -2448,6 +2448,38 @@ class Hydro:
         )
 
     @staticmethod
+    def hand_above_streams(dem, stream, burn, burn_buffer_cells, valid=None):
+        """
+        Height above the stream cell each cell drains to (HAND), the code path of
+        compartments.py: breach_to_streams routing; cells that reach no stream cell take
+        the nearest one
+        :param dem: 2D float array, NaN = nodata (for HAND: the undefended DTM)
+        :param stream: 2D bool array of stream cells
+        :param burn: stream burning depth (see breach_to_streams)
+        :param burn_buffer_cells: taper distance of the burning in cells
+        :param valid: cells to compute (default: finite dem)
+        :return: (hand float32, river_ref float32 elevation of the stream cell reached,
+                  number of cells that took the nearest stream cell)
+        """
+        shape = dem.shape
+        valid = np.isfinite(dem) if valid is None else valid
+        reached = Hydro.breach_to_streams(dem, stream, burn, burn_buffer_cells)
+        unreached = valid & (reached < 0)
+        n_unreached = int(unreached.sum())
+        if n_unreached:
+            nearest = ndimage.distance_transform_edt(
+                ~stream, return_distances=False, return_indices=True
+            )
+            reached[unreached] = (nearest[0].astype(np.int64) * shape[1] + nearest[1])[
+                unreached
+            ]
+            del nearest
+        river_ref = np.where(
+            valid, dem.ravel()[np.maximum(reached, 0)].reshape(shape), np.nan
+        ).astype(np.float32)
+        return dem - river_ref, river_ref, n_unreached
+
+    @staticmethod
     def priority_flood(surface, seeds):
         """
         Lowest level at which water starting at the seeds reaches each cell

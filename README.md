@@ -23,7 +23,7 @@ explicitly.
 | C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
-| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1 done** (`snap_rivers.py`, `plots.py`; 16 checks); E2–E5 in progress |
+| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E2 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`; 22 checks); E3–E5 in progress |
 
 ---
 
@@ -129,6 +129,7 @@ processing/
   HAND_YZ.py               land cover exposure (WorldCover, Urban Atlas) supplementing GHSL
   context_zones.py         industrial / dense urban / urban / rural zones of the corridor (Stage D)
   snap_rivers.py           river lines snapped to the thalweg, river points with chainage (Stage E1)
+  implied_segments.py      bank subsegments: envelope, nearest river point, side, chainage bins (Stage E2)
   gfm_evidence.py          held / flooded tests per compartment and scene; missing-barrier hints
   rp_bounds.py             event return periods, observed bounds, combination with the model
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
@@ -139,7 +140,7 @@ tests/
   test_stage_c.py          end-to-end Stage C on the Stage B country (26 checks)
   test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
-  test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16 checks)
+  test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16 checks, E2: 6 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -170,6 +171,7 @@ function was modified. The only change to existing lines is the import block.
 | `Stats` | `percentile_rank`, `quantile_classes` | Ranks and quantile mapping for the RP score |
 | `Stats` | `gumbel_lmoments(sample)`, `gumbel_rp(q, xi, alpha)` | Gumbel fit by L-moments; return period of a discharge |
 | `Hydro` | `least_cost_path(cost, start, end)` | Dijkstra on an 8-connected grid (numba), NaN impassable; thalweg snapping |
+| `Hydro` | `hand_above_streams(dem, stream, burn, burn_buffer_cells, valid)` | HAND code path of `compartments.py`, moved here so that Stage E recomputes HAND the same way |
 | `Vector` | `chaikin(line, iterations, max_shift)`, `interpolate_xy(line, distances)` | Chaikin smoothing that keeps vertices which would move more than `max_shift`; points along a line in one numpy pass |
 | `Raster` | `hillshade(array, geotransform, wkt)` | Hillshade with `gdal.DEMProcessing` to MEM (plots) |
 
@@ -1185,7 +1187,7 @@ compartments take seconds.
   - **context zones:** precedence of the order, small zones falling through to later
     contexts, rural as the rest, no overlaps, the corridor tiled exactly;
   - **`zones_to_grid`** on a unit grid.
-- **`pixi run test-stage-e`** (step E1: 16 checks), on its own synthetic country T5 (8 × 3.2 km, 1 m DTM):
+- **`pixi run test-stage-e`** (E1: 16 checks, E2: 6 checks), on its own synthetic country T5 (8 × 3.2 km, 1 m DTM, two levee rings):
   - **kernels:** least-cost path through the only gap of a wall; Chaikin keeps its end points, moves no
     vertex more than `max_shift` and keeps a sharper corner; hillshade with nodata 0;
   - **snapping:** a valley minimum 15 m off the line is found within one cell (2 m); a ditch 1 m deeper
@@ -1197,6 +1199,12 @@ compartments take seconds.
   - **pilot units and plots:** rivers clipped to the pilot window; `plot_all_in_units` overriding
     `max_per_type`; `SHOW_PLOTS` without a display only warns; `index.html` lists every figure with its
     metrics.
+  - **E2, after stage A on T5:**
+    - every subsegment of the meandering main river on the correct bank (left = north, looking downstream);
+    - core cells counted once across units;
+    - 1000 m subsegments aggregated from 500 m equal a direct computation at 1000 m;
+    - a second run skips all units through their checkpoints;
+    - `recompute_hand` gives HAND 0 on the snapped rivers through the stage A code path.
 - **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
@@ -1543,3 +1551,31 @@ Snaps the river lines to the thalweg of the DTM. HAND and the bank subsegments o
    - **Per 1000 km of river:** about 20 s of computation plus 10–300 s of reads on a tiled DTM, or 110–1600 s
      on a strip DTM, divided by the number of workers. Plots add 0.35–0.5 s per figure; the main process
      reads the plot windows with the configured GDAL cache (`gdal_cachemax_mb`).
+
+### 18.2 Bank subsegments (`implied_segments.py`, step E2)
+
+Per unit in the process pool, with a checkpoint per unit (`subsegments_done.json`, hash of the parameters and
+input times; `FORCE = True` recomputes).
+
+1. **HAND.** `hand_undef.tif` of stage A. With `recompute_hand = true`, HAND is recomputed with the snapped
+   rivers as streams on the undefended DTM of stage A (`dtm_undefended.tif`, kept with `keep_intermediate =
+   true`). It uses `gis.Hydro.hand_above_streams`, the code path that `compartments.py` now calls as well, and
+   writes `hand_undef_snapped.tif`.
+2. **Envelope.** Cells with HAND ≤ `envelope_hand_m`, 4-connected to the cells of the snapped rivers.
+3. **Allocation.** River points are rasterized onto the unit grid. An EDT with indices over the whole window
+   (core and halo) gives every envelope cell its nearest point: `river_id`, chainage and tangent. Side = sign of
+   the cross product of the downstream tangent and the vector to the cell (left or right, looking downstream).
+4. **Subsegments.** `k = floor(chainage / subsegment_length_m)`; labels encode (`river_id`, side, `k`) with a
+   lookup table. Only core cells get labels, so every cell is counted once; the halo only serves the
+   nearest-point search.
+5. **Outputs.**
+   - **Per unit:** `subsegments.tif` (labels, 0 = none) and `subsegments.csv` (`label`, `river_id`, `side`, `k`,
+     `n_cells`, `chainage_from_m`, `chainage_to_m`, `envelope_area_m2`).
+   - **Merged:** `subsegments.gpkg`, dissolved across units by (`river_id`, `side`, `k`), with
+     `subsegment_id`.
+6. **Longer subsegments** of `subsegment_length_grid` are aggregated from the base length (`k // factor`), never
+   recomputed. The test checks that the aggregation equals a direct computation.
+7. **Measured** on the two pilot units of the benchmark world (30.25 M cells each, 2 m):
+   - **Per unit:** about 10 s: HAND read 6 s, envelope 0.5 s, allocation (EDT with indices) 3 s, writing 0.9 s.
+   - **Memory:** peak RAM 1.1 GB per worker.
+   - **Output:** 80 subsegments of 500 m, envelope 34.4 km².

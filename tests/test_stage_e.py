@@ -28,6 +28,10 @@ EPSG = 32633  # synthetic test data only
 X0, Y0 = 600000.0, 5600000.0  # lower-left corner of the test world
 WIDTH_M, HEIGHT_M, NATIVE = 8000, 3200, 1.0
 RES = 2.0  # implied.snap.resolution_m of the test configuration
+WORK_RES = 5.0  # working_resolution_m of stage A
+# Levee rings (local x0, y0, x1, y1) on the north bank of the main river: A partly covers the town of the E3/E4
+# checks, B covers nearly all of a second built reach.
+RINGS = [(4600.0, 1600.0, 5100.0, 1880.0), (6950.0, 1180.0, 7650.0, 1880.0)]
 repo = Path(__file__).resolve().parents[1]
 root = Path(
     os.environ.get("DEFENSES_TEST_DIR") or tempfile.mkdtemp(prefix="defenses_stage_e_")
@@ -138,6 +142,19 @@ if not dtm_path.exists():
         z_zig = 100.6 + 0.0005 * (8000.0 - xx) + 0.01 * np.abs(yy - 400.0)
         z_zig -= 2.0 * np.maximum(0.0, 1.0 - dz / 6.0)
         z = np.where((xx > 4300) & (xx < 6700) & (yy < 700), np.minimum(z, z_zig), z)
+        for x0, y0, x1, y1 in RINGS:
+            # 3 m embankments 6 m wide along the ring rectangles
+            on_x = (
+                ((np.abs(xx - x0) <= 3) | (np.abs(xx - x1) <= 3))
+                & (yy >= y0 - 3)
+                & (yy <= y1 + 3)
+            )
+            on_y = (
+                ((np.abs(yy - y0) <= 3) | (np.abs(yy - y1) <= 3))
+                & (xx >= x0 - 3)
+                & (xx <= x1 + 3)
+            )
+            z = np.where(on_x | on_y, z + 3.0, z)
         z += rng.normal(0.0, 0.03, z.shape)
         wet = (np.abs(yy - 2600.0) <= 35.0) & (xx > 3900.0) & (xx < 7700.0)
         z[wet] = -9999.0
@@ -166,6 +183,16 @@ gis.Vector.write_gpkg(gdf_rn, out / "rivers_sources.gpkg")
 gis.Vector.write_gpkg(gdf_rn, data / "rivers.gpkg")
 gis.Vector.write_gpkg(
     gpd.GeoDataFrame(
+        {"name": [f"ring_{k}" for k in range(len(RINGS))]},
+        geometry=[
+            world(shapely.LineString(shapely.box(*r).exterior.coords)) for r in RINGS
+        ],
+        crs=f"EPSG:{EPSG}",
+    ),
+    data / "levees.gpkg",
+)
+gis.Vector.write_gpkg(
+    gpd.GeoDataFrame(
         {"name": ["wide"]},
         geometry=[world(shapely.box(3900.0, 2565.0, 7700.0, 2635.0))],
         crs=f"EPSG:{EPSG}",
@@ -180,22 +207,81 @@ for name in ("units_window.gpkg", "units_core.gpkg"):
     )
 
 
-def write_config(name, units="[]", plot_all="[]", max_per_type=200, ratio=1.5):
+def write_config(name, **kw):
+    v = {
+        "units": "[]",
+        "plot_all": "[]",
+        "max_per_type": 200,
+        "ratio": 1.5,
+        "length": 500.0,
+        "recompute": "false",
+        "footprints": "[]",
+    }
+    v.update(kw)
     (root / name).write_text(f"""[general]
 work_dir = "{(root / 'work').as_posix()}"
 output_dir = "{(root / 'output').as_posix()}"
 n_workers = 2
+max_ram_gb_per_worker = 4.0
 gdal_cachemax_mb = 256
 warp_memory_limit_mb = 256
 gdal_threads_per_worker = 1
 log_level = "INFO"
 
+[benchmark]
+n_windows = 2
+window_px = 256
+sequential_rows = 32
+seed = 1
+
 [countries.T5]
+dtm = "{dtm_path.as_posix()}"
+dsm = []
+levees = "{(data / 'levees.gpkg').as_posix()}"
 rivers = "{(data / 'rivers.gpkg').as_posix()}"
 water_polygons = "{(data / 'water.gpkg').as_posix()}"
+building_footprints = {v["footprints"]}
+working_resolution_m = {WORK_RES}
+corridor_buffer_m = 1000.0
+unit_core_size_m = 2000.0
+unit_halo_m = 1000.0
+convert_dtm = false
+dtm_conversion = "A"
+dtm_compress = "ZSTD"
+footprint_resolution_m = 20.0
+bytes_per_cell = 400.0
+crest_box_size_m = 100.0
+merge_overlap_ratio = 0.5
+drop_contradicted_truncated = true
+contradiction_ratio = 0.5
+id_rounding_m = 10.0
+keep_intermediate = true
+
+[countries.T5.compartments]
+gap_tolerance_m = 20.0
+touch_tolerance_m = 0.01
+self_close_min_length_factor = 3.0
+crest_search_radius_m = 5.0
+barrier_removal_width_m = 10.0
+min_margin_m = 0.3
+max_level_m = 20.0
+min_area_m2 = 10000.0
+gated_crossings = false
+fill_nodata_holes = true
+stream_burn_m = 5.0
+stream_burn_buffer_m = 20.0
+preserve_river_cells = true
+cap_river_holes = true
+max_fill_distance_m = 100.0
+
+[countries.T5.rp]
+levee_adjacent_distance_m = 10.0
 
 [implied]
-units = {units}
+units = {v["units"]}
+recompute_hand = {v["recompute"]}
+envelope_hand_m = 10.0
+subsegment_length_m = {v["length"]}
 
 [implied.snap]
 step_m = 5.0
@@ -205,7 +291,7 @@ min_window_m = 15.0
 cost_epsilon = 0.01
 chunk_length_m = 5000.0
 chunk_overlap_m = 200.0
-max_length_ratio = {ratio}
+max_length_ratio = {v["ratio"]}
 wide_river_m = 40.0
 direction_check_m = 200.0
 max_nodata_share = 0.5
@@ -214,14 +300,14 @@ chainage_origin = "downstream"
 [implied.plots]
 enabled = true
 dpi = 80
-max_per_type = {max_per_type}
+max_per_type = {v["max_per_type"]}
 sample_seed = 42
 show_max = 2
-plot_all_in_units = {plot_all}
+plot_all_in_units = {v["plot_all"]}
 """)
 
 
-def run(label, config, **variables):
+def run(label, config, module="processing.snap_rivers", **variables):
     env = dict(
         os.environ,
         DEFENSES_CONFIG_PATH=str(root / config),
@@ -232,7 +318,7 @@ def run(label, config, **variables):
     env.pop("WAYLAND_DISPLAY", None)
     begin = time.perf_counter()
     proc = subprocess.run(
-        [sys.executable, "-m", "processing.snap_rivers"],
+        [sys.executable, "-m", module],
         env=env,
         capture_output=True,
         text=True,
@@ -414,6 +500,124 @@ if proc.returncode == 0:
     )
 else:
     list_res.append(("snap_rivers runs", False))
+
+# --- Stage A on T5 (inputs of E2-E4): DTM preparation, units, compartments behind the levee rings ---
+write_config("test_e.toml")
+stage_a_ok = True
+for module in ("prepare_dtm", "build_units", "compartments"):
+    proc = run(module, "test_e.toml", f"processing.{module}")
+    if proc.returncode != 0:
+        list_res.append((f"stage A {module} runs for T5", False))
+        stage_a_ok = False
+        break
+if stage_a_ok:
+    gdf_comp = gpd.read_file(out / "compartments.gpkg")
+    list_res.append(
+        (
+            f"stage A on T5: {len(gdf_comp)} explicit compartments behind the levee rings",
+            len(gdf_comp) >= 2,
+        )
+    )
+    # --- E2: subsegments of 1000 m directly, then with HAND recomputed, then the base of 500 m ---
+    write_config("test_e_1000.toml", length=1000.0)
+    proc_1000 = run(
+        "segments_1000", "test_e_1000.toml", "processing.implied_segments", FORCE=1
+    )
+    df_1000 = (
+        gpd.read_file(out / "subsegments.gpkg").drop(columns="geometry")
+        if proc_1000.returncode == 0
+        else None
+    )
+    write_config("test_e_rh.toml", recompute="true")
+    proc_rh = run(
+        "segments_rehand", "test_e_rh.toml", "processing.implied_segments", FORCE=1
+    )
+    proc = run("segments", "test_e.toml", "processing.implied_segments", FORCE=1)
+    proc_again = run("segments_again", "test_e.toml", "processing.implied_segments")
+    if proc.returncode == 0 and df_1000 is not None:
+        gdf_seg = gpd.read_file(out / "subsegments.gpkg")
+        gdf_snap = gpd.read_file(out / "rivers_snapped.gpkg").set_index("name")
+        main_id = int(gdf_snap.loc["main", "river_id"])
+        seg_main = gdf_seg[gdf_seg["river_id"] == main_id]
+        rep = shapely.get_coordinates(seg_main.geometry.representative_point())
+        north = rep[:, 1] - Y0 > thalweg(rep[:, 0] - X0)
+        left = (seg_main["side"] == "left").to_numpy()
+        list_res.append(
+            (
+                f"bank side on the meander: {int((north == left).sum())} of {len(seg_main)} subsegments of the "
+                "main river on the correct bank (left = north, looking downstream to the east)",
+                len(seg_main) > 10 and bool(np.all(north == left)),
+            )
+        )
+        union = shapely.union_all(gdf_seg.geometry.values).area
+        list_res.append(
+            (
+                f"core cells counted once: union {union / 1e6:.3f} km2 = sum of envelope areas "
+                f"{gdf_seg['envelope_area_m2'].sum() / 1e6:.3f} km2 = sum of polygon areas",
+                abs(union - gdf_seg["envelope_area_m2"].sum()) < 1.0
+                and abs(gdf_seg.area.sum() - union) < 1.0,
+            )
+        )
+        df_agg = (
+            gdf_seg.assign(k=gdf_seg["k"] // 2)
+            .groupby(["river_id", "side", "k"])["envelope_area_m2"]
+            .sum()
+        )
+        df_direct = df_1000.set_index(["river_id", "side", "k"])["envelope_area_m2"]
+        both = df_agg.to_frame("agg").join(df_direct.to_frame("direct"), how="outer")
+        list_res.append(
+            (
+                f"aggregation: {len(both)} subsegments of 1000 m from 500 m equal the direct computation "
+                f"(max difference {float((both['agg'] - both['direct']).abs().max()):.3f} m2)",
+                bool(both.notna().all().all())
+                and float((both["agg"] - both["direct"]).abs().max()) < 1e-6,
+            )
+        )
+        perf_again = json.loads((out / "implied_segments_performance.json").read_text())
+        list_res.append(
+            (
+                f"checkpoints: a second run processes {perf_again['processed']} of {perf_again['units']} units",
+                perf_again["processed"] == 0 and proc_again.returncode == 0,
+            )
+        )
+        unit_dirs = sorted(
+            (root / "work" / "T5" / "units").glob("*/hand_undef_snapped.tif")
+        )
+        zero = []
+        for path in unit_dirs:
+            ds = gdal.Open(str(path))
+            hand = ds.GetRasterBand(1).ReadAsArray()
+            cells = (
+                gis.Raster.rasterize_geometries(
+                    gdf_snap.geometry.values,
+                    np.ones(len(gdf_snap)),
+                    hand.shape,
+                    ds.GetGeoTransform(),
+                    ds.GetProjection(),
+                    True,
+                    np.uint8,
+                )
+                > 0
+            )
+            vals = hand[cells & np.isfinite(hand)]
+            zero.append(float(np.abs(vals).max()) if len(vals) else 0.0)
+        list_res.append(
+            (
+                f"recompute_hand: hand_undef_snapped.tif in {len(unit_dirs)} units through the stage A code path, "
+                f"HAND 0 on the snapped rivers (max |HAND| {max(zero or [np.nan]):.3f} m)",
+                proc_rh.returncode == 0 and len(unit_dirs) > 0 and max(zero) == 0.0,
+            )
+        )
+        perf = json.loads(
+            (root / "output" / "T5" / "implied_segments_performance.json").read_text()
+        )
+        log_text = (root / "e_segments.log").read_text()
+        print(
+            "implied_segments: "
+            + (re.search(r"Timings: (.*)", log_text) or [None, ""])[1]
+        )
+    else:
+        list_res.append(("implied_segments runs", False))
 
 print("Timings (s): " + ", ".join(f"{k} {v:.1f}" for k, v in timings.items()))
 for label, ok in list_res:

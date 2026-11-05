@@ -515,28 +515,19 @@ def process_unit(task):
 
         # --- HAND on the undefended DTM ---
         t = time.perf_counter()
-        reached = gis.Hydro.breach_to_streams(
-            dtm_undef, stream, p["stream_burn_m"], p["stream_burn_buffer_m"] / res
+        hand_undef, river_ref, n_unreached = gis.Hydro.hand_above_streams(
+            dtm_undef,
+            stream,
+            p["stream_burn_m"],
+            p["stream_burn_buffer_m"] / res,
+            valid,
         )
-        unreached = valid & (reached < 0)
-        if unreached.any():
+        if n_unreached:
             log.warning(
                 "%d cells are not connected to any stream cell; using the nearest stream cell.",
-                unreached.sum(),
+                n_unreached,
             )
-            nearest = ndimage.distance_transform_edt(
-                ~stream, return_distances=False, return_indices=True
-            )
-            reached[unreached] = (nearest[0].astype(np.int64) * shape[1] + nearest[1])[
-                unreached
-            ]
-            del nearest
-        counts["unreached_cells"] = int(unreached.sum())
-        river_ref = np.where(
-            valid, dtm_undef.ravel()[np.maximum(reached, 0)].reshape(shape), np.nan
-        ).astype(np.float32)
-        del reached, unreached
-        hand_undef = dtm_undef - river_ref
+        counts["unreached_cells"] = n_unreached
         times["hand"] = time.perf_counter() - t
 
         # --- Spill levels with and without barriers ---
