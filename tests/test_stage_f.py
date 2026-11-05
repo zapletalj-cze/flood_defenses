@@ -108,6 +108,47 @@ list_res.append(
         and m_none["quality"] == "weak",
     )
 )
+# Configuration split: defaults in advanced.toml, user values on top (tables of the schema type "table" replaced
+# whole), country defaults for every country, the country of the run taken from [general] country.
+cdir = root / "config_split"
+cdir.mkdir(exist_ok=True)
+(cdir / "advanced.toml").write_text(
+    'placeholders = ["general.log_level"]\n[general]\nlog_level = "INFO"\nn_workers = 4\n'
+    "[country_defaults]\ncorridor_buffer_m = 3000.0\n[country_defaults.rp]\nmax_rp = 200\nstorey_height_m = 3.0\n"
+    '[discharge.glofas]\nrequest = { a = ["1"], b = ["2"] }\n'
+)
+(cdir / "defenses.toml").write_text(
+    '[general]\ncountry = "ZZ"\nn_workers = 8\n[countries.ZZ]\ncorridor_buffer_m = 500.0\n'
+    '[countries.ZZ.rp]\nmax_rp = 100\n[discharge.glofas]\nrequest = { c = ["3"] }\n'
+)
+os.environ.pop("DEFENSES_COUNTRY", None)
+run_split = gis.Run.env_overrides(CONFIG_PATH=str(cdir / "defenses.toml"), COUNTRY="XX")
+cfg_split = gis.Config.load(
+    run_split["CONFIG_PATH"],
+    run_split["COUNTRY"],
+    [
+        "general.n_workers",
+        "general.log_level",
+        "country.corridor_buffer_m",
+        "country.rp.max_rp",
+        "country.rp.storey_height_m",
+        "discharge.glofas.request",
+    ],
+)
+list_res.append(
+    (
+        f"configuration split: country {run_split['COUNTRY']}, n_workers {cfg_split['general']['n_workers']}, "
+        f"buffer {cfg_split['country']['corridor_buffer_m']}, rp {cfg_split['country']['rp']}, request "
+        f"{cfg_split['discharge']['glofas']['request']}",
+        run_split["COUNTRY"] == "ZZ"
+        and cfg_split["general"]["n_workers"] == 8
+        and cfg_split["general"]["log_level"] == "INFO"
+        and cfg_split["country"]["corridor_buffer_m"] == 500.0
+        and cfg_split["country"]["rp"] == {"max_rp": 100, "storey_height_m": 3.0}
+        and cfg_split["discharge"]["glofas"]["request"] == {"c": ["3"]}
+        and cfg_split["placeholders"] == ["general.log_level"],
+    )
+)
 list_bad = []
 for path in sorted(repo.rglob("*.py")):
     if any(part.startswith(".") or part in ("__pycache__",) for part in path.parts):

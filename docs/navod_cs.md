@@ -10,14 +10,19 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 
 1. **Prostředí pixi** podle `pixi.toml`. Kontrola: `pixi run test-kernels`. Ve výstupu
    musí být jen řádky `PASS`.
-2. **Konfigurace `config/defenses.toml`:**
-   - **`[general]`:** `work_dir` (rychlý disk pro mezivýsledky), `output_dir`,
-     `n_workers` (počet pracovníků × paměť jednotky se musí vejít do RAM).
-   - **Tabulky země:** zkopírujte tabulky `[countries.XX…]`, přepište `XX` na kód země a
-     vyplňte cesty.
-   - **Cesty ve Windows:** s lomítky (`"D:/data/dtm.tif"`) nebo v apostrofech
-     (`'D:\data\dtm.tif'`).
+2. **Konfigurace:** vyplňuje se jen krátký soubor `config/defenses.toml`:
+   - **`[general]`:** `country` (kód země), `work_dir` (rychlý disk pro mezivýsledky),
+     `output_dir`, `n_workers` (počet pracovníků × paměť jednotky se musí vejít do RAM);
+   - **`[countries.<kód>]`:** cesty k DTM, hrázím a řekám, název sloupce s plochou povodí
+     v km² a OSM (`osm_pbf` nebo `geofabrik_region`);
+   - **`[countries.<kód>.rp]`:** tabulky škod.
+
+   Ostatní hodnoty jsou ve `config/advanced.toml`. Klíč zapsaný v `defenses.toml` má
+   přednost.
+   - **Cesty ve Windows:** s lomítky (`"D:/data/dtm.tif"`).
    - **`placeholders`:** klíče s nepotvrzenými hodnotami; skripty je hlásí jako varování.
+3. **Kontrola před během:** `pixi run check`. Vypíše OK nebo PROBLEM u každého skriptu a
+   vstupu (soubory, sloupce, CRS, složky).
 
 ## 2. Spouštění
 

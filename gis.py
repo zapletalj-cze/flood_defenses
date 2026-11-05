@@ -4104,18 +4104,20 @@ class Config:
         :return: dict with the top-level tables, "country" (the country table),
             "country_code" and "used_keys"
         """
-        if not exists(str(path)):
-            raise SystemExit(f"Configuration file not found: {path}")
-        with open(str(path), "rb") as f:
-            raw = tomllib.load(f)
+        raw = Config.read_merged(path)
         countries = raw.get("countries", {})
         if country not in countries:
             raise SystemExit(
                 f"Country '{country}' is not configured in {path}; "
                 f"available: {sorted(countries)}"
             )
-        cfg = {k: v for k, v in raw.items() if k != "countries"}
-        cfg["country"] = countries[country]
+        cfg = {
+            k: v for k, v in raw.items() if k not in ("countries", "country_defaults")
+        }
+        # country values: [country_defaults] of advanced.toml, overridden by [countries.<code>]
+        cfg["country"] = Config.merge(
+            raw.get("country_defaults", {}), countries[country], "country"
+        )
         cfg["country_code"] = country
         cfg["used_keys"] = list(keys)
         list_err = []
@@ -4171,6 +4173,61 @@ class Config:
                 + "\n  - ".join(list_err)
             )
         return cfg
+
+    @staticmethod
+    def merge(base, over, prefix=""):
+        """
+        Values of over on top of base: tables are merged key by key, except keys whose
+        schema type is "table" (a request, a template set), which over replaces whole
+        :param base: dict of defaults
+        :param over: dict of user values
+        :param prefix: dotted schema path of both dicts ("" for the top level)
+        :return: new dict
+        """
+        out = dict(base)
+        for k, v in over.items():
+            path = f"{prefix}.{k}" if prefix else k
+            if (
+                isinstance(v, dict)
+                and isinstance(out.get(k), dict)
+                and Config.SCHEMA.get(path) != "table"
+            ):
+                out[k] = Config.merge(out[k], v, path)
+            else:
+                out[k] = v
+        return out
+
+    @staticmethod
+    def read_merged(path):
+        """
+        Reads a configuration file on top of its defaults: advanced.toml in the same
+        folder (or the file named by the top-level key "advanced"; "" = none). Without
+        that file the configuration is read alone. Placeholder lists are joined.
+        :param path: TOML file of the user
+        :return: dict
+        """
+        if not exists(str(path)):
+            raise SystemExit(f"Configuration file not found: {path}")
+        with open(str(path), "rb") as f:
+            raw = tomllib.load(f)
+        name = raw.pop("advanced", "advanced.toml")
+        base_path = (
+            join(os.path.dirname(os.path.abspath(str(path))), name) if name else ""
+        )
+        if (
+            not base_path
+            or not exists(base_path)
+            or os.path.samefile(base_path, str(path))
+        ):
+            return raw
+        with open(base_path, "rb") as f:
+            base = tomllib.load(f)
+        placeholders = list(
+            dict.fromkeys(base.get("placeholders", []) + raw.get("placeholders", []))
+        )
+        merged = Config.merge(base, raw)
+        merged["placeholders"] = placeholders
+        return merged
 
     @staticmethod
     def _check_value(kind, value):
@@ -4468,6 +4525,18 @@ class Run:
                 values[name] = [v.strip() for v in raw.split(",") if v.strip()]
             else:
                 values[name] = type(default)(raw)
+        # COUNTRY left at the script default "XX": the country named in [general] country of the configuration
+        if (
+            values.get("COUNTRY") == "XX"
+            and os.environ.get("DEFENSES_COUNTRY") is None
+            and "CONFIG_PATH" in values
+        ):
+            try:
+                general = Config.read_merged(values["CONFIG_PATH"]).get("general", {})
+            except (SystemExit, OSError, tomllib.TOMLDecodeError):
+                general = {}
+            if general.get("country"):
+                values["COUNTRY"] = str(general["country"])
         return values
 
     @staticmethod

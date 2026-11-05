@@ -1,0 +1,479 @@
+# Advanced settings of the Defenses package (read with tomllib) with their default values.
+# config/defenses.toml holds the settings of a run; every key set there overrides the same key here, so this file
+# normally stays unchanged. [country_defaults] (with its sub-tables) applies to every country; a table
+# [countries.<code>...] in defenses.toml overrides it key by key. Request and template tables are replaced whole.
+# Keys listed in `placeholders` are logged as warnings whenever a script uses them; remove a key from the list
+# once its value is confirmed.
+
+placeholders = [
+    "country.bytes_per_cell",
+    "country.rp.distribution_classes",
+    "country.rp.distribution_shares",
+    "country.rp.max_rp",
+    "country.rp.cap_levels_m",
+    "country.rp.cap_rp",
+    "evidence.f_wet_comparison",
+    "evidence.f_dry_inside",
+    "evidence.f_wet_inside",
+    "evidence.hint_margin_m",
+    "evidence.hint_dry_share",
+    "evidence.hint_min_scenes",
+    "evidence.hint_exclusion_m",
+    "sources.gfm_flood_values",
+    "sources.gfm_exclusion_values",
+    "sources.gfm_reference_water_values",
+    "sources.gfm_nodata_values",
+    "country.lulc.worldcover_categories",
+    "country.context.urban_atlas_industrial_codes",
+    "country.context.urban_atlas_dense_urban_codes",
+    "country.context.ghsl_smod_dense_urban",
+    "country.context.ghsl_smod_urban",
+    "country.context.min_zone_area_m2",
+    "sources.osm_tags_water",
+    "implied.recompute_hand",
+    "implied.envelope_hand_m",
+    "implied.subsegment_length_m",
+    "implied.subsegment_length_grid",
+    "implied.built_source",
+    "implied.exclude_building_tags",
+    "implied.built_share_min",
+    "implied.built_share_min_grid",
+    "implied.built_area_min_m2",
+    "implied.hand_bin_m",
+    "implied.min_bin_area_m2",
+    "implied.smooth_bins",
+    "implied.onset_fraction",
+    "implied.onset_persist_bins",
+    "implied.quantiles",
+    "implied.primary_level_method",
+    "implied.sharp_window_m",
+    "implied.sharp_high",
+    "implied.component_built_min_m2",
+    "implied.merge_max_dlevel_m",
+    "implied.merge_max_gap",
+    "implied.corroboration_distance_m",
+    "implied.corroboration_min",
+    "implied.explicit_overlap_max",
+    "implied.regional_sop_rp",
+    "implied.implied_corroborated_max_rp",
+    "implied.historic_low_core_uncorroborated_cap",
+    "implied.ghsl_epochs",
+    "implied.epoch_cutoff",
+    "implied.growth_low_share_min",
+    "implied.min_cells_temporal",
+    "implied.rp_distribution_classes",
+    "implied.rp_distribution_shares",
+    "implied.snap.step_m",
+    "implied.snap.resolution_m",
+    "implied.snap.max_offset_m",
+    "implied.snap.min_window_m",
+    "implied.snap.cost_epsilon",
+    "implied.snap.chunk_length_m",
+    "implied.snap.chunk_overlap_m",
+    "implied.snap.max_length_ratio",
+    "implied.snap.wide_river_m",
+    "implied.snap.direction_check_m",
+    "implied.snap.max_nodata_share",
+    "implied.snap.chainage_origin",
+    "discharge.source_mode",
+    "discharge.raw_dir",
+    "discharge.aggregation",
+    "discharge.min_years",
+    "discharge.max_rp_extrapolation",
+    "discharge.flooded_window_days",
+    "discharge.bbox_buffer_deg",
+    "discharge.rp_disagreement_ratio",
+    "discharge.glofas.match_river_distance_m",
+    "discharge.efas.match_river_distance_m",
+    "discharge.glofas.min_upstream_area_km2",
+    "discharge.glofas.search_radius_km",
+    "discharge.glofas.upstream_ratio_min",
+    "discharge.glofas.upstream_ratio_max",
+    "discharge.glofas.valid_time_marks",
+    "discharge.efas.min_upstream_area_km2",
+    "discharge.efas.search_radius_km",
+    "discharge.efas.upstream_ratio_min",
+    "discharge.efas.upstream_ratio_max",
+    "discharge.efas.valid_time_marks",
+]
+
+[general]
+n_workers = 4                   # parallel unit processes; RAM need = n_workers x unit RAM
+max_ram_gb_per_worker = 16.0    # build_units stops if a unit window would need more
+gdal_cachemax_mb = 2048         # GDAL block cache per process
+warp_memory_limit_mb = 1024     # gdal.Warp working buffer per call
+gdal_threads_per_worker = 2     # GDAL_NUM_THREADS inside each worker (warping, compression)
+log_level = "INFO"
+
+[benchmark]
+n_windows = 20                  # random windows per DTM
+window_px = 4096                # native window edge in pixels
+sequential_rows = 512           # full-width rows read in one sequential request
+seed = 42                       # random generator seed (reproducible window positions)
+
+[country_defaults]
+river_upstream_area_field = ""  # name of the river column with the upstream area in km2, or ""
+upstream_area_raster = ""       # alternative upstream area source, or ""
+reference_protected_areas = []  # optional, validation only
+reference_rp_field = ""         # optional
+validation_extent = []          # optional polygons; validate.py clips both layers to them
+overrides = ""                  # optional point file with columns rp and note
+working_resolution_m = 5.0      # processing grid; terrain is averaged from the native DTM
+corridor_buffer_m = 3000.0      # river buffer defining the processed corridor
+unit_core_size_m = 20000.0      # square unit cores, aligned to the working grid
+unit_halo_m = 3000.0            # overlap read around each core
+convert_dtm = false             # prepare_dtm.py converts only when true
+dtm_conversion = "B"            # "A": whole file tiled + overviews; "B": corridor-clipped tiled copy
+dtm_compress = "ZSTD"           # ZSTD (falls back to DEFLATE if GDAL lacks it), DEFLATE or LZW
+footprint_resolution_m = 100.0  # cell size of the valid-data footprint
+bytes_per_cell = 180.0          # peak RAM per window cell; replace with the value logged by compartments.py
+crest_box_size_m = 500.0        # crest boxes around levees; adjacent boxes in a row are merged
+merge_overlap_ratio = 0.5       # candidates from different units overlapping more are the same compartment
+drop_contradicted_truncated = true  # drop compartments truncated everywhere if neighbouring windows see no protection
+contradiction_ratio = 0.5       # share of such a compartment that silent neighbouring windows must cover
+id_rounding_m = 10.0            # rounding of the representative point in compartment_id
+keep_intermediate = false       # write dtm, spill, margin, barrier and crest rasters per unit
+geofabrik_region = ""           # Geofabrik region path of the country (e.g. continent/country), used by the URL template
+osm_pbf = ""                    # optional local .osm.pbf instead of the download
+endpoint_elevation_radius_m = 5.0   # DTM sampled within this radius at river line ends (downstream end detection)
+# Stage D inputs (all optional)
+dsm = []                        # surface model files in the DTM CRS (flood walls classified as non-ground)
+building_footprints = []        # building polygons; OSM buildings are used if empty
+manual_barriers = []            # reviewed barrier lines; crest from Z or field crest_m
+industrial_registry = []        # points of regulated sites, e.g. EEA industrial reporting (verify the licence)
+ems_flood_extents = []          # manually downloaded Copernicus EMS flood delineations
+water_polygons = []             # water surfaces; OSM water polygons are used if empty
+corine = []                     # CORINE Land Cover raster (class index per pixel), local copy from the CLMS portal
+corine_legend = ""              # legend table shipped with the raster: class index -> three-digit CLC code
+corine_legend_index_field = ""  # NOT VERIFIED: legend column with the raster value (check your legend file)
+corine_legend_code_field = ""   # NOT VERIFIED: legend column with the CLC code
+corine_check = []               # known pixels [[x, y, code], ...] in the raster CRS; the mapping is verified on them
+
+[country_defaults.compartments]
+gap_tolerance_m = 20.0
+touch_tolerance_m = 0.01                 # endpoint closer than this to another line is connected
+self_close_min_length_factor = 3.0       # a line closes on itself only if longer than factor x gap
+crest_search_radius_m = 5.0
+barrier_removal_width_m = 10.0
+min_margin_m = 0.3
+max_level_m = 20.0
+min_area_m2 = 10000.0
+gated_crossings = false                  # true: river-levee crossings closed (flap gates)
+fill_nodata_holes = true                 # interpolate DTM nodata inside the DTM coverage (water surfaces, gaps)
+stream_burn_m = 5.0                      # B1 fix: lowering of river cells in the routing copy (0 = previous behaviour)
+stream_burn_buffer_m = 100.0             # taper width of the burning; wider than half the widest channel
+preserve_river_cells = true              # B2 fix: river cells next to levees keep their elevation in the undefended DTM
+cap_river_holes = true                   # L1 fix: river cells in gaps follow the river profile, other gap cells capped at the waterline
+max_fill_distance_m = 500.0              # largest distance over which gaps are interpolated (half-width of the widest river)
+use_snapped_rivers = false               # Stage E1: rivers_snapped.gpkg as water sources (off: stage A unchanged)
+
+[country_defaults.rp]
+classes = [10, 20, 50, 100, 200, 500]
+distribution_classes = [20, 50, 100, 200]    # placeholder
+distribution_shares = [0.2, 0.3, 0.4, 0.1]   # placeholder
+max_rp = 200                                 # placeholder
+cap_levels_m = [0.5, 1.0, 2.0]               # placeholder
+cap_rp = [10, 50, 100]                       # placeholder
+score_weight_value = 0.5
+score_weight_upstream = 0.5
+levee_adjacent_distance_m = 10.0
+storey_height_m = 3.0
+max_damage_csv = ""                          # user provided (JRC global depth-damage based)
+depth_damage_csv = ""                        # user provided
+value_total_tolerance = 0.01                 # allowed relative difference of value totals after warping
+
+# Context zones (context_zones.py): earlier classes of `order` win where sources overlap.
+[country_defaults.context]
+order = ["industrial", "dense_urban", "urban", "rural"]
+corine_industrial_codes = [121, 123]
+corine_dense_urban_codes = [111]
+urban_atlas_industrial_codes = []    # verify in the data
+urban_atlas_dense_urban_codes = []   # verify in the data
+ghsl_smod_dense_urban = [30]         # verify class codes in the GHSL data package
+ghsl_smod_urban = [21, 22, 23]       # verify class codes in the GHSL data package
+osm_industrial = { landuse = ["industrial"], man_made = ["works"] }
+min_zone_area_m2 = 20000.0
+
+# Processing parameters per context (placeholders). rural keeps the country values of stages A to C.
+[country_defaults.context.params.industrial]
+working_resolution_m = 2.0
+unit_core_size_m = 5000.0
+gap_tolerance_m = 20.0
+closure_gap_max_m = 40.0
+crest_lines = true
+rp_distribution_classes = [50, 100, 200, 500]
+rp_distribution_shares = [0.2, 0.4, 0.3, 0.1]
+score_weight_value = 0.4
+score_weight_population = 0.4
+score_weight_upstream = 0.2
+
+[country_defaults.context.params.dense_urban]
+working_resolution_m = 2.0
+unit_core_size_m = 5000.0
+gap_tolerance_m = 20.0
+closure_gap_max_m = 40.0
+crest_lines = true
+rp_distribution_classes = [50, 100, 200, 500]
+rp_distribution_shares = [0.2, 0.4, 0.3, 0.1]
+score_weight_value = 0.4
+score_weight_population = 0.4
+score_weight_upstream = 0.2
+
+[country_defaults.context.params.urban]
+working_resolution_m = 5.0
+unit_core_size_m = 20000.0
+gap_tolerance_m = 20.0
+closure_gap_max_m = 20.0
+crest_lines = false
+rp_distribution_classes = [20, 50, 100, 200]
+rp_distribution_shares = [0.2, 0.3, 0.4, 0.1]
+score_weight_value = 0.4
+score_weight_population = 0.3
+score_weight_upstream = 0.3
+
+[country_defaults.context.params.rural]
+working_resolution_m = 5.0
+unit_core_size_m = 20000.0
+gap_tolerance_m = 20.0
+closure_gap_max_m = 20.0
+crest_lines = false
+rp_distribution_classes = [20, 50, 100, 200]
+rp_distribution_shares = [0.2, 0.3, 0.4, 0.1]
+score_weight_value = 0.5
+score_weight_population = 0.0
+score_weight_upstream = 0.5
+
+# HAND_YZ: land use / land cover exposure that supplements the GHSL building value (processing/HAND_YZ.py).
+# Category values must cover only assets that GHSL buildings do not hold (crops, roads, rails, open-air equipment),
+# otherwise buildings are counted twice.
+[country_defaults.lulc]
+enabled = false                 # rp_index.py adds the land cover value to the GHSL value when true
+worldcover = []                 # local ESA WorldCover map tiles; empty = tiles of download_worldcover.py
+urban_atlas = []                # optional Urban Atlas files (manual download); they take precedence where present
+urban_atlas_layer = ""          # layer copied from multi-layer files with gdal.VectorTranslate
+urban_atlas_class_field = ""    # NOT VERIFIED: field with the class code (a catalogue search shows code_2018)
+# WorldCover class value -> exposure category. Class values are verified in the product legend (10 tree cover,
+# 20 shrubland, 30 grassland, 40 cropland, 50 built-up, 60 bare/sparse vegetation, 70 snow and ice, 80 permanent
+# water, 90 herbaceous wetland, 95 mangroves, 100 moss and lichen); the mapping itself is a placeholder.
+worldcover_categories = { "40" = "agriculture", "50" = "built_up" }
+urban_atlas_categories = {}     # NOT VERIFIED codes: Urban Atlas class code -> category; fill after checking the nomenclature
+max_damage_csv = ""             # user provided: columns country + one per category, value per m2 of land
+depth_damage_csv = ""           # user provided: depth_m + one damage fraction column per category
+
+[sources]
+request_pause_s = 1.0           # pause between requests; retry k waits request_pause_s * 2**k
+max_retries = 4
+geofabrik_url_template = ""     # NOT VERIFIED: pattern with {region}, from the official Geofabrik documentation
+# GHSL built-up volume (R2023A, 100 m): URL templates with {epoch} and {tile}, tiling schema (vector file or URL,
+# zipped shapefile allowed) and the schema attribute holding the tile id. NOT VERIFIED: fill from the JRC GHSL
+# documentation (tile naming not confirmed).
+ghsl_url_templates = { total = "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_BUILT_V_GLOBE_R2023A/GHS_BUILT_V_E{epoch}_GLOBE_R2023A_54009_100/V1-0/tiles/GHS_BUILT_V_E{epoch}_GLOBE_R2023A_54009_100_V1_0_{tile}.zip", non_residential = "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_BUILT_V_GLOBE_R2023A/GHS_BUILT_V_NRES_E{epoch}_GLOBE_R2023A_54009_100/V1-0/tiles/GHS_BUILT_V_NRES_E{epoch}_GLOBE_R2023A_54009_100_V1_0_{tile}.zip", smod = "", pop = "" }   # optional SMOD and population products are not configured
+ghsl_tile_schema = "https://ghsl.jrc.ec.europa.eu/download/GHSL_data_54009_shapefile.zip"
+ghsl_tile_field = "tile_id"
+ghsl_epoch = 0                  # 0 = latest available observed epoch; 2030 is modelled
+ghsl_nodata_as_zero = true      # GHSL nodata (ocean, outside coverage) counts as no building volume
+# Copernicus GFM through its STAC API (plain HTTP + JSON). NOT VERIFIED: the EODC documentation found by search
+# names https://stac.eodc.eu/api/v1 and the collection "GFM", and assets such as "ensemble_flood_extent",
+# "reference_water_mask", "ensemble_likelihood"; the exclusion-mask asset name was not confirmed. The service
+# could not be reached from the development session; confirm all names before filling them in.
+gfm_stac_url = ""
+gfm_collection = ""
+gfm_assets = { flood = "", exclusion = "", reference_water = "", likelihood = "" }
+gfm_date_from = "2015-01-01"
+gfm_date_to = ""                # empty = until today
+gfm_page_limit = 100            # items per STAC page
+gfm_token_env = ""              # environment variable holding a bearer token, if the service requires one
+gfm_screen_resolution_m = 100.0 # flood extent screened at this resolution before a scene is downloaded
+gfm_download_threads = 4        # scenes screened and copied at the same time (network-bound)
+# Pixel conventions of the GFM layers (placeholders: confirm in the GFM Product User Manual).
+gfm_flood_values = [1]
+gfm_exclusion_values = [1]
+gfm_reference_water_values = [1]
+gfm_nodata_values = [255]
+# ESA WorldCover 10 m (CC BY 4.0). Verified: URL pattern and grid from the official ESA-WorldCover download script,
+# a tile request (HTTP 200) and the legend in the tile metadata.
+worldcover_url_template = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/{version}/{year}/map/ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif"
+worldcover_grid_url = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v100/2020/esa_worldcover_2020_grid.geojson"
+worldcover_tile_field = "ll_tile"   # tile name field of the grid (lower-left corner, e.g. N48E015)
+worldcover_version = "v200"
+worldcover_year = 2021
+osm_tags_hydraulic = { waterway = ["sluice_gate", "lock_gate", "weir", "dam"], man_made = ["pumping_station"] }
+osm_tags_drains = { waterway = ["drain", "ditch", "canal"] }
+osm_tags_water = { natural = ["water"], waterway = ["riverbank"], landuse = ["reservoir", "basin"] }   # placeholder
+osm_tags_closing = { waterway = ["sluice_gate", "lock_gate"] }   # structures that close a river at a levee crossing
+osm_tags_pumping = { man_made = ["pumping_station"] }
+
+[evidence]
+comparison_distance_m = 2000.0
+min_valid_pixels = 200
+f_wet_comparison = 0.5          # placeholder
+f_dry_inside = 0.05             # placeholder
+f_wet_inside = 0.3              # placeholder
+river_level_percentile = 90.0   # scene water level in HAND for missing-barrier hints
+hint_margin_m = 0.5             # placeholder: a cell is clearly below the scene level by this margin
+hint_dry_share = 0.8            # placeholder: share of tested scenes in which a hint cell stays dry
+hint_min_scenes = 3             # placeholder: minimum number of tested scenes per hint cell
+hint_exclusion_m = 40.0         # placeholder: cells this close to a barrier line or compartment are not tested
+
+# --- Stage D ---
+[crest_lines]
+transect_spacing_m = 10.0
+transect_length_m = 300.0
+max_bank_distance_m = 150.0
+min_drop_m = 0.4
+landward_window_m = 50.0
+width_drop_m = 0.3
+max_wall_width_m = 2.0
+min_wall_height_m = 0.4
+building_buffer_m = 2.0
+max_crest_std_m = 0.15
+link_max_m = 25.0
+link_max_dz_m = 0.5
+min_line_length_m = 50.0
+
+[barriers]
+source_priority = ["manual", "crest_dsm", "ml", "osm", "crest_dtm"]
+dedupe_distance_m = 5.0
+dedupe_max_angle_deg = 20.0
+dedupe_min_overlap = 0.7
+osm_tags_walls = {}               # fill from the candidate counts that download_osm.py logs
+osm_tags_crossings = { highway = ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "service", "unclassified"], railway = ["rail", "tram", "light_rail"] }
+# Tags counted in the country extract to choose osm_tags_walls (taginfo was not reachable): documented OSM tags
+# for walls and dykes; counts only, nothing is extracted from this list.
+osm_wall_candidates = { barrier = ["wall", "retaining_wall"], wall = ["flood_wall"], man_made = ["dyke", "embankment"] }
+
+[coarse]
+coarse_resolution_m = 25.0
+coarse_min_area_km2 = 5.0
+coarse_match_distance_m = 100.0
+
+[review]
+top_n = 50
+flag_weights = { closure_gap = 1.0, crest_dsm = 0.5, truncated = 1.0, obs_conflict = 1.5, model_obs_conflict = 1.0, urban_no_test = 0.5, no_levee = 1.0 }
+
+# --- Stage E: implied protection in dense built-up reaches (experimental) ---
+# Values are placeholders (listed in `placeholders`) except the run settings units, include_* and [implied.plots].
+# Outputs stay separate; nothing enters defenses_clip.gpkg unless include_implied = true.
+[implied]
+units = []                          # empty means all units; set pilot units first
+recompute_hand = false              # true: recompute HAND per unit with snapped rivers
+envelope_hand_m = 10.0
+subsegment_length_m = 500.0         # base length
+subsegment_length_grid = [500.0, 1000.0, 2000.0]   # multiples of the base
+built_source = "max"                # footprints, ghsl or max
+exclude_building_tags = { building = ["boathouse", "houseboat"], man_made = ["wastewater_plant", "water_works"] }   # verify, report counts
+built_share_min = 0.3
+built_share_min_grid = [0.2, 0.3, 0.4]
+built_area_min_m2 = 20000.0
+hand_bin_m = 0.25
+min_bin_area_m2 = 2000.0
+smooth_bins = 3
+onset_fraction = 0.5
+onset_persist_bins = 4
+quantiles = [0.02, 0.05, 0.10]
+primary_level_method = "onset"      # onset, q0.02, q0.05 or q0.10
+sharp_window_m = 1.0
+sharp_high = 0.5
+component_built_min_m2 = 5000.0
+merge_max_dlevel_m = 0.5
+merge_max_gap = 1
+corroboration_distance_m = 50.0
+corroboration_min = 0.3
+explicit_overlap_max = 0.8
+regional_sop_rp = 10
+implied_corroborated_max_rp = 100
+historic_low_core_uncorroborated_cap = true
+ghsl_epochs = []                    # verify available epochs
+epoch_cutoff = 1990
+growth_low_share_min = 0.1
+min_cells_temporal = 20
+rp_distribution_classes = [20, 50, 100]
+rp_distribution_shares = [0.4, 0.4, 0.2]
+include_implied = false
+include_in_review = true
+
+[implied.snap]
+step_m = 5.0                        # spacing of river_points.gpkg and of the profile bins
+resolution_m = 2.0                  # grid of the least-cost path (gdal.Warp average)
+max_offset_m = 30.0                 # corridor half-width; cells outside are impassable
+min_window_m = 15.0                 # minimum filter of the narrow-river cost
+cost_epsilon = 0.01
+chunk_length_m = 5000.0
+chunk_overlap_m = 200.0
+max_length_ratio = 1.5              # snapped / original length per chunk; above it the original chunk is kept
+wide_river_m = 40.0                 # water polygon area in the corridor / chunk length above which the wide cost is used
+direction_check_m = 200.0
+max_nodata_share = 0.5              # addition to the specification: narrow-river chunks with more DTM nodata in the
+                                    # corridor keep the original line (DTM edge, e.g. a border river)
+chainage_origin = "downstream"      # downstream or upstream
+
+[implied.plots]
+enabled = true
+dpi = 120
+max_per_type = 200
+sample_seed = 42
+show_max = 10
+plot_all_in_units = []
+
+# --- Stage F: discharge sources GloFAS and EFAS (replaces the GloFAS keys of [sources] and [evidence]) ---
+# Discharge only turns observed outcomes into return periods; it never delineates compartments and is never a hazard.
+# Request parameters, data formats, years, the EFAS variable and the EFAS upstream area source are copied from the
+# EWDS download form ("Show API request") and never guessed: entries marked "from the form" stay empty until then.
+# The personal EWDS key goes into ~/.cdsapirc (url and key) or CDSAPI_KEY, never into this file.
+[discharge]
+sources = ["efas", "glofas"]
+source_mode = "conservative_both"          # prefer_efas, prefer_glofas or conservative_both
+ewds_api_url = "https://ewds.climate.copernicus.eu/api"   # verified; file:///folder serves files downloaded by hand
+raw_dir = ""                               # empty: <work_dir>/<country>/discharge/raw
+aggregation = "daily_mean"                 # daily_mean or daily_max (daily_max only for 6-hourly data)
+hydrological_year_start_month = 1
+min_years = 20
+max_rp_extrapolation = 1000
+flooded_window_days = 3
+max_parallel_requests = 2
+bbox_buffer_deg = 0.1
+rp_disagreement_ratio = 3.0
+
+[discharge.glofas]
+dataset_id = "cems-glofas-historical"      # verified
+request = { system_version = ["version_5_0"], hydrological_model = ["lisflood"], product_type = ["consolidated"], timespan = ["time_mean"], variable = ["average_river_discharge_in_the_last_24_hours"] }   # from the EWDS form (time, area and formats are added by download_discharge.py)
+data_format = "netcdf"                           # from the form (e.g. its grib or netcdf value)
+download_format = "unarchived"                       # from the form; empty = not sent
+first_year = 1980                             # from the dataset overview
+last_year = 2026
+request_unit = "year"
+time_keys = {year = "year", month = "month", day = "day"}                             # from the form: { year = "...", month = "...", day = "..." }
+area_key = "area"                     # EWDS parameter; the bbox is derived from dtm_footprint.gpkg
+step_hours = 24                            # verified: daily (24-hourly) discharge
+valid_time_marks = "end"                   # to confirm: ECMWF documents the valid time as the end of the averaging period
+netcdf_variable = ""                       # variable of the downloaded NetCDF files (empty for GRIB)
+upstream_area_file = ""                    # glofas_upArea.nc (Documentation tab of the dataset)
+upstream_area_variable = ""                # variable of glofas_upArea.nc
+upstream_area_to_km2 = 1e-6                # verified: glofas_upArea.nc is in m2
+min_upstream_area_km2 = 50.0               # cells kept for matching; memory of the series = days x cells x 4 B
+search_radius_km = 5.0
+upstream_ratio_min = 0.7
+upstream_ratio_max = 1.3
+match_river_distance_m = 3000.0            # cell centre to the river line: about half a 0.05 deg cell diagonal
+
+[discharge.efas]
+dataset_id = "efas-historical"             # verified; access to verify
+request = { system_version = ["version_5_0"], variable = ["river_discharge_in_the_last_6_hours"], model_levels = "surface_level", time = ["00:00", "06:00", "12:00", "18:00"] }
+data_format = "netcdf"
+download_format = "unarchived"
+first_year = 1992
+last_year = 2026
+request_unit = "month"                     # 6-hourly data: a month stays below 500 layers
+time_keys = { year = "hyear", month = "hmonth", day = "hday" }
+area_key = "area"
+step_hours = 6                             # verified: EFAS v5.0 has a 6-hourly step
+valid_time_marks = "end"                   # to confirm (EFAS v5.0 historical had a 6 h archive shift, since corrected)
+netcdf_variable = ""
+upstream_area_file = ""                    # EFAS static upstream area, source to verify
+upstream_area_variable = ""
+upstream_area_to_km2 = 0                   # units of the EFAS upstream area file, to verify (0 stops discharge_prepare.py)
+min_upstream_area_km2 = 50.0               # 0 keeps every land cell of the box (about 3 GB of series for a country)
+search_radius_km = 2.0
+upstream_ratio_min = 0.7
+upstream_ratio_max = 1.3
+match_river_distance_m = 500.0             # cell centre to the river line (1 arcmin cells)

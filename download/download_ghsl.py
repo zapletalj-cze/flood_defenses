@@ -19,7 +19,7 @@ import gis
 
 # --- Run variables (no command-line parameters; DEFENSES_<NAME> environment variables override them) ---
 CONFIG_PATH = "config/defenses.toml"
-COUNTRY = "NOR"
+COUNTRY = "XX"
 
 KEYS = [
     "general.work_dir",

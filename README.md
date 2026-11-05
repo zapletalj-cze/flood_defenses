@@ -24,7 +24,7 @@ explicitly.
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
 | E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E5 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`, `implied_protection.py`, `implied_evaluate.py`; 44 checks); integration with D4 outputs once they exist |
-| F | discharge sources GloFAS and EFAS (§11): `download_discharge.py`, `discharge_prepare.py`, `rp_bounds.py` rewritten | **F2–F5 done**, tested on synthetic data (15 checks); **F1 blocked**: the EWDS is not reachable from the session and the test requests need your key, so request values, time convention and EFAS access are not verified |
+| F | discharge sources GloFAS and EFAS (§11): `download_discharge.py`, `discharge_prepare.py`, `rp_bounds.py` rewritten | **F2–F5 done**, tested on synthetic data (16 checks); **F1 blocked**: the EWDS is not reachable from the session and the test requests need your key, so request values, time convention and EFAS access are not verified |
 
 ---
 
@@ -111,7 +111,8 @@ library is used. Two further dependencies were approved:
 ```
 gis.py                     shared GIS library (existing; new functions appended, nothing changed)
 plots.py                   plotting helpers of Stages E and F (matplotlib): budget, saving, colours, index.html
-config/defenses.toml       configuration template
+config/defenses.toml       settings of a run: country, folders, input paths (short; you fill it)
+config/advanced.toml       all other keys with their defaults
 config/osmconf.ini         OSM driver configuration exposing the tag keys used
 docs/navod_cs.md           short guide to running the scripts, in Czech
 docs/stage_d_plan.md       Stage D, step D.1: inventory, inputs, plan and measured runtime impact
@@ -124,6 +125,7 @@ download/
   download_worldcover.py   ESA WorldCover tiles over the corridor -> worldcover.vrt
   download_clms.py         CORINE (legend mapping verified on known pixels) and Urban Atlas from local files
 processing/
+  check_inputs.py          configuration and input check before a run (pixi run check)
   prepare_dtm.py           DTM inspection, footprint, benchmark, estimates, optional conversion
   build_units.py           river corridor, processing units, memory estimate
   osm_hydraulics.py        water sources (closed streams), pumping stations
@@ -147,7 +149,7 @@ tests/
   test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
   test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7, E4: 8, E5: 7 checks)
-  test_stage_f.py          Stage F on its own synthetic country T6 (15 checks)
+  test_stage_f.py          Stage F on its own synthetic country T6 (16 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -205,11 +207,36 @@ functions and all function parameters are unchanged.
 
 ## 3. Configuration
 
-`config/defenses.toml` is the template:
+The configuration has two files:
+- **`config/defenses.toml`** holds only what you set:
+  - the country of the runs (`[general] country`), the folders and the number of workers;
+  - the input paths of the country (`[countries.<code>]`): DTM, levees, rivers, the
+    upstream area column, the OSM extract;
+  - the damage tables.
+- **`config/advanced.toml`** holds every other key with its default value and normally
+  stays unchanged.
+  - **Merging.** A key written in `defenses.toml` overrides the same key in
+    `advanced.toml`. Tables of the schema type "table" (EWDS requests, URL templates) are
+    replaced whole.
+  - **Country defaults.** The table `[country_defaults]` and its sub-tables apply to every
+    country; `[countries.<code>…]` overrides them key by key.
+  - **Optional.** Without `advanced.toml` next to it (as in the tests), `defenses.toml` is
+    read alone and must then hold all keys.
+- **Country of a run.** It comes from `[general] country` when the script's `COUNTRY`
+  stays `"XX"`; `DEFENSES_COUNTRY` still overrides it.
+- **Check before a run.** `pixi run check` (`processing/check_inputs.py`) validates the
+  keys of every core and optional script and opens the inputs:
+  - DTM size, resolution and CRS;
+  - one layer per vector file, CRS, the upstream area column;
+  - the OSM extract, the damage tables, write access to the folders.
+
+  It prints OK or PROBLEM per item and exits with 1 when a core step is blocked.
+
+The tables of `advanced.toml`:
 - `[general]`: directories, workers, memory limits, GDAL cache and threads.
 - `[benchmark]`: benchmark windows.
-- `[countries.<code>]`: inputs, resolutions, units, conversion and OSM region, with
-  sub-tables `compartments` and `rp`.
+- `[country_defaults]` (in `defenses.toml`: `[countries.<code>]`): inputs, resolutions,
+  units, conversion and OSM region, with sub-tables `compartments` and `rp`.
 - `[sources]`: download templates, tag lists, retries.
 - `[evidence]`: Stage C.
 - `[implied]`: Stage E (§18).
@@ -1514,7 +1541,7 @@ compartments take seconds.
     - `model_obs_conflict` with rp = 200.
   - **Validation:** recall and precision against an independent computation; the
     confusion matrix and both shares.
-- **`pixi run test-stage-f`, 15 checks,** on its own synthetic country T6.
+- **`pixi run test-stage-f`, 16 checks,** on its own synthetic country T6.
   - **Setup.** T6 is a 20 km box with one river (5000 km²) and two compartments. GloFAS
     (0.05°, daily, one file per year) and EFAS (1 arcmin, 6-hourly, one file per month)
     cover 2001–2020. The files are served from a local EWDS folder. EFAS is 30 % higher on
