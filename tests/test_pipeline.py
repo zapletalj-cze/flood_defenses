@@ -221,8 +221,8 @@ levee_adjacent_distance_m = 10.0
 def write_config(convert):
     text = f"""placeholders = ["country.bytes_per_cell"]
 [general]
-work_dir = "{root / 'work'}"
-output_dir = "{root / 'output'}"
+work_dir = {json.dumps(str(root / 'work'))}
+output_dir = {json.dumps(str(root / 'output'))}
 n_workers = 2
 max_ram_gb_per_worker = 4.0
 gdal_cachemax_mb = 256

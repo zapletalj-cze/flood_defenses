@@ -211,10 +211,11 @@ pd.DataFrame(
     }
 ).to_csv(data / "depth_damage.csv", index=False)
 
+data_url = data.as_uri()
 config = f"""placeholders = ["country.rp.max_rp"]
 [general]
-work_dir = "{root / 'work'}"
-output_dir = "{root / 'output'}"
+work_dir = {json.dumps(str(root / 'work'))}
+output_dir = {json.dumps(str(root / 'output'))}
 n_workers = 2
 max_ram_gb_per_worker = 4.0
 gdal_cachemax_mb = 256
@@ -229,15 +230,15 @@ sequential_rows = 32
 seed = 1
 
 [countries.T4]
-dtm = "{data / 'dtm.tif'}"
+dtm = {json.dumps(str(data / 'dtm.tif'))}
 dsm = []
 building_footprints = []
 water_polygons = []
-levees = "{data / 'levees.gpkg'}"
-rivers = "{data / 'rivers.gpkg'}"
+levees = {json.dumps(str(data / 'levees.gpkg'))}
+rivers = {json.dumps(str(data / 'rivers.gpkg'))}
 river_upstream_area_field = "upstream_km2"
 upstream_area_raster = ""
-overrides = "{data / 'overrides.gpkg'}"
+overrides = {json.dumps(str(data / 'overrides.gpkg'))}
 working_resolution_m = 2.0
 corridor_buffer_m = 600.0
 unit_core_size_m = 1200.0
@@ -285,8 +286,8 @@ score_weight_value = 0.5
 score_weight_upstream = 0.5
 levee_adjacent_distance_m = 10.0
 storey_height_m = 3.0
-max_damage_csv = "{data / 'max_damage.csv'}"
-depth_damage_csv = "{data / 'depth_damage.csv'}"
+max_damage_csv = {json.dumps(str(data / 'max_damage.csv'))}
+depth_damage_csv = {json.dumps(str(data / 'depth_damage.csv'))}
 value_total_tolerance = 0.01
 
 [countries.T4.lulc]
@@ -298,9 +299,9 @@ osm_industrial = {{ landuse = ["industrial"], man_made = ["works"] }}
 [sources]
 request_pause_s = 0.1
 max_retries = 1
-geofabrik_url_template = "file://{data}/{{region}}.osm"
-ghsl_url_templates = {{ total = "file://{data}/GHS_BUILT_V_E{{epoch}}_TEST_{{tile}}.zip", non_residential = "file://{data}/GHS_BUILT_V_NRES_E{{epoch}}_TEST_{{tile}}.zip" }}
-ghsl_tile_schema = "file://{data}/tiling_schema.zip"
+geofabrik_url_template = {json.dumps(data_url + "/{region}.osm")}
+ghsl_url_templates = {{ total = {json.dumps(data_url + "/GHS_BUILT_V_E{epoch}_TEST_{tile}.zip")}, non_residential = {json.dumps(data_url + "/GHS_BUILT_V_NRES_E{epoch}_TEST_{tile}.zip")} }}
+ghsl_tile_schema = {json.dumps(data_url + "/tiling_schema.zip")}
 ghsl_tile_field = "tile_id"
 ghsl_epoch = 0
 ghsl_nodata_as_zero = true

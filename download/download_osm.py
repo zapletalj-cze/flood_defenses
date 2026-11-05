@@ -5,6 +5,7 @@
 # footprint into single-layer GeoPackages with GDAL; logs counts of candidate wall tags.
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import geopandas as gpd
 from osgeo import gdal
@@ -20,6 +21,7 @@ FORCE = False  # extract again although the outputs exist
 KEYS = [
     "general.work_dir",
     "general.output_dir",
+    "general.gdal_threads_per_worker",
     "general.log_level",
     "country.geofabrik_region",
     "country.osm_pbf",
@@ -175,55 +177,55 @@ if __name__ == "__main__":
     select = ", ".join(list_col)
     outputs = {
         "osm_hydraulic_points": (
-            f"SELECT osm_id, 'node' AS osm_element, {select}, geometry FROM points "
+            f"SELECT osm_id AS osm_id, 'node' AS osm_element, NULL AS osm_way_id, {select} FROM points "
             f"WHERE {condition(tags['hydraulic'], 'points')} "
-            f"UNION ALL SELECT osm_id, 'way', {select}, ST_PointOnSurface(geometry) FROM lines "
+            f"UNION ALL SELECT osm_id AS osm_id, 'way' AS osm_element, NULL AS osm_way_id, {select} FROM lines "
             f"WHERE {condition(tags['hydraulic'], 'lines')} "
-            f"UNION ALL SELECT COALESCE(osm_id, osm_way_id), 'area', {select}, "
-            f"ST_PointOnSurface(geometry) FROM multipolygons "
+            f"UNION ALL SELECT osm_id AS osm_id, 'area' AS osm_element, "
+            f"osm_way_id AS osm_way_id, {select} FROM multipolygons "
             f"WHERE {condition(tags['hydraulic'], 'multipolygons')}",
-            "POINT",
+            "GEOMETRY",
         ),
         "osm_drains": (
-            f"SELECT osm_id, {', '.join(sorted(set(tags['drains']) | {'name'}))}, geometry FROM lines "
+            f"SELECT osm_id, {', '.join(sorted(set(tags['drains']) | {'name'}))} FROM lines "
             f"WHERE {condition(tags['drains'], 'lines')}",
             "LINESTRING",
         ),
         # Stage D: crossings at gaps of protection lines, industrial areas for the context zones.
         "osm_crossings": (
-            f"SELECT osm_id, {', '.join(sorted(set(tags['crossings']) | {'name'}))}, geometry FROM lines "
+            f"SELECT osm_id, {', '.join(sorted(set(tags['crossings']) | {'name'}))} FROM lines "
             f"WHERE {condition(tags['crossings'], 'lines')}",
             "LINESTRING",
         ),
         "osm_industrial": (
-            f"SELECT COALESCE(osm_id, osm_way_id) AS osm_id, "
-            f"{', '.join(sorted(set(tags['industrial']) | {'name'}))}, geometry FROM multipolygons "
+            f"SELECT osm_id, osm_way_id, {', '.join(sorted(set(tags['industrial']) | {'name'}))} "
+            f"FROM multipolygons "
             f"WHERE {condition(tags['industrial'], 'multipolygons')}",
             "MULTIPOLYGON",
         ),
         # Counts only: lines with any candidate wall tag (see barriers.osm_wall_candidates).
         "osm_wall_candidates": (
-            f"SELECT osm_id, {', '.join(sorted(set(tags['wall_candidates']) | {'name'}))}, geometry "
+            f"SELECT osm_id, {', '.join(sorted(set(tags['wall_candidates']) | {'name'}))} "
             f"FROM lines WHERE {condition(tags['wall_candidates'], 'lines')}",
             "LINESTRING",
         ),
     }
     # Always extracted: Stage E combines OSM buildings with national footprints; man_made serves its exclusions.
     outputs["osm_buildings"] = (
-        "SELECT COALESCE(osm_id, osm_way_id) AS osm_id, building, man_made, geometry FROM multipolygons "
+        "SELECT osm_id, osm_way_id, building, man_made FROM multipolygons "
         "WHERE building IS NOT NULL",
         "MULTIPOLYGON",
     )
     if not country["water_polygons"]:
         outputs["osm_water"] = (
-            f"SELECT COALESCE(osm_id, osm_way_id) AS osm_id, "
-            f"{', '.join(sorted(set(tags['water']) | {'name'}))}, geometry FROM multipolygons "
+            f"SELECT osm_id, osm_way_id, {', '.join(sorted(set(tags['water']) | {'name'}))} "
+            f"FROM multipolygons "
             f"WHERE {condition(tags['water'], 'multipolygons')}",
             "MULTIPOLYGON",
         )
     if tags["walls"]:
         outputs["osm_walls"] = (
-            f"SELECT osm_id, {', '.join(sorted(set(tags['walls']) | {'name'}))}, geometry FROM lines "
+            f"SELECT osm_id, {', '.join(sorted(set(tags['walls']) | {'name'}))} FROM lines "
             f"WHERE {condition(tags['walls'], 'lines')}",
             "LINESTRING",
         )
@@ -231,6 +233,7 @@ if __name__ == "__main__":
         log.info(
             "barriers.osm_tags_walls is empty: no osm_walls.gpkg; choose the tags from the candidate counts below."
         )
+    list_extract = []
     for name, (sql, geometry_type) in outputs.items():
         path = (
             work_dir / "osm" / f"{name}.gpkg"
@@ -238,22 +241,75 @@ if __name__ == "__main__":
             else out_dir / f"{name}.gpkg"
         )
         if path.exists() and not run["FORCE"]:
+            try:
+                gis.Vector.check_single_layer(path)
+            except (RuntimeError, SystemExit):
+                log.warning("%s is incomplete; re-extracting.", path.name)
+                path.unlink()
+        if path.exists() and not run["FORCE"]:
             log.info("%s exists; extraction skipped (set FORCE to redo).", path.name)
         else:
-            path.unlink(missing_ok=True)
-            gdal.VectorTranslate(
-                str(path),
+            list_extract.append((path, name, sql, geometry_type))
+
+    def translate_output(task):
+        path, name, sql, geometry_type = task
+        path.unlink(missing_ok=True)
+        source = None
+        try:
+            source = gdal.OpenEx(
                 str(pbf),
+                gdal.OF_VECTOR | gdal.OF_READONLY,
+                open_options=["INTERLEAVED_READING=YES"],
+            )
+            if source is None:
+                raise RuntimeError(f"GDAL could not open {pbf} as a vector dataset.")
+            translated = gdal.VectorTranslate(
+                str(path),
+                source,
                 format="GPKG",
                 SQLStatement=sql,
-                SQLDialect="SQLITE",
+                SQLDialect="OGRSQL",
                 layerName=name,
                 spatFilter=list_bnd,
                 dstSRS=wkt,
                 geometryType=geometry_type,
+                datasetCreationOptions=["ADD_GPKG_OGR_CONTENTS=NO"],
             )
+            if translated is None:
+                raise RuntimeError(f"GDAL did not create {path.name}.")
+            translated = None
+            source = None
+            gis.Vector.check_single_layer(path)
+        except Exception:
+            source = None
+            path.unlink(missing_ok=True)
+            raise
+
+    if list_extract:
+        n_threads = max(
+            1, min(general["gdal_threads_per_worker"], len(list_extract))
+        )
+        log.info(
+            "Extracting %d OSM layers with %d parallel workers.",
+            len(list_extract),
+            n_threads,
+        )
+        with ThreadPoolExecutor(max_workers=n_threads) as executor:
+            list(executor.map(translate_output, list_extract))
+
+    for name in outputs:
+        path = (
+            work_dir / "osm" / f"{name}.gpkg"
+            if name == "osm_wall_candidates"
+            else out_dir / f"{name}.gpkg"
+        )
         gis.Vector.check_single_layer(path)
         gdf_ext = gpd.read_file(path)
+        if name == "osm_hydraulic_points":
+            gdf_ext["osm_id"] = gdf_ext["osm_id"].fillna(gdf_ext["osm_way_id"])
+            gdf_ext = gdf_ext.drop(columns="osm_way_id")
+            gdf_ext = gdf_ext.set_geometry(gdf_ext.geometry.representative_point())
+            gdf_ext.to_file(path, driver="GPKG")
         log.info("%s: %d features.", path.name, len(gdf_ext))
         # Counts per tag value, to adjust the tag lists in the configuration.
         table = {

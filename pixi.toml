@@ -1,7 +1,7 @@
 [workspace]
 name = "flood_defenses"
-authors = ["Jakub Zapletal <jakub.zapletal00@gmail.com>"]
-channels = ["conda-forge"]
+authors = ["Jakub Zapletal <jakub.zapletal@aon.com>"]
+channels = ["https://prefix.dev/conda-forge"]
 platforms = ["win-64"]
 
 [dependencies]

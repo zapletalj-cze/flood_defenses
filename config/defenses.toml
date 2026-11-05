@@ -97,10 +97,10 @@ placeholders = [
 ]
 
 [general]
-work_dir = ""                   # scratch and per-unit intermediates (fast local disk)
-output_dir = ""                 # final GeoPackages, CSV tables and run logs
-n_workers = 4                   # parallel unit processes; RAM need = n_workers x unit RAM
-max_ram_gb_per_worker = 16.0    # build_units stops if a unit window would need more
+work_dir = "D:/01_Projects/997_SmallProjects/99_DEFENSES/01_MD/work"                   # scratch and per-unit intermediates (fast local disk)
+output_dir = "D:/01_Projects/997_SmallProjects/99_DEFENSES/01_MD/outputs"                 # final GeoPackages, CSV tables and run logs
+n_workers = 16                  # parallel unit processes; RAM need = n_workers x unit RAM
+max_ram_gb_per_worker = 32    # build_units stops if a unit window would need more
 gdal_cachemax_mb = 2048         # GDAL block cache per process
 warp_memory_limit_mb = 1024     # gdal.Warp working buffer per call
 gdal_threads_per_worker = 2     # GDAL_NUM_THREADS inside each worker (warping, compression)
@@ -112,11 +112,11 @@ window_px = 4096                # native window edge in pixels
 sequential_rows = 512           # full-width rows read in one sequential request
 seed = 42                       # random generator seed (reproducible window positions)
 
-[countries.XX]
-dtm = []                        # one or more large GeoTIFF/VRT files in one CRS
-levees = []                     # e.g. ["/data/levees_ml.gpkg", "/data/levees_osm.gpkg"]
-rivers = []                     # modelled river network (lines)
-river_upstream_area_field = ""  # column with upstream area in km2, or ""
+[countries.NOR]
+dtm = ["Q:/01_Projects/165_Global_Flood_maps/01_MD/01_Europe/02_DTM/5m/nordics/nordics_5m_3035_260520_breached_GRITv06.tif"]                        # one or more large GeoTIFF/VRT files in one CRS
+levees = ["D:/01_Projects/997_SmallProjects/99_DEFENSES/02_DATA/OSM/levees/europe-latest_man_made_embankment_or_dyke_lines.gpkg"]                     # e.g. ["/data/levees_ml.gpkg", "/data/levees_osm.gpkg"]
+rivers = ["R:/01_Projects/900_FL_Europe/01_MD/01_HAZARD/02_RN/MERIT/MERIT_3035/MERIT_RN_with_IFLakeType_260728_addFrom_To_point_IFAddArea.gpkg"]                     # modelled river network (lines)
+river_upstream_area_field = "50"  # column with upstream area in km2, or ""
 upstream_area_raster = ""       # alternative upstream area source, or ""
 reference_protected_areas = []  # optional, validation only
 reference_rp_field = ""         # optional
@@ -138,7 +138,7 @@ contradiction_ratio = 0.5       # share of such a compartment that silent neighb
 id_rounding_m = 10.0            # rounding of the representative point in compartment_id
 keep_intermediate = false       # write dtm, spill, margin, barrier and crest rasters per unit
 geofabrik_region = ""           # Geofabrik region path of the country (e.g. continent/country), used by the URL template
-osm_pbf = ""                    # optional local .osm.pbf instead of the download
+osm_pbf = "D:/01_Projects/900_FL_Europe/01_MD/01_HAZARD/01_DTM/GEDTM/europe-latest.osm.pbf"                    # optional local .osm.pbf instead of the download
 endpoint_elevation_radius_m = 5.0   # DTM sampled within this radius at river line ends (downstream end detection)
 # Stage D inputs (all optional)
 dsm = []                        # surface model files in the DTM CRS (flood walls classified as non-ground)
@@ -153,7 +153,7 @@ corine_legend_index_field = ""  # NOT VERIFIED: legend column with the raster va
 corine_legend_code_field = ""   # NOT VERIFIED: legend column with the CLC code
 corine_check = []               # known pixels [[x, y, code], ...] in the raster CRS; the mapping is verified on them
 
-[countries.XX.compartments]
+[countries.NOR.compartments]
 gap_tolerance_m = 20.0
 touch_tolerance_m = 0.01                 # endpoint closer than this to another line is connected
 self_close_min_length_factor = 3.0       # a line closes on itself only if longer than factor x gap
@@ -171,7 +171,7 @@ cap_river_holes = true                   # L1 fix: river cells in gaps follow th
 max_fill_distance_m = 500.0              # largest distance over which gaps are interpolated (half-width of the widest river)
 use_snapped_rivers = false               # Stage E1: rivers_snapped.gpkg as water sources (off: stage A unchanged)
 
-[countries.XX.rp]
+[countries.NOR.rp]
 classes = [10, 20, 50, 100, 200, 500]
 distribution_classes = [20, 50, 100, 200]    # placeholder
 distribution_shares = [0.2, 0.3, 0.4, 0.1]   # placeholder
@@ -187,7 +187,7 @@ depth_damage_csv = ""                        # user provided
 value_total_tolerance = 0.01                 # allowed relative difference of value totals after warping
 
 # Context zones (context_zones.py): earlier classes of `order` win where sources overlap.
-[countries.XX.context]
+[countries.NOR.context]
 order = ["industrial", "dense_urban", "urban", "rural"]
 corine_industrial_codes = [121, 123]
 corine_dense_urban_codes = [111]
@@ -199,7 +199,7 @@ osm_industrial = { landuse = ["industrial"], man_made = ["works"] }
 min_zone_area_m2 = 20000.0
 
 # Processing parameters per context (placeholders). rural keeps the country values of stages A to C.
-[countries.XX.context.params.industrial]
+[countries.NOR.context.params.industrial]
 working_resolution_m = 2.0
 unit_core_size_m = 5000.0
 gap_tolerance_m = 20.0
@@ -211,7 +211,7 @@ score_weight_value = 0.4
 score_weight_population = 0.4
 score_weight_upstream = 0.2
 
-[countries.XX.context.params.dense_urban]
+[countries.NOR.context.params.dense_urban]
 working_resolution_m = 2.0
 unit_core_size_m = 5000.0
 gap_tolerance_m = 20.0
@@ -223,7 +223,7 @@ score_weight_value = 0.4
 score_weight_population = 0.4
 score_weight_upstream = 0.2
 
-[countries.XX.context.params.urban]
+[countries.NOR.context.params.urban]
 working_resolution_m = 5.0
 unit_core_size_m = 20000.0
 gap_tolerance_m = 20.0
@@ -235,7 +235,7 @@ score_weight_value = 0.4
 score_weight_population = 0.3
 score_weight_upstream = 0.3
 
-[countries.XX.context.params.rural]
+[countries.NOR.context.params.rural]
 working_resolution_m = 5.0
 unit_core_size_m = 20000.0
 gap_tolerance_m = 20.0
@@ -271,10 +271,10 @@ geofabrik_url_template = ""     # NOT VERIFIED: pattern with {region}, from the 
 # GHSL built-up volume (R2023A, 100 m): URL templates with {epoch} and {tile}, tiling schema (vector file or URL,
 # zipped shapefile allowed) and the schema attribute holding the tile id. NOT VERIFIED: fill from the JRC GHSL
 # documentation (tile naming not confirmed).
-ghsl_url_templates = { total = "", non_residential = "", smod = "", pop = "" }   # smod and pop optional (Stage D)
-ghsl_tile_schema = ""
-ghsl_tile_field = ""
-ghsl_epoch = 0                  # 0 = latest epoch not after the current year that the server provides
+ghsl_url_templates = { total = "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_BUILT_V_GLOBE_R2023A/GHS_BUILT_V_E{epoch}_GLOBE_R2023A_54009_100/V1-0/tiles/GHS_BUILT_V_E{epoch}_GLOBE_R2023A_54009_100_V1_0_{tile}.zip", non_residential = "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_BUILT_V_GLOBE_R2023A/GHS_BUILT_V_NRES_E{epoch}_GLOBE_R2023A_54009_100/V1-0/tiles/GHS_BUILT_V_NRES_E{epoch}_GLOBE_R2023A_54009_100_V1_0_{tile}.zip", smod = "", pop = "" }   # optional SMOD and population products are not configured
+ghsl_tile_schema = "https://ghsl.jrc.ec.europa.eu/download/GHSL_data_54009_shapefile.zip"
+ghsl_tile_field = "tile_id"
+ghsl_epoch = 0                  # 0 = latest available observed epoch; 2030 is modelled
 ghsl_nodata_as_zero = true      # GHSL nodata (ocean, outside coverage) counts as no building volume
 # Copernicus GFM through its STAC API (plain HTTP + JSON). NOT VERIFIED: the EODC documentation found by search
 # names https://stac.eodc.eu/api/v1 and the collection "GFM", and assets such as "ensemble_flood_extent",
@@ -440,14 +440,14 @@ rp_disagreement_ratio = 3.0
 
 [discharge.glofas]
 dataset_id = "cems-glofas-historical"      # verified
-request = { system_version = ["version_4_0"], hydrological_model = ["lisflood"], product_type = ["consolidated"], variable = ["river_discharge_in_the_last_24_hours"] }   # verified; complete from the form
-data_format = ""                           # from the form (e.g. its grib or netcdf value)
-download_format = ""                       # from the form; empty = not sent
-first_year = 0                             # from the dataset overview
-last_year = 0
+request = { system_version = ["version_5_0"], hydrological_model = ["lisflood"], product_type = ["consolidated"], timespan = ["time_mean"], variable = ["average_river_discharge_in_the_last_24_hours"], year = ["2025"], month = ["06"], day = ["18"], data_format = "netcdf", download_format = "unarchived", area = [73.71, -1.01, 49.64, 39.1] }   # verified; complete from the form
+data_format = "netcdf"                           # from the form (e.g. its grib or netcdf value)
+download_format = "unarchived"                       # from the form; empty = not sent
+first_year = 1980                             # from the dataset overview
+last_year = 2026
 request_unit = "year"
-time_keys = {}                             # from the form: { year = "...", month = "...", day = "..." }
-area_key = ""                              # from the form: name of the north, west, south, east parameter
+time_keys = {year = "year", month = "month", day = "day"}                             # from the form: { year = "...", month = "...", day = "..." }
+area_key = "area"                     # EWDS parameter; the bbox is derived from dtm_footprint.gpkg
 step_hours = 24                            # verified: daily (24-hourly) discharge
 valid_time_marks = "end"                   # to confirm: ECMWF documents the valid time as the end of the averaging period
 netcdf_variable = ""                       # variable of the downloaded NetCDF files (empty for GRIB)
@@ -462,14 +462,14 @@ match_river_distance_m = 3000.0            # cell centre to the river line: abou
 
 [discharge.efas]
 dataset_id = "efas-historical"             # verified; access to verify
-request = {}                               # from the form
-data_format = ""
-download_format = ""
-first_year = 0
-last_year = 0
+request = { system_version = ["version_5_0"], variable = ["river_discharge_in_the_last_6_hours"], model_levels = "surface_level", time = ["00:00", "06:00", "12:00", "18:00"] }
+data_format = "netcdf"
+download_format = "unarchived"
+first_year = 1992
+last_year = 2026
 request_unit = "month"                     # 6-hourly data: a month stays below 500 layers
-time_keys = {}
-area_key = ""
+time_keys = { year = "hyear", month = "hmonth", day = "hday" }
+area_key = "area"
 step_hours = 6                             # verified: EFAS v5.0 has a 6-hourly step
 valid_time_marks = "end"                   # to confirm (EFAS v5.0 historical had a 6 h archive shift, since corrected)
 netcdf_variable = ""

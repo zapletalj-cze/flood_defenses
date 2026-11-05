@@ -413,7 +413,7 @@ gdf_ref.to_file(data / "reference.gpkg", driver="GPKG")
 
 # --- Configuration: the Stage B test configuration plus the Stage C keys ---
 base_config = (root / "test.toml").read_text()
-country_keys = f"""reference_protected_areas = "{data / 'reference.gpkg'}"
+country_keys = f"""reference_protected_areas = {json.dumps(str(data / 'reference.gpkg'))}
 reference_rp_field = "rp_ref"
 validation_extent = []
 """
@@ -435,8 +435,8 @@ discharge = f"""
 [discharge]
 sources = ["glofas"]
 source_mode = "conservative_both"
-ewds_api_url = "file://{data / 'ewds_nc'}"
-raw_dir = "{root / 'discharge_raw'}"
+ewds_api_url = {json.dumps((data / 'ewds_nc').as_uri())}
+raw_dir = {json.dumps(str(root / 'discharge_raw'))}
 aggregation = "daily_mean"
 hydrological_year_start_month = 1
 min_years = 20
@@ -459,7 +459,7 @@ area_key = "area"
 step_hours = 24
 valid_time_marks = "end"
 netcdf_variable = "dis24"
-upstream_area_file = "{data / 'uparea.nc'}"
+upstream_area_file = {json.dumps(str(data / 'uparea.nc'))}
 upstream_area_variable = "uparea"
 upstream_area_to_km2 = 1e-6
 min_upstream_area_km2 = 5.0
@@ -508,14 +508,21 @@ config = (
     config.replace("[sources]\n", "[sources]\n" + source_keys, 1) + evidence + discharge
 )
 (root / "test_c.toml").write_text(config)
-nc_url, grib_url = f"file://{data / 'ewds_nc'}", f"file://{data / 'ewds_grib'}"
+nc_url, grib_url = (data / "ewds_nc").as_uri(), (data / "ewds_grib").as_uri()
 raw_nc, raw_grib = root / "discharge_raw", root / "discharge_raw_grib"
 grib_config = (
     config.replace(
-        f'output_dir = "{root / "output"}"', f'output_dir = "{root / "output_grib"}"'
+        f"output_dir = {json.dumps(str(root / 'output'))}",
+        f"output_dir = {json.dumps(str(root / 'output_grib'))}",
     )
-    .replace(f'ewds_api_url = "{nc_url}"', f'ewds_api_url = "{grib_url}"')
-    .replace(f'raw_dir = "{raw_nc}"', f'raw_dir = "{raw_grib}"')
+    .replace(
+        f"ewds_api_url = {json.dumps(nc_url)}",
+        f"ewds_api_url = {json.dumps(grib_url)}",
+    )
+    .replace(
+        f"raw_dir = {json.dumps(str(raw_nc))}",
+        f"raw_dir = {json.dumps(str(raw_grib))}",
+    )
     .replace('data_format = "netcdf"', 'data_format = "grib"')
     .replace("first_year = 1981", "first_year = 2019")
     .replace('netcdf_variable = "dis24"', 'netcdf_variable = ""')
