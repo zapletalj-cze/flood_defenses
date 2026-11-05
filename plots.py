@@ -40,7 +40,18 @@ COLOURS = {
         "urban": CATEGORICAL[2],
         "rural": CATEGORICAL[3],
     },
+    # discharge sources and GFM test outcomes (Stage F); aqua and violet pass the all-pairs CVD check
+    "source": {"glofas": CATEGORICAL[0], "efas": CATEGORICAL[1]},
+    "outcome": {"held": CATEGORICAL[2], "flooded": CATEGORICAL[6]},
 }
+SOURCE_NAMES = {
+    "glofas": "GloFAS",
+    "efas": "EFAS",
+}  # display names of the discharge sources
+OUTCOME_MARKERS = {"held": "o", "flooded": "^"}  # secondary encoding of the outcome
+# Diverging ramp of ratios around 1 (blue below, red above, neutral grey at 1)
+RATIO_COLOURS = (CATEGORICAL[0], "#f0efec", CATEGORICAL[7])
+RP_TICKS = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000)
 # Ink and chrome: text never takes a data colour.
 INK = {
     "primary": "#0b0b0b",
@@ -109,6 +120,7 @@ class Plots:
                 "axes.spines.top": False,
                 "axes.spines.right": False,
                 "axes.grid": True,
+                "axes.axisbelow": True,
                 "grid.color": INK["grid"],
                 "grid.linewidth": 0.6,
                 "grid.linestyle": "-",
@@ -156,6 +168,24 @@ class Plots:
             }
             for i, m in enumerate(methods)
         }
+
+    @staticmethod
+    def rp_axis(ax, which="x", max_rp=1000.0):
+        """
+        Logarithmic return-period axis with plain tick labels at 1, 2, 5, 10, 20, 50, ...
+        :param ax: matplotlib axes
+        :param which: "x" or "y"
+        :param max_rp: largest return period that gets a tick
+        """
+        from matplotlib.ticker import FixedLocator, FuncFormatter, NullLocator
+
+        (ax.set_xscale if which == "x" else ax.set_yscale)("log")
+        axis = ax.xaxis if which == "x" else ax.yaxis
+        axis.set_major_locator(
+            FixedLocator([t for t in RP_TICKS if t <= max_rp * 1.0001])
+        )
+        axis.set_minor_locator(NullLocator())
+        axis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
 
     @staticmethod
     def halo():

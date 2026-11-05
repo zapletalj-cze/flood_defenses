@@ -22,6 +22,8 @@ pyproj = "*"
 pyflwdir = "*"
 # Stage E plots (approved); the base package without Qt
 matplotlib-base = "*"
+# Stage F downloads from the Copernicus EWDS (approved); 0.7 or newer for the current data stores
+cdsapi = ">=0.7.4"
 
 # Scripts run as modules from the repository root, so `import gis` resolves without sys.path changes.
 [tasks]
@@ -39,7 +41,8 @@ download-clms = "python -m download.download_clms"
 context-zones = "python -m processing.context_zones"
 download-gfm = "python -m download.download_gfm"
 gfm-evidence = "python -m processing.gfm_evidence"
-download-glofas = "python -m download.download_glofas"
+download-discharge = "python -m download.download_discharge"
+discharge-prepare = "python -m processing.discharge_prepare"
 rp-bounds = "python -m processing.rp_bounds"
 validate = "python -m processing.validate"
 test-pipeline = "python -m tests.test_pipeline"
@@ -53,3 +56,4 @@ implied-segments = "python -m processing.implied_segments"
 implied-protection = "python -m processing.implied_protection"
 implied-evaluate = "python -m processing.implied_evaluate"
 test-stage-e = "python -m tests.test_stage_e"
+test-stage-f = "python -m tests.test_stage_f"

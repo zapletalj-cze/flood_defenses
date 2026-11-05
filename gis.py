@@ -3361,6 +3361,209 @@ def _least_cost_path(cost, start, end):
     return path, dist[end]
 
 
+class Discharge:
+    """
+    River discharge of gridded hydrological products (GloFAS, EFAS), used only to turn
+    observed outcomes into return periods (Stage F)
+    """
+
+    @staticmethod
+    def band_times(ds):
+        """
+        Valid time of every band of a GRIB or NetCDF dataset
+        :param ds: gdal.Dataset
+        :return: int64 array of seconds since 1970-01-01 UTC
+        """
+        metadata = ds.GetMetadata()
+        list_t = []
+        for b in range(1, ds.RasterCount + 1):
+            meta = ds.GetRasterBand(b).GetMetadata()
+            if "GRIB_VALID_TIME" in meta:
+                list_t.append(int(meta["GRIB_VALID_TIME"].split()[0]))
+                continue
+            # NetCDF: a valid_time dimension, else the only time dimension; a step dimension or several time
+            # dimensions leave the valid time open and stop the run instead of guessing
+            dims = [k for k in meta if k.startswith("NETCDF_DIM_")]
+            times = [k for k in dims if "time" in k.lower()]
+            if "NETCDF_DIM_valid_time" in times:
+                dim = "NETCDF_DIM_valid_time"
+            elif len(times) == 1 and not any(k.lower().endswith("step") for k in dims):
+                dim = times[0]
+            else:
+                raise ValueError(
+                    f"Band {b}: no unambiguous valid time among the dimensions {dims}."
+                )
+            units = metadata.get(f"{dim[len('NETCDF_DIM_'):]}#units", "")
+            unit, _, reference = units.partition(" since ")
+            step = {
+                "days": 86400,
+                "day": 86400,
+                "hours": 3600,
+                "hour": 3600,
+                "minutes": 60,
+                "minute": 60,
+                "seconds": 1,
+                "second": 1,
+            }.get(unit.strip())
+            if step is None or not reference:
+                raise ValueError(f"Unsupported time units {units!r}.")
+            t0 = pd.Timestamp(reference.strip())
+            t0 = t0.tz_localize("UTC") if t0.tzinfo is None else t0.tz_convert("UTC")
+            list_t.append(int(round(t0.timestamp() + float(meta[dim]) * step)))
+        return np.array(list_t, np.int64)
+
+    @staticmethod
+    def period_days(valid_seconds, marks):
+        """
+        Day of the averaging period of each value. With marks = "end" the valid time
+        closes the period (a 24 h value stamped 00 UTC belongs to the day before, a 6 h
+        value stamped 06 UTC to its own day); with "start" it opens it.
+        :param valid_seconds: valid times in seconds since 1970-01-01 UTC
+        :param marks: "end" or "start"
+        :return: datetime64[D] array
+        """
+        t = np.asarray(valid_seconds, np.int64) - (1 if marks == "end" else 0)
+        return (t // 86400).astype("datetime64[D]")
+
+    @staticmethod
+    def aggregate_daily(days, values, how, steps_per_day):
+        """
+        Daily values from the steps of each day: mean (daily_mean) or maximum
+        (daily_max); a day with fewer than steps_per_day finite steps is NaN
+        :param days: day of each step (datetime64[D])
+        :param values: (n_steps, n_cells) array
+        :param how: daily_mean or daily_max
+        :param steps_per_day: expected steps per day (24 / step hours)
+        :return: (sorted unique days, (n_days, n_cells) float32)
+        """
+        order = np.argsort(days, kind="stable")
+        days, values = np.asarray(days)[order], np.asarray(values, np.float64)[order]
+        uniq, first = np.unique(days, return_index=True)
+        finite = np.isfinite(values)
+        n = np.add.reduceat(finite.astype(np.int64), first, axis=0)
+        if how == "daily_max":
+            agg = np.maximum.reduceat(np.where(finite, values, -np.inf), first, axis=0)
+        else:
+            agg = np.add.reduceat(
+                np.where(finite, values, 0.0), first, axis=0
+            ) / np.maximum(n, 1)
+        agg[n < steps_per_day] = np.nan
+        return uniq, agg.astype(np.float32)
+
+    @staticmethod
+    def annual_maxima(days, values, start_month):
+        """
+        Maxima per hydrological year starting on the first day of start_month (labelled
+        by the calendar year it starts in). A year counts only when every day is present;
+        a cell's year also needs every value finite.
+        :param days: sorted unique days (datetime64[D])
+        :param values: (n_days, n_cells) daily values
+        :param start_month: 1-12
+        :return: (years, (n_years, n_cells) maxima with NaN for incomplete years)
+        """
+        index = pd.DatetimeIndex(np.asarray(days, "datetime64[D]"))
+        hyear = np.asarray(index.year - (index.month < start_month))
+        years = np.unique(hyear)
+        maxima = np.full((len(years), values.shape[1]), np.nan, np.float32)
+        for i, y in enumerate(years):
+            sel = hyear == y
+            begin = pd.Timestamp(year=int(y), month=start_month, day=1)
+            if sel.sum() < (begin + pd.DateOffset(years=1) - begin).days:
+                continue
+            block = values[sel]
+            complete = np.isfinite(block).all(axis=0)
+            maxima[i, complete] = block[:, complete].max(axis=0)
+        return years, maxima
+
+    @staticmethod
+    def gumbel_fits(maxima, min_years):
+        """
+        Gumbel fit by L-moments per cell (column) of its complete years, and the RMSE
+        between the sorted maxima and the fitted quantiles at Gringorten plotting
+        positions (i - 0.44) / (n + 0.12)
+        :param maxima: (n_years, n_cells), NaN for incomplete years
+        :param min_years: fewer complete years give NaN
+        :return: (n_years per cell, xi, alpha, fit_rmse)
+        """
+        n_cells = maxima.shape[1]
+        out = [np.zeros(n_cells, np.int64)] + [
+            np.full(n_cells, np.nan) for _ in range(3)
+        ]
+        for j in range(n_cells):
+            x = np.sort(maxima[:, j][np.isfinite(maxima[:, j])])
+            out[0][j] = len(x)
+            if len(x) < max(min_years, 2):
+                continue
+            xi, alpha = Stats.gumbel_lmoments(x)
+            p = (np.arange(1, len(x) + 1) - 0.44) / (len(x) + 0.12)
+            fitted = xi - alpha * np.log(-np.log(p))
+            out[1][j], out[2][j] = xi, alpha
+            out[3][j] = float(np.sqrt(np.mean((x - fitted) ** 2)))
+        return tuple(out)
+
+    @staticmethod
+    def match(
+        lon,
+        lat,
+        river_area_km2,
+        cell_lon,
+        cell_lat,
+        cell_area_km2,
+        radius_km,
+        ratio_min,
+        ratio_max,
+        same_river=None,
+    ):
+        """
+        Discharge cell of a river location: candidates within radius_km (great circle)
+        whose upstream area ratio (cell / river) lies in [ratio_min, ratio_max]. Cells
+        flagged in same_river (near the river feature of the location) are preferred;
+        then the smallest |log ratio|, then the smallest distance.
+        :param same_river: bool per cell, or None
+        :return: dict index (-1 = none), distance_km, ratio, same_river, quality
+                 (good: same river; weak: other candidates only; none)
+        """
+        cell_lon, cell_lat = np.asarray(cell_lon, float), np.asarray(cell_lat, float)
+        p1, p2 = np.radians(lat), np.radians(cell_lat)
+        a = (
+            np.sin((p2 - p1) / 2) ** 2
+            + np.cos(p1) * np.cos(p2) * np.sin(np.radians(cell_lon - lon) / 2) ** 2
+        )
+        dist = 2 * 6371.0088 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+        ratio = (
+            np.asarray(cell_area_km2, float) / river_area_km2
+            if river_area_km2 > 0
+            else np.full(len(dist), np.nan)
+        )
+        ok = (dist <= radius_km) & (ratio >= ratio_min) & (ratio <= ratio_max)
+        same = (
+            np.zeros(len(dist), bool)
+            if same_river is None
+            else np.asarray(same_river, bool)
+        )
+        result = {
+            "index": -1,
+            "distance_km": np.nan,
+            "ratio": np.nan,
+            "same_river": False,
+            "quality": "none",
+        }
+        if not ok.any():
+            return result
+        pool = np.flatnonzero(ok & same) if (ok & same).any() else np.flatnonzero(ok)
+        best = pool[np.lexsort((dist[pool], np.abs(np.log(ratio[pool]))))[0]]
+        result.update(
+            {
+                "index": int(best),
+                "distance_km": float(dist[best]),
+                "ratio": float(ratio[best]),
+                "same_river": bool(same[best]),
+                "quality": "good" if same[best] else "weak",
+            }
+        )
+        return result
+
+
 class Evidence:
     """
     Tests of protected regions against flood scenes (the logic of gfm_evidence.py,
@@ -3774,10 +3977,75 @@ class Config:
         "implied.plots.show_max": "int",
         "implied.plots.plot_all_in_units": "str_list",
         "country.compartments.use_snapped_rivers": "bool",
+        # Stage F: discharge sources GloFAS and EFAS
+        "discharge.sources": "str_list",
+        "discharge.source_mode": "str",
+        "discharge.ewds_api_url": "str",
+        "discharge.raw_dir": "str",
+        "discharge.aggregation": "str",
+        "discharge.hydrological_year_start_month": "int",
+        "discharge.min_years": "int",
+        "discharge.max_rp_extrapolation": "float",
+        "discharge.flooded_window_days": "int",
+        "discharge.max_parallel_requests": "int",
+        "discharge.bbox_buffer_deg": "float",
+        "discharge.rp_disagreement_ratio": "float",
+        "discharge.match_river_distance_m": "float",
+        **{
+            f"discharge.{src}.{key}": kind
+            for src in ("glofas", "efas")
+            for key, kind in (
+                ("dataset_id", "str"),
+                ("request", "table"),
+                ("data_format", "str"),
+                ("download_format", "str"),
+                ("first_year", "int"),
+                ("last_year", "int"),
+                ("request_unit", "str"),
+                ("time_keys", "table"),
+                ("area_key", "str"),
+                ("step_hours", "int"),
+                ("valid_time_marks", "str"),
+                ("netcdf_variable", "str"),
+                ("upstream_area_file", "str"),
+                ("upstream_area_variable", "str"),
+                ("upstream_area_to_km2", "float"),
+                ("min_upstream_area_km2", "float"),
+                ("search_radius_km", "float"),
+                ("upstream_ratio_min", "float"),
+                ("upstream_ratio_max", "float"),
+            )
+        },
     }
     # Keys added after a stage was done: a missing key takes this default (logged), so older configurations stay valid.
     DEFAULTS = {
         "country.compartments.use_snapped_rivers": False,
+        # plot settings of Stage E, also used by Stage F scripts
+        "implied.plots.enabled": True,
+        "implied.plots.dpi": 120,
+        "implied.plots.max_per_type": 200,
+        "implied.plots.sample_seed": 42,
+        "implied.plots.show_max": 10,
+        "implied.plots.plot_all_in_units": [],
+    }
+    # Keys replaced by a later stage: a missing new key takes the value of its old key, with a warning (Stage F
+    # replaces the GloFAS keys of [sources] and [evidence]).
+    MIGRATIONS = {
+        "discharge.glofas.dataset_id": "sources.glofas_dataset_id",
+        "discharge.glofas.request": "sources.glofas_request",
+        "discharge.glofas.time_keys": "sources.glofas_time_keys",
+        "discharge.glofas.area_key": "sources.glofas_area_key",
+        "discharge.glofas.first_year": "sources.glofas_first_year",
+        "discharge.glofas.last_year": "sources.glofas_last_year",
+        "discharge.glofas.netcdf_variable": "sources.glofas_discharge_variable",
+        "discharge.glofas.upstream_area_file": "sources.glofas_upstream_area_file",
+        "discharge.glofas.upstream_area_variable": "sources.glofas_upstream_area_variable",
+        "discharge.glofas.upstream_area_to_km2": "sources.glofas_upstream_area_to_km2",
+        "discharge.glofas.min_upstream_area_km2": "sources.glofas_min_upstream_area_km2",
+        "discharge.glofas.search_radius_km": "evidence.glofas_search_radius_km",
+        "discharge.glofas.upstream_ratio_min": "evidence.upstream_ratio_min",
+        "discharge.glofas.upstream_ratio_max": "evidence.upstream_ratio_max",
+        "discharge.flooded_window_days": "evidence.flooded_window_days",
     }
     CONTEXTS = ("industrial", "dense_urban", "urban", "rural")
     ALLOWED = {
@@ -3785,6 +4053,15 @@ class Config:
         "country.dtm_compress": {"ZSTD", "DEFLATE", "LZW"},
         "general.log_level": {"DEBUG", "INFO", "WARNING", "ERROR"},
         "implied.built_source": {"footprints", "ghsl", "max"},
+        "discharge.source_mode": {"prefer_efas", "prefer_glofas", "conservative_both"},
+        "discharge.aggregation": {"daily_mean", "daily_max"},
+        **{
+            f"discharge.{s}.request_unit": {"year", "month"} for s in ("glofas", "efas")
+        },
+        **{
+            f"discharge.{s}.valid_time_marks": {"end", "start"}
+            for s in ("glofas", "efas")
+        },
         "implied.snap.chainage_origin": {"downstream", "upstream"},
     }
 
@@ -3847,15 +4124,29 @@ class Config:
             try:
                 value = Config.get(cfg, key)
             except (KeyError, TypeError):
-                if key not in Config.DEFAULTS:
+                old = Config.MIGRATIONS.get(key)
+                try:
+                    value = Config.get(cfg, old) if old else None
+                except (KeyError, TypeError):
+                    value = None
+                if value is not None:
+                    log.warning(
+                        "%s missing: taken from the replaced key %s; update the configuration.",
+                        key,
+                        old,
+                    )
+                elif key in Config.DEFAULTS:
+                    value = Config.DEFAULTS[key]
+                    log.info(
+                        "%s not configured: default %r.", key, Config.DEFAULTS[key]
+                    )
+                else:
                     list_err.append(f"{key}: missing")
                     continue
-                value = Config.DEFAULTS[key]
                 node = cfg
                 for part in key.split(".")[:-1]:
                     node = node.setdefault(part, {})
                 node[key.split(".")[-1]] = value
-                log.info("%s not configured: default %r.", key, value)
             checked, problem = Config._check_value(kind, value)
             if problem:
                 list_err.append(f"{key}: {problem}")
@@ -4109,6 +4400,34 @@ class Config:
                 )
         if "implied.plots.dpi" in keys and implied["plots"]["dpi"] < 1:
             list_err.append("implied.plots.dpi must be at least 1")
+        dis = cfg.get("discharge", {})
+        if "discharge.sources" in keys and not set(dis["sources"]) <= {
+            "glofas",
+            "efas",
+        }:
+            list_err.append("discharge.sources may contain glofas and efas only")
+        if (
+            "discharge.hydrological_year_start_month" in keys
+            and not 1 <= dis["hydrological_year_start_month"] <= 12
+        ):
+            list_err.append("discharge.hydrological_year_start_month must be 1-12")
+        for src in ("glofas", "efas"):
+            if f"discharge.{src}.step_hours" in keys and dis[src]["step_hours"] not in (
+                1,
+                3,
+                6,
+                12,
+                24,
+            ):
+                list_err.append(f"discharge.{src}.step_hours must divide 24 hours")
+            if {
+                f"discharge.{src}.upstream_ratio_min",
+                f"discharge.{src}.upstream_ratio_max",
+            } <= keys:
+                if dis[src]["upstream_ratio_min"] > dis[src]["upstream_ratio_max"]:
+                    list_err.append(
+                        f"discharge.{src}.upstream_ratio_min exceeds upstream_ratio_max"
+                    )
         return list_err
 
     @staticmethod
@@ -4414,6 +4733,16 @@ class Stats:
         with np.errstate(over="ignore", divide="ignore"):
             exceedance = -np.expm1(-np.exp(-(np.asarray(q, dtype=float) - xi) / alpha))
             return 1.0 / exceedance
+
+    @staticmethod
+    def gumbel_q(rp, xi, alpha):
+        """
+        Discharge of a return period under a Gumbel distribution (inverse of gumbel_rp):
+        xi - alpha * ln(-ln(1 - 1 / rp))
+        :param rp: return period(s) in years, > 1
+        :return: float or array
+        """
+        return xi - alpha * np.log(-np.log1p(-1.0 / np.asarray(rp, dtype=float)))
 
     @staticmethod
     def percentile_rank(values):

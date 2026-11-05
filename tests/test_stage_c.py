@@ -361,10 +361,18 @@ def write_netcdf(path, variable, values, time_values=None):
 
 
 # Daily values valid at the end of their day (time = day + 1 in "days since"), as glofas_valid_time_ends_day says.
+# Stage F: one file per year in a local EWDS folder (ewds_api_url = file://...), as download_discharge.py requests them.
 elapsed = (days - np.datetime64("1981-01-01")).astype(int) + 1.0
-split = int(np.searchsorted(days, np.datetime64("2001-01-01")))
-write_netcdf(data / "glofas_1981_2000.nc", "dis24", discharge[:split], elapsed[:split])
-write_netcdf(data / "glofas_2001_2021.nc", "dis24", discharge[split:], elapsed[split:])
+for folder in ("ewds_nc", "ewds_grib"):
+    (data / folder / "glofas").mkdir(parents=True, exist_ok=True)
+for year in range(1981, 2022):
+    sel = years == year
+    write_netcdf(
+        data / "ewds_nc" / "glofas" / f"{year}.nc",
+        "dis24",
+        discharge[sel],
+        elapsed[sel],
+    )
 write_netcdf(data / "uparea.nc", "uparea", uparea)
 wgs84 = osr.SpatialReference()
 wgs84.ImportFromEPSG(4326)
@@ -390,7 +398,7 @@ for year in (2019, 2020, 2021):
             f"REF_TIME={valid_time:%Y-%m-%dT%H:%M:%SZ} PROD_STATUS=0 TYPE=1"
         )
     gdal.GetDriverByName("GRIB").CreateCopy(
-        str(data / f"glofas_{year}.grib"), mem, options=list_opt
+        str(data / "ewds_grib" / "glofas" / f"{year}.grib"), mem, options=list_opt
     )
     mem = None
 
@@ -422,23 +430,64 @@ gfm_flood_values = [1]
 gfm_exclusion_values = [1]
 gfm_reference_water_values = [1]
 gfm_nodata_values = [255]
-glofas_enabled = true
-glofas_dataset_id = "cems-glofas-historical"
-glofas_request = {{}}
-glofas_time_keys = {{ year = "hyear", month = "hmonth", day = "hday" }}
-glofas_area_key = "area"
-glofas_first_year = 1981
-glofas_last_year = 2021
-glofas_file_extension = "nc"
-glofas_files = ["{data / 'glofas_1981_2000.nc'}", "{data / 'glofas_2001_2021.nc'}"]
-glofas_discharge_variable = "dis24"
-glofas_upstream_area_file = "{data / 'uparea.nc'}"
-glofas_upstream_area_url = ""
-glofas_upstream_area_variable = "uparea"
-glofas_upstream_area_to_km2 = 1e-6
-glofas_min_upstream_area_km2 = 5.0
-glofas_min_days_per_year = 330
-glofas_valid_time_ends_day = true
+"""
+discharge = f"""
+[discharge]
+sources = ["glofas"]
+source_mode = "conservative_both"
+ewds_api_url = "file://{data / 'ewds_nc'}"
+raw_dir = "{root / 'discharge_raw'}"
+aggregation = "daily_mean"
+hydrological_year_start_month = 1
+min_years = 20
+max_rp_extrapolation = 1000
+flooded_window_days = 3
+max_parallel_requests = 2
+bbox_buffer_deg = 0.1
+rp_disagreement_ratio = 3.0
+match_river_distance_m = 500.0
+
+[discharge.glofas]
+dataset_id = "cems-glofas-historical"
+request = {{ product_type = ["consolidated"] }}
+data_format = "netcdf"
+download_format = ""
+first_year = 1981
+last_year = 2021
+request_unit = "year"
+time_keys = {{ year = "hyear", month = "hmonth", day = "hday" }}
+area_key = "area"
+step_hours = 24
+valid_time_marks = "end"
+netcdf_variable = "dis24"
+upstream_area_file = "{data / 'uparea.nc'}"
+upstream_area_variable = "uparea"
+upstream_area_to_km2 = 1e-6
+min_upstream_area_km2 = 5.0
+search_radius_km = 5.0
+upstream_ratio_min = 0.7
+upstream_ratio_max = 1.3
+
+[discharge.efas]
+dataset_id = "efas-historical"
+request = {{}}
+data_format = ""
+download_format = ""
+first_year = 0
+last_year = 0
+request_unit = "month"
+time_keys = {{}}
+area_key = ""
+step_hours = 6
+valid_time_marks = "end"
+netcdf_variable = ""
+upstream_area_file = ""
+upstream_area_variable = ""
+upstream_area_to_km2 = 0
+min_upstream_area_km2 = 0
+search_radius_km = 2.0
+upstream_ratio_min = 0.7
+upstream_ratio_max = 1.3
 """
 evidence = """
 [evidence]
@@ -447,10 +496,6 @@ min_valid_pixels = 500
 f_wet_comparison = 0.5
 f_dry_inside = 0.1
 f_wet_inside = 0.5
-flooded_window_days = 3
-glofas_search_radius_km = 5.0
-upstream_ratio_min = 0.7
-upstream_ratio_max = 1.3
 river_level_percentile = 90.0
 hint_margin_m = 0.5
 hint_dry_share = 0.8
@@ -458,19 +503,22 @@ hint_min_scenes = 2
 hint_exclusion_m = 50.0
 """
 config = base_config.replace("[countries.T4]\n", "[countries.T4]\n" + country_keys, 1)
-config = config.replace("[sources]\n", "[sources]\n" + source_keys, 1) + evidence
+config = (
+    config.replace("[sources]\n", "[sources]\n" + source_keys, 1) + evidence + discharge
+)
 (root / "test_c.toml").write_text(config)
-grib_files = ", ".join(f'"{data / f"glofas_{y}.grib"}"' for y in (2019, 2020, 2021))
+nc_url, grib_url = f"file://{data / 'ewds_nc'}", f"file://{data / 'ewds_grib'}"
+raw_nc, raw_grib = root / "discharge_raw", root / "discharge_raw_grib"
 grib_config = (
     config.replace(
         f'output_dir = "{root / "output"}"', f'output_dir = "{root / "output_grib"}"'
     )
-    .replace(
-        f"""glofas_files = ["{data / 'glofas_1981_2000.nc'}", "{data / 'glofas_2001_2021.nc'}"]""",
-        f"glofas_files = [{grib_files}]",
-    )
-    .replace('glofas_discharge_variable = "dis24"', 'glofas_discharge_variable = ""')
-    .replace('glofas_file_extension = "nc"', 'glofas_file_extension = "grib"')
+    .replace(f'ewds_api_url = "{nc_url}"', f'ewds_api_url = "{grib_url}"')
+    .replace(f'raw_dir = "{raw_nc}"', f'raw_dir = "{raw_grib}"')
+    .replace('data_format = "netcdf"', 'data_format = "grib"')
+    .replace("first_year = 1981", "first_year = 2019")
+    .replace('netcdf_variable = "dis24"', 'netcdf_variable = ""')
+    .replace("min_years = 20", "min_years = 2")
 )
 (root / "test_c_grib.toml").write_text(grib_config)
 (root / "output_grib" / "T4").mkdir(parents=True, exist_ok=True)
@@ -662,9 +710,11 @@ list_res.append(
     )
 )
 
-# --- download_glofas.py: NetCDF files ---
-proc = run("download.download_glofas", "download_glofas_netcdf")
-glofas = np.load(out / "glofas_discharge.npz") if proc.returncode == 0 else None
+# --- Stage F: download_discharge.py (local EWDS folder) and discharge_prepare.py, NetCDF files ---
+proc = run("download.download_discharge", "download_discharge_netcdf")
+if proc.returncode == 0:
+    proc = run("processing.discharge_prepare", "discharge_prepare_netcdf")
+glofas = np.load(out / "discharge_glofas.npz") if proc.returncode == 0 else None
 if glofas is not None:
     dates = glofas["dates"].astype("datetime64[D]")
     main = int(np.flatnonzero(np.isclose(glofas["upstream_area_km2"], 5000.0))[0])
@@ -676,7 +726,7 @@ if glofas is not None:
             dates[0] == np.datetime64("1981-01-01")
             and dates[-1] == np.datetime64("2021-12-31")
             and len(dates) == len(days)
-            and glofas["discharge"][a_day, main] == np.float32(special["2016-11-15"]),
+            and glofas["values"][a_day, main] == np.float32(special["2016-11-15"]),
         )
     )
     list_res.append(
@@ -686,22 +736,27 @@ if glofas is not None:
             and np.isclose(glofas["upstream_area_km2"], 4600.0).sum() == 1,
         )
     )
-    series = pd.Series(glofas["discharge"][:, main].astype(float))
+    series = pd.Series(glofas["values"][:, main].astype(float))
     maxima = series.groupby(dates.astype("datetime64[Y]").astype(int)).max().to_numpy()
     xi, alpha = gis.Stats.gumbel_lmoments(maxima)
     rp_median = float(gis.Stats.gumbel_rp(np.median(maxima), xi, alpha))
-    rp_a = float(gis.Stats.gumbel_rp(glofas["discharge"][a_day, main], xi, alpha))
+    rp_a = float(gis.Stats.gumbel_rp(glofas["values"][a_day, main], xi, alpha))
     rp_b_flooded = float(gis.Stats.gumbel_rp(1450.0, xi, alpha))
-    rp_e = float(gis.Stats.gumbel_rp(glofas["discharge"][e_day, main], xi, alpha))
+    rp_e = float(gis.Stats.gumbel_rp(glofas["values"][e_day, main], xi, alpha))
+    cells = gpd.read_file(out / "discharge_cells_glofas.gpkg").set_index("cell_id")
+    fitted = cells.loc[int(glofas["cell_id"][main])]
     list_res.append(
         (
             f"Gumbel fit of the GloFAS annual maxima: xi {xi:.0f}, alpha {alpha:.0f}; median annual maximum "
-            f"has RP {rp_median:.2f}",
-            abs(rp_median - 2.0) < 0.1,
+            f"has RP {rp_median:.2f}; discharge_cells_glofas.gpkg holds the same fit ({int(fitted['n_years'])} years)",
+            abs(rp_median - 2.0) < 0.1
+            and abs(fitted["gumbel_xi"] - xi) < 1e-3 * xi
+            and abs(fitted["gumbel_alpha"] - alpha) < 1e-3 * alpha
+            and int(fitted["n_years"]) == 41,
         )
     )
 else:
-    list_res.append(("download_glofas (NetCDF) runs", False))
+    list_res.append(("download_discharge and discharge_prepare (NetCDF) run", False))
 sample = np.random.default_rng(5).gumbel(1000.0, 300.0, 20000)
 fit = gis.Stats.gumbel_lmoments(sample)
 rp_sample = float(gis.Stats.gumbel_rp(np.median(sample), *fit))
@@ -717,20 +772,26 @@ list_res.append(
     )
 )
 
-# --- download_glofas.py: GRIB files of 2019-2021 give the same series ---
+# --- The same chain with GRIB files of 2019-2021 gives the same series ---
 proc = run(
-    "download.download_glofas", "download_glofas_grib", config="test_c_grib.toml"
+    "download.download_discharge", "download_discharge_grib", config="test_c_grib.toml"
 )
+if proc.returncode == 0:
+    proc = run(
+        "processing.discharge_prepare",
+        "discharge_prepare_grib",
+        config="test_c_grib.toml",
+    )
 grib_ok = False
 if proc.returncode == 0 and glofas is not None:
-    grib = np.load(root / "output_grib" / "T4" / "glofas_discharge.npz")
+    grib = np.load(root / "output_grib" / "T4" / "discharge_glofas.npz")
     grib_dates = grib["dates"].astype("datetime64[D]")
     rows = np.searchsorted(dates, grib_dates)
     grib_ok = (
         grib_dates[0] == np.datetime64("2019-01-01")
         and grib_dates[-1] == np.datetime64("2021-12-31")
         and np.array_equal(grib["lon"], glofas["lon"])
-        and np.array_equal(grib["discharge"], glofas["discharge"][rows])
+        and np.array_equal(grib["values"], glofas["values"][rows])
     )
 list_res.append(("GloFAS GRIB (GRIB_VALID_TIME) equals the NetCDF series", grib_ok))
 
@@ -747,8 +808,8 @@ if len(gdf_bnd) and glofas is not None:
         (
             "matching: rings 1 and 2 matched to the main GloFAS cell (ratio 1), not the decoy (ratio 0.92)",
             all(
-                after[k].glofas_cell == main
-                and abs(after[k].glofas_area_ratio - 1.0) < 1e-9
+                after[k].glofas_cell_id == int(glofas["cell_id"][main])
+                and abs(after[k].glofas_ratio - 1.0) < 1e-9
                 and after[k].glofas_distance_km < 5.0
                 for k in ("R1", "R2")
             ),

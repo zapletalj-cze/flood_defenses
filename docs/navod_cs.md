@@ -45,7 +45,8 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 | 4 | `compartments`: nejdřív dvě jednotky (`DEFENSES_UNITS`), pak vše | `compartments.gpkg`, `barriers.gpkg`, `performance.json` |
 | 5 | `download-ghsl`, `rp-index` | `compartments_rp.gpkg` (`rp`, `rp_low`, `rp_high`) |
 | volitelně | `download-worldcover`, `hand-yz`, `lulc.enabled = true`, znovu `rp-index` | `exposure_lulc.csv` |
-| volitelně | `download-gfm`, `gfm-evidence`, `download-glofas`, `rp-bounds` | `gfm_evidence.gpkg`, `obs_rp_low`, `obs_rp_high` |
+| volitelně | `download-gfm`, `gfm-evidence` | `gfm_evidence.gpkg` |
+| Stage F | `download-discharge`, `discharge-prepare`, `rp-bounds` | `download_log.csv`, `discharge_cells_<zdroj>.gpkg`, `event_rp.csv`, `obs_rp_low`, `obs_rp_high`, `plots/discharge/base/index.html` |
 | volitelně | `validate` | `validation.json` |
 | Stage D | `download-clms`, `context-zones` | `corine_codes.tif`, `urban_atlas.gpkg`, `zones.gpkg` |
 | Stage E1 | `snap-rivers` | `rivers_snapped.gpkg`, `river_points.gpkg`, `plots/implied/base/index.html` |
@@ -56,6 +57,17 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 **Stage E** je experimentální a nejdřív se pouští na pilotní jednotky (`[implied] units`). Výsledky se do
 `defenses_clip.gpkg` nedostanou, dokud není `include_implied = true`.
 
+**Stage F** (průtoky GloFAS a EFAS z EWDS):
+- **Přístup.** Osobní klíč patří do `~/.cdsapirc` nebo do proměnné `CDSAPI_KEY`, nikdy do
+  repozitáře. Licence obou datasetů je potřeba přijmout ve formuláři EWDS.
+- **Hodnoty požadavků** (`request`, `data_format`, roky, `time_keys`, `area_key`) se
+  kopírují z formuláře EWDS („Show API request“). Prázdné položky skript ohlásí a zdroj
+  přeskočí.
+- **Kontrola časové konvence.** V logu `discharge-prepare` je řádek „valid times … ->
+  days …“. Ověřte ho na staženém souboru a na známé povodni.
+- **Opakované spuštění** `download-discharge` stáhne jen chybějící nebo neúplné soubory.
+- **Bez EFAS.** Když EFAS není dostupný, běží vše jen s GloFAS.
+
 ## 4. Po změně spustit znovu
 
 | Změna | Spustit |
@@ -65,6 +77,7 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 | třídy, strop, váhy, ruční zásahy | `rp-index`, pak `rp-bounds` |
 | hodnoty land cover | `hand-yz`, pak `rp-index`, `rp-bounds` |
 | nové satelitní scény | `download-gfm`, `gfm-evidence`, `rp-bounds` |
+| parametry `[discharge]`, nové roky | `download-discharge`, `discharge-prepare`, `rp-bounds` |
 | řeky (Stage E) | `snap-rivers`, `implied-segments` s FORCE, `implied-protection` |
 | parametry `[implied]`, budovy | `implied-protection`, pak `implied-evaluate` |
 | `use_snapped_rivers = true` | `compartments` s FORCE, pak navazující kroky |
@@ -80,9 +93,12 @@ Po každém `rp-index` znovu `rp-bounds`, pokud se používají pozorování.
 - **Neověřené URL:** data stáhněte ručně.
   - **OSM:** `osm_pbf`.
   - **GHSL:** šablona `file://…`.
-  - **GloFAS:** `glofas_files`.
+  - **GloFAS, EFAS:** soubory z formuláře EWDS uložte do `<složka>/<zdroj>/<rok>[_<měsíc>].<přípona>` a
+    nastavte `ewds_api_url = "file:///<složka>"` (ve Windows např. `file:///C:/data/ewds`).
 - **Pomalé čtení DTM:** `convert_dtm = true` (varianta A), pak znovu `prepare-dtm`.
 - **Kontrola celého řetězce:** `test-pipeline`, `test-stage-b`, `test-stage-c`,
-  `test-hand-yz`, `test-stage-d`, `test-stage-e`.
-- **Grafy Stage E:** `index.html` ve složce `plots/implied/<běh>/`; zobrazení během výpočtu
-  `$env:DEFENSES_SHOW_PLOTS = "1"`.
+  `test-hand-yz`, `test-stage-d`, `test-stage-e`, `test-stage-f`.
+- **Grafy Stage E a F:** `index.html` ve složce `plots/implied/<běh>/`, resp.
+  `plots/discharge/<běh>/`. Zobrazení během výpočtu: `$env:DEFENSES_SHOW_PLOTS = "1"`.
+- **Pomalé stahování EWDS.** Rychlost určuje fronta služby. Měsíc 6hodinových dat EFAS
+  může trvat dlouho; `max_parallel_requests` zvyšujte opatrně.

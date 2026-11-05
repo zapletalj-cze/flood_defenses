@@ -97,8 +97,7 @@ written only in a scratch folder, to measure the runtime figures.
   nodata, compression, block size, overviews, file size) and the same benchmark (20 native 4096² windows, the same
   windows through `gdal.Warp`, a sequential read). You can then:
   - run it and send me `dtm_inspection.csv` and `dtm_benchmark.csv`, or
-  - share the data folder through Remote Control (Claude desktop app: Settings, Claude Code, Remote Control), so
-    I can run it.
+  - share the data folder with the remote session (Remote Control), so I can run it.
 - **Reference until then.** A DSM with the same storage layout as the benchmark DTM reads like it (README §13.2).
   - **Strip layout:** 0.74–0.81 s per 4096² warp window.
   - **Tiled with overviews:** 0.34–0.38 s.

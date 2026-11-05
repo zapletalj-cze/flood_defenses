@@ -3,9 +3,9 @@
 The package derives **compartments**: areas protected by flood levees. Each compartment
 gets a return period (RP) of protection. The layer clips fluvial hazard maps in
 post-processing, so it is built **only from terrain, levee lines, the river network and
-free open data** (OpenStreetMap, GHSL, Copernicus GFM and GloFAS). No hazard map, hydraulic
+free open data** (OpenStreetMap, GHSL, Copernicus GFM, GloFAS and EFAS). No hazard map, hydraulic
 model output, local hazard dataset or FABDEM is used anywhere. Satellite flood extents
-(GFM) and reanalysed discharge (GloFAS) enter only as *observations* that bound the
+(GFM) and simulated discharge (GloFAS, EFAS) enter only as *observations* that bound the
 modelled return period; they never draw a compartment.
 
 **Czech quick guide:** [docs/navod_cs.md](docs/navod_cs.md): a short guide to running the
@@ -20,10 +20,11 @@ explicitly.
 | A | `gis.py` additions, `prepare_dtm.py`, `build_units.py`, `compartments.py` | done, tested, benchmarked |
 | A+ | faster kernels; fixes B1–B4; gap filling for water surfaces | done, tested, benchmarked |
 | B | `download_osm.py`, `osm_hydraulics.py`, `download_ghsl.py`, `rp_index.py` | done, tested on synthetic data; download URLs not verified |
-| C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
+| C | `download_gfm.py`, `gfm_evidence.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes not verified; the GloFAS part is replaced by Stage F |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
 | E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E5 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`, `implied_protection.py`, `implied_evaluate.py`; 44 checks); integration with D4 outputs once they exist |
+| F | discharge sources GloFAS and EFAS (§11): `download_discharge.py`, `discharge_prepare.py`, `rp_bounds.py` rewritten | **F2–F5 done**, tested on synthetic data (15 checks); **F1 blocked**: the EWDS is not reachable from the session and the test requests need your key, so request values, time convention and EFAS access are not verified |
 
 ---
 
@@ -39,7 +40,7 @@ explicitly.
 8. [Water sources and pumping stations from OpenStreetMap](#8-water-sources-and-pumping-stations-from-openstreetmap)
 9. [Return period index](#9-return-period-index)
 10. [Observational evidence: Copernicus GFM](#10-observational-evidence-copernicus-gfm)
-11. [Observed bounds of the return period: GloFAS](#11-observed-bounds-of-the-return-period-glofas)
+11. [Observed bounds of the return period: GloFAS and EFAS (Stage F)](#11-observed-bounds-of-the-return-period-glofas-and-efas-stage-f)
 12. [Validation](#12-validation)
 13. [Measured performance](#13-measured-performance)
 14. [Tests](#14-tests)
@@ -78,10 +79,10 @@ packaging:
 ```
 pixi run prepare-dtm        pixi run download-osm       pixi run download-gfm       pixi run test-kernels
 pixi run build-units        pixi run osm-hydraulics     pixi run gfm-evidence       pixi run test-pipeline
-pixi run compartments       pixi run download-ghsl      pixi run download-glofas    pixi run test-stage-b
-                            pixi run rp-index           pixi run rp-bounds          pixi run test-stage-c
-pixi run download-worldcover                            pixi run validate           pixi run test-hand-yz
-pixi run hand-yz
+pixi run compartments       pixi run download-ghsl      pixi run download-discharge pixi run test-stage-b
+                            pixi run rp-index           pixi run discharge-prepare  pixi run test-stage-c
+pixi run download-worldcover                            pixi run rp-bounds          pixi run test-hand-yz
+pixi run hand-yz                                        pixi run validate           pixi run test-stage-f
 ```
 
 `pixi run python -m processing.compartments` works the same way. Running a script by its
@@ -93,21 +94,23 @@ instead of the root.
 - `gdal ≥ 3.11` (`MEM` vector datasets; the OSM driver; SpatiaLite SQL for the OSM
   extraction),
 - `libgdal-netcdf`, `libgdal-grib`: GDAL's NetCDF and GRIB drivers, which conda-forge
-  ships as separate plugin packages (GloFAS files),
+  ships as separate plugin packages (GloFAS and EFAS files),
 - `numpy`, `scipy`, `numba`, `geopandas ≥ 1.0`, `shapely ≥ 2.0`, `pyproj`,
 - `pandas ≥ 2.0` (already used by `gis.py`; 2.0 for ISO 8601 date parsing),
 - `pyflwdir`, only because the existing `gis.py` imports it (it depends on affine,
   numba, numpy and scipy, not on rasterio).
 
 Downloads and the STAC search use the standard library (`urllib`). No rasterio-based
-library is used. `cdsapi` is **not** part of the environment: `download_glofas.py` uses it
-only if you install it (§11.1); otherwise it reads files downloaded through the EWDS form.
+library is used. Two further dependencies were approved:
+- `cdsapi` for the EWDS downloads of `download_discharge.py` (Stage F). With
+  `ewds_api_url = "file:///…"` the script copies files downloaded by hand instead (§11.2);
+- `matplotlib-base` for the plots of Stages E and F.
 
 ## 2. Repository layout
 
 ```
 gis.py                     shared GIS library (existing; new functions appended, nothing changed)
-plots.py                   Stage E plotting helpers (matplotlib): budget, saving, colours, index.html
+plots.py                   plotting helpers of Stages E and F (matplotlib): budget, saving, colours, index.html
 config/defenses.toml       configuration template
 config/osmconf.ini         OSM driver configuration exposing the tag keys used
 docs/navod_cs.md           short guide to running the scripts, in Czech
@@ -117,7 +120,7 @@ download/
   download_osm.py          Geofabrik extract -> hydraulic points, drains (single-layer GeoPackages)
   download_ghsl.py         GHSL building volume tiles -> VRT mosaics
   download_gfm.py          GFM scene search (STAC), screening, clipped layers per unit
-  download_glofas.py       GloFAS daily discharge and upstream area -> compact cell series
+  download_discharge.py    GloFAS and EFAS requests to the EWDS (cdsapi), resume, upstream area files (Stage F)
   download_worldcover.py   ESA WorldCover tiles over the corridor -> worldcover.vrt
   download_clms.py         CORINE (legend mapping verified on known pixels) and Urban Atlas from local files
 processing/
@@ -133,7 +136,8 @@ processing/
   implied_protection.py    built-up fraction, HAND curves and levels per subsegment (E3), implied compartments (E4)
   implied_evaluate.py      sensitivity grid, recall of built area and wet built area inside implied compartments (E5)
   gfm_evidence.py          held / flooded tests per compartment and scene; missing-barrier hints
-  rp_bounds.py             event return periods, observed bounds, combination with the model
+  discharge_prepare.py     daily series per river cell, annual maxima, Gumbel fits (Stage F)
+  rp_bounds.py             matching to discharge cells, event return periods, source combination, bounds
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
 tests/
   test_kernels.py          numba kernels on small grids (16 checks)
@@ -143,6 +147,7 @@ tests/
   test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
   test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7, E4: 8, E5: 7 checks)
+  test_stage_f.py          Stage F on its own synthetic country T6 (15 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -179,6 +184,11 @@ function was modified. The only change to existing lines is the import block.
 | `Stats` | `binned_quantiles(area, edges, quantiles)`, `onset(share, smooth_bins, fraction, persist_bins)`, `sharpness(smoothed, onset_bin, window_bins)` | Area-weighted quantiles within bins; onset and sharpness of a built-share curve (Stage E) |
 | `Stats` | `merge_levels(k, eligible, level, max_dlevel, max_gap)` | Groups of subsegments along a river side, short gaps bridged (Stage E) |
 | `Evidence` | `scene_masks`, `comparison_zones`, `outcome`, `test_regions` | GFM tests of regions, moved from `gfm_evidence.py`; Stage E tests implied compartments with them |
+| `Discharge` | `band_times(ds)`, `period_days(valid_seconds, marks)` | Valid time of every GRIB or NetCDF band (an ambiguous NetCDF layout stops); day of the averaging period for end or start marks (Stage F) |
+| `Discharge` | `aggregate_daily(days, values, how, steps_per_day)`, `annual_maxima(days, values, start_month)`, `gumbel_fits(maxima, min_years)` | Daily mean or maximum of sub-daily steps (incomplete days NaN); maxima of complete hydrological years; Gumbel fits with the RMSE at Gringorten positions |
+| `Discharge` | `match(lon, lat, river_area_km2, cell_lon, cell_lat, cell_area_km2, radius_km, ratio_min, ratio_max, same_river)` | Discharge cell of a river location: radius and ratio, same river first, then ratio, then distance |
+| `Stats` | `gumbel_q(rp, xi, alpha)` | Discharge of a return period (inverse of `gumbel_rp`) |
+| `Config` | `MIGRATIONS`, `DEFAULTS` | Old keys read under their new names with a warning (Stage C GloFAS keys); values of optional keys |
 
 ### Naming in the code
 
@@ -202,6 +212,8 @@ functions and all function parameters are unchanged.
   sub-tables `compartments` and `rp`.
 - `[sources]`: download templates, tag lists, retries.
 - `[evidence]`: Stage C.
+- `[implied]`: Stage E (§18).
+- `[discharge]`, `[discharge.glofas]`, `[discharge.efas]`: Stage F (§11).
 
 All path keys accept a string or a list. Every script validates exactly the keys it uses,
 before doing any work:
@@ -218,6 +230,27 @@ All problems are listed in one message and the script stops.
 
 **Placeholders.** The top-level array `placeholders` lists keys whose values are not
 confirmed yet. Every script logs a warning for each placeholder it uses.
+
+**Migration of the Stage C GloFAS keys (Stage F).** A configuration with the old keys keeps
+working.
+- **Read under the new names, with a warning** (`Config.MIGRATIONS`):
+
+  | Old key | New key |
+  |---|---|
+  | `sources.glofas_dataset_id`, `glofas_request`, `glofas_time_keys`, `glofas_area_key`, `glofas_first_year`, `glofas_last_year` | `discharge.glofas.*` without the prefix |
+  | `sources.glofas_discharge_variable` | `discharge.glofas.netcdf_variable` |
+  | `sources.glofas_upstream_area_file`, `glofas_upstream_area_variable`, `glofas_upstream_area_to_km2`, `glofas_min_upstream_area_km2` | `discharge.glofas.upstream_area_*`, `min_upstream_area_km2` |
+  | `evidence.glofas_search_radius_km`, `upstream_ratio_min`, `upstream_ratio_max` | `discharge.glofas.search_radius_km`, `upstream_ratio_min`, `upstream_ratio_max` |
+  | `evidence.flooded_window_days` | `discharge.flooded_window_days` |
+
+- **Replaced:**
+  - `glofas_min_days_per_year` by the complete-year rule (§11.4);
+  - `glofas_valid_time_ends_day` by `valid_time_marks`;
+  - `glofas_files` and `glofas_file_extension` by the local mode
+    `ewds_api_url = "file:///…"` and `data_format`;
+  - `glofas_upstream_area_url` by `upstream_area_file`.
+
+Every source table needs all its keys, including a source that `sources` does not list.
 
 Keys beyond the original schema, with the reason for each:
 
@@ -244,10 +277,9 @@ Keys beyond the original schema, with the reason for each:
 | `sources.gfm_collection`, `gfm_assets` (table `flood`, `exclusion`, `reference_water`, `likelihood`), `gfm_page_limit`, `gfm_token_env` | STAC collection, asset keys per role, page size, name of the environment variable holding an access token (never the token itself) |
 | `sources.gfm_screen_resolution_m`, `gfm_download_threads` | Resolution of the screening read; scenes screened at the same time (§10.1) |
 | `sources.gfm_flood_values`, `gfm_exclusion_values`, `gfm_reference_water_values`, `gfm_nodata_values` | Pixel codes of the GFM layers; placeholders until checked against the product description |
-| `sources.glofas_request` (table), `glofas_time_keys`, `glofas_area_key`, `glofas_first_year`, `glofas_last_year`, `glofas_file_extension` | The request pasted from the EWDS form; the script only adds time and area |
-| `sources.glofas_files`, `glofas_discharge_variable`, `glofas_upstream_area_file`, `glofas_upstream_area_url`, `glofas_upstream_area_variable`, `glofas_upstream_area_to_km2` | Local GRIB or NetCDF files; the upstream area map and its unit |
-| `sources.glofas_min_days_per_year` | A year enters the annual maxima only if it is nearly complete |
-| `sources.glofas_valid_time_ends_day` | Day attribution of daily values stamped at the end of their period (§11.1) |
+| `discharge.<source>.download_format`, `time_keys`, `area_key` | Parameters of the EWDS form whose names or values the form shows; the script adds time and area under these names (§11.2) |
+| `discharge.<source>.step_hours`, `valid_time_marks` | Steps per day and the time convention of the files (§11.3) |
+| `discharge.<source>.netcdf_variable`, `upstream_area_variable`, `upstream_area_to_km2` | Variables of the NetCDF files and the unit of the upstream area map |
 | `evidence.river_level_percentile`, `hint_margin_m`, `hint_dry_share`, `hint_min_scenes`, `hint_exclusion_m` | Missing-barrier hints (§10.3); the specification fixed 90 % and "most scenes" in words |
 | `country.lulc.*` (table) | Land cover exposure of `HAND_YZ.py` (§9.3): switch, WorldCover and Urban Atlas inputs, class-to-category mappings, values and curves per category |
 | `sources.worldcover_url_template`, `worldcover_grid_url`, `worldcover_tile_field`, `worldcover_version`, `worldcover_year` | ESA WorldCover tiles (§9.3); verified |
@@ -274,9 +306,10 @@ Keys beyond the original schema, with the reason for each:
 | 8 | `rp_index.py` | per unit `rp_index.csv`, `rp_index.json`; merged `compartments_rp.gpkg` (with `value_ghsl`, `value_lulc`) |
 | 9 | `download_gfm.py` | `work/<c>/gfm/screening.csv` (checkpoint), clipped layers in `work/<c>/gfm/<unit>/`, `gfm_index.csv` |
 | 10 | `gfm_evidence.py` | per unit `gfm_evidence.csv` (and `missing_barrier_hints.gpkg`); merged `gfm_evidence.csv`, `gfm_evidence.gpkg`, `missing_barrier_hints.gpkg` |
-| 11 | `download_glofas.py` | `glofas_discharge.npz`; yearly downloads in `work/<c>/glofas/` |
-| 12 | `rp_bounds.py` | `compartments_rp.gpkg` updated: `glofas_*` match, observed bounds, combined `rp`, `*_prior` model values |
-| 13 | `validate.py` | `validation.json`, `validation_coverage.gpkg`, `validation_rp_confusion.csv` |
+| 11 | `download_discharge.py` | raw files in `work/<c>/discharge/raw/<source>/`, `download_log.csv`, `discharge_sources.json` |
+| 12 | `discharge_prepare.py` | `discharge_<source>.npz`, `discharge_cells_<source>.gpkg`, `plots/discharge/prepare/` |
+| 13 | `rp_bounds.py` | `event_rp.csv`, `event_rp_combined.csv`, `discharge_matches.gpkg`; `compartments_rp.gpkg` updated: matches per source, observed bounds, combined `rp`, `*_prior` model values; `plots/discharge/<RUN_ID>/` |
+| 14 | `validate.py` | `validation.json`, `validation_coverage.gpkg`, `validation_rp_confusion.csv` |
 
 Run logs go to `output_dir/<country>/logs/<script>_<timestamp>.log`.
 
@@ -429,7 +462,7 @@ For each compartment:
   ambiguous, because every cell below the crest has the same spill level; the reach
   order resolves this.
 - **`source_x`, `source_y`:** the seed of the entry cell, i.e. the river cell whose water
-  enters first. Stage C matches it with GloFAS upstream areas.
+  enters first. Stage F matches it with GloFAS and EFAS upstream areas.
 
 ### 5.7 Flags
 
@@ -747,7 +780,7 @@ the building value: it **supplements** GHSL and never replaces it.
 The model RP of §9 is an *a priori* estimate built from exposure and topography. Stage C
 adds what was actually observed: whether a compartment stayed dry while its surroundings
 were flooded (Global Flood Monitoring, GFM, Sentinel-1 SAR flood extents since 2015), and
-how rare the discharge was on that day (GloFAS, §11). Observations bound the RP; they never
+how rare the discharge was on that day (GloFAS and EFAS, §11). Observations bound the RP; they never
 create, move or delete a compartment.
 
 ### 10.1 Scene search and screening (`download_gfm.py`)
@@ -901,72 +934,177 @@ into evidence.
    - **Better level, not implemented.** A level per drainage target would need the
      `breach_to_streams` target index stored per unit, which `compartments.py` does not keep.
 
-## 11. Observed bounds of the return period: GloFAS
+## 11. Observed bounds of the return period: GloFAS and EFAS (Stage F)
 
-### 11.1 Discharge data (`download_glofas.py`)
+Stage F replaces the GloFAS part of Stage C:
+- **Removed and replaced.** `download_glofas.py` is gone. The old keys are migrated (§3).
+- **Two discharge sources.** GloFAS and EFAS both turn the outcome of a GFM test into a
+  return period. Discharge never delineates a compartment and is never used as a hazard.
+- **Chain:**
+  1. `download_discharge.py` downloads the raw files;
+  2. `discharge_prepare.py` builds the daily series and the Gumbel fits;
+  3. `rp_bounds.py` does the matching, the event return periods, the combination of the
+     sources and the bounds.
 
-1. **Source.** GloFAS historical river discharge (reanalysis), dataset
-   `cems-glofas-historical` of the CEMS Early Warning Data Store. The identifier was
-   checked on the dataset page.
-   - **Data.** Daily `dis24` on a 0.05° grid from 1979.
-   - **Upstream area.** The static upstream area map on the same grid comes from the GloFAS
-     auxiliary data; check its units attribute against `glofas_upstream_area_to_km2`
-     (1e-6 for m²). Its URL is not verified, so give a local file.
-2. **Two ways in:**
-   - **Local files** (`glofas_files`): GRIB or NetCDF files downloaded through the EWDS form.
-     This needs nothing beyond the environment.
-   - **Yearly download through `cdsapi`.** Paste the request shown by the EWDS form
-     ("Show API request") into `glofas_request`, without the time and area keys.
-     - **What the script adds:** the year, all months and days (`glofas_time_keys`) and the
-       area (`glofas_area_key`: north, west, south, east, rounded outward to 0.01°).
-     - **Approval needed.** `cdsapi` is not installed. Without it, the script stops and
-       explains both options.
-3. **Area.** The box of the DTM footprint in WGS84, extended by `glofas_search_radius_km`,
-   so that river cells next to the footprint stay available for matching.
-4. **Cells kept.** Every cell of the upstream area map with at least
-   `glofas_min_upstream_area_km2` (after `glofas_upstream_area_to_km2`). Their daily series
-   are read with GDAL alone (no xarray):
-   - **GRIB:** each band's time is `GRIB_VALID_TIME`.
-   - **NetCDF:** the band's `NETCDF_DIM_<time>` value with the `<time>#units` attribute
-     (days, hours or seconds since a reference).
-   - **Day attribution.** A daily mean stamped at the end of its 24 h period belongs to the
-     day that ends. With `glofas_valid_time_ends_day = true`, one second is subtracted
-     before the date is taken.
-     - **Status:** a placeholder. Check one real file against the EWDS documentation.
-     - **Why it matters:** one day of shift barely changes event discharges on large rivers,
-       but it does matter on flashy small ones.
-5. **Output `glofas_discharge.npz`:** cell coordinates, upstream areas, dates, and discharge
-   (days × cells, float32). With the default minimum area of 0 km², every cell of the box is
-   kept. A box of about 80 000 km² holds about 4000 cells: 46 years × 4000 cells ≈ 270 MB in
-   memory, compressed on disk.
+### 11.1 Sources, access and licences
 
-### 11.2 Matching compartments to GloFAS cells (`rp_bounds.py`)
+| | GloFAS | EFAS |
+|---|---|---|
+| EWDS dataset | `cems-glofas-historical` (verified) | `efas-historical` (verified) |
+| Discharge variable | `river_discharge_in_the_last_24_hours` (verified) | from the EWDS form (not set) |
+| Request values | `system_version = version_4_0`, `hydrological_model = lisflood`, `product_type = consolidated` (verified); the rest from the form | from the form |
+| Grid and step | 0.05°, 24 h | v5.0: 1 arcmin, 6 h (verified) |
+| Upstream area | `glofas_upArea.nc`, m² (verified) | source and units to verify |
+| Requests | one per year (365 or 366 layers) | one per month (at most 124 layers) |
 
-1. **Candidates.** For each compartment with a source cell and an upstream area A (§9.2):
-   GloFAS cells within `glofas_search_radius_km` of the source cell (KD-tree in the
-   country's CRS).
-2. **Ratio filter.** The candidate's upstream area divided by A must lie within
-   [`upstream_ratio_min`, `upstream_ratio_max`].
-3. **Choice.** Among the remaining cells, the one with the ratio closest to 1 (log scale)
-   wins.
-4. **Stored:** `glofas_cell`, `glofas_distance_km`, `glofas_area_ratio`.
-5. **No match:** no event RP.
+- **API.** `https://ewds.climate.copernicus.eu/api` (verified), used through `cdsapi`
+  (approved; in `pixi.toml`).
+  - **Credentials.** The personal key goes into `~/.cdsapirc` or the `CDSAPI_KEY`
+    environment variable, never into the repository.
+  - **Account and terms.** The EWDS needs an ECMWF account, and the terms of each dataset
+    are accepted on its download form. Credentials of the legacy CDS do not work there
+    ([EWDS page of the CEMS wiki](https://confluence.ecmwf.int/spaces/CEMS/pages/242067419/EWDS)).
+- **EFAS access.** The dataset page states that the latest part of the record runs to near
+  real time with a delay of about 6 days, and that this real-time part is reserved for
+  EFAS partners
+  ([efas-historical](https://ewds.climate.copernicus.eu/datasets/efas-historical)).
+  - **To verify (F1).** Whether your account receives the whole period you need, and the
+    first year.
+  - **If EFAS fails,** the workflow continues with GloFAS only: `rp_bounds.py` uses the
+    sources that `discharge_prepare.py` prepared and logs the missing one.
+- **Licence.** Both datasets fall under the
+  [CEMS-FLOODS datasets licence (rev. 1)](https://ewds.climate.copernicus.eu/licences/cems-floods).
+  - **Use.** Free access for the listed purposes; the data are for information only; no
+    intellectual property passes to the user. Use of Copernicus information is regulated
+    by Regulation (EU) No 377/2014 and Delegated Regulation (EU) No 1159/2013.
+  - **Attribution.** "Generated using Copernicus Emergency Management Service information
+    [year]", or "Contains modified Copernicus Emergency Management Service information
+    [year]" for modified data. The event return periods and bounds of this package are
+    modified information, so the second notice applies.
+  - **Citation of GloFAS.** Harrigan et al. (2020, ESSD) cite the dataset as
+    [10.24381/cds.a4fdd6b9](https://doi.org/10.24381/cds.a4fdd6b9). Check the citation that
+    the dataset page gives for version 4.0.
+- **Status of these statements.** They come from search results. The EWDS, ECMWF wiki and
+  EFAS hosts cannot be reached from this session, so confirm the wording on the licence
+  page before publishing outputs.
 
-**Why the ratio and not the distance.** On a 0.05° grid, the nearest cell is often on
-another river. The ratio test selects the cell that represents the same reach. The test
-puts a second cell with a ratio of 0.92 within the radius; the cell with ratio 1 wins.
+### 11.2 Download (`download_discharge.py`)
 
-### 11.3 Frequency analysis
+1. **Area.** The box of `dtm_footprint.gpkg` in EPSG:4326, extended by `bbox_buffer_deg`.
+   It is sent as north, west, south, east (4 decimals) under the area key of the form
+   (`area_key`).
+2. **Requests.**
+   - **Base.** The request of the form (`request`), plus `data_format` and, if set,
+     `download_format`.
+   - **Time.** The year, the month(s) and the days 01–31 under the time keys of the form
+     (`time_keys`). The service is expected to skip non-existent dates; the layer check of
+     step 4 detects it if not.
+   - **Split.** By `request_unit` (year or month), so that no request exceeds 500 layers
+     (days × 24 / `step_hours`). A larger request stops the script before any download.
+   - **GloFAS** accepts only `product_type = consolidated`: no mixing with intermediate
+     data.
+3. **Parallel and retries.** At most `max_parallel_requests` requests run at a time. A
+   request is tried 4 times, with waits of 30, 60 and 120 s in between.
+4. **Resume and integrity.** A file counts as complete only when:
+   - GDAL opens it (for NetCDF, its `netcdf_variable`);
+   - it holds the number of time steps the request asked for.
 
-Annual maxima of each matched cell are taken over the full series, using years with at
-least `glofas_min_days_per_year` days. A Gumbel distribution is fitted by L-moments:
+   Complete files are skipped. Anything else is downloaded again, through a `.part` file
+   that is renamed only after the check. A zip archive (`download_format`) is unpacked.
+5. **Local mode.** With `ewds_api_url = "file:///folder"` (on Windows
+   `file:///C:/folder`), the files are copied from
+   `<folder>/<source>/<year>[_<month>].<ext>`. This serves files downloaded by hand, and
+   the tests.
+6. **Outputs in `raw_dir`** (default `<work_dir>/<country>/discharge/raw`):
+   - `<source>/<year>.<ext>` or `<source>/<year>_<month>.<ext>`;
+   - `<source>/upstream_area.<ext>`: the static file copied from `upstream_area_file`;
+   - `discharge_sources.json`: origin of each upstream area file;
+   - `download_log.csv`, appended per run: source, file, request, status, size, seconds,
+     attempts, error.
 
-- b0 = mean, b1 = Σ (i−1)/(n−1) · x(i) / n over the ascending sample, l1 = b0,
-  l2 = 2 b1 − b0;
-- α = l2 / ln 2, ξ = l1 − 0.5772 α;
-- RP(Q) = 1 / (1 − exp(−exp(−(Q − ξ)/α))).
+**Volume and time (estimate; the test requests of F1 are still due).** Uncompressed
+float32, for a country box of 7° × 3°:
 
-**Why Gumbel with L-moments.** It is stable for about 40 annual maxima and has no shape
+| Source | Cells in the box | Per request | Requests | Raw volume |
+|---|---|---|---|---|
+| GloFAS | 140 × 60 = 8400 | one year: 12 MB | one per year (46 for 1979–2024) | about 0.6 GB |
+| EFAS | 420 × 180 = 75 600 | one month: 37 MB | one per month (240 for 20 years) | about 9 GB for 20 years |
+
+- **Format.** GRIB packing roughly halves these numbers.
+- **Time.** The EWDS queue, not the transfer, sets the pace. A forum report states that one
+  month of 6-hourly EFAS data can take up to a day
+  ([ECMWF forum](https://forum.ecmwf.int/t/efas-data-download-taking-a-long-time/13107)).
+- **Consequence.** With `max_parallel_requests = 2`, the EFAS record may take days.
+- **Alternative.** The dataset page also lists a 24-hourly EFAS discharge. It would mean one
+  request per year and a quarter of the volume, at the cost of `daily_max` (decision in
+  §15.4).
+
+### 11.3 Daily series (`discharge_prepare.py`)
+
+1. **River cells.** Cells of the upstream area file inside the box with at least
+   `min_upstream_area_km2` (after `upstream_area_to_km2`).
+   - **Identifier.** `cell_id` = row × columns + column on the grid of that file.
+   - **Memory.** The series need days × cells × 4 bytes per source. With the template value
+     of 100 km², EFAS keeps roughly a fifth of the land cells (estimate; about 0.6 GB for a
+     country and 30 years). With 0 km², every land cell of the box is kept (about 3 GB).
+2. **Reading.** GDAL only, one window per band.
+   - **GRIB:** the band's `GRIB_VALID_TIME`.
+   - **NetCDF:** a `valid_time` dimension, otherwise the only time dimension. A `step`
+     dimension or several time dimensions leave the valid time open, so the script stops
+     instead of guessing.
+3. **Time convention** (`valid_time_marks` per source).
+   - **`end`:** the valid time closes the averaging period, so a value belongs to the day of
+     (valid time − 1 s): a 24 h value stamped 00 UTC belongs to the day before.
+   - **`start`:** a value belongs to the day of its valid time.
+   - **Documentation.** ECMWF states that discharge "is stored as average over the time step
+     of the model (6-hourly or 24-hourly), with time stamp (date and time of end of
+     averaging period)" ([CEMS wiki](https://confluence.ecmwf.int/x/egRtD)). The template
+     therefore uses `end`.
+   - **Caveat.** MARS stores each 6-hourly step at its start: the 12:00 value covers
+     12:00–18:00. The pre-release EFAS v5.0 historical archive was shifted by 6 h and has
+     since been re-archived
+     ([EFAS known issues](https://confluence.ecmwf.int/display/CEMS/EFAS+-+Known+Issues)).
+     Which time a downloaded NetCDF file carries depends on the converter, so the setting
+     is a placeholder until F1.
+   - **Check on real files:**
+     - the log line "valid times … to … UTC → days … to …" of each source;
+     - the peak day of a known flood against the gauge record (the event you will name,
+       F.7).
+4. **Days that span two files.** Steps are aggregated file by file. The steps of the last
+   day of a file wait for the next file, because with end-marks the 00 UTC step closes the
+   previous day. This matters for monthly EFAS files when the time keys of the form are
+   valid times (tested).
+5. **Aggregation.**
+   - **EFAS:** `aggregation` = `daily_mean` or `daily_max` of the four steps. A day needs
+     all of them; otherwise it is NaN.
+   - **GloFAS** is already daily: `daily_max` falls back to `daily_mean`, with a log line.
+   - **Consistency.** Annual maxima and event discharges come from the same daily series, so
+     both always use the same aggregation.
+6. **Outputs:**
+   - **`discharge_<source>.npz`:** `cell_id`, `lon`, `lat`, `upstream_area_km2`, `dates`
+     (days since 1970), `values` (days × cells, float32), `years`, `maxima`;
+   - **`discharge_cells_<source>.gpkg`** (EPSG:4326): `cell_id`, `upstream_area_km2`,
+     `n_years`, `gumbel_xi`, `gumbel_alpha`, `fit_rmse`, `lon`, `lat`;
+   - **plots** `plots/discharge/prepare/fit_<source>/`;
+   - **`discharge_prepare_performance.json`.**
+
+### 11.4 Frequency analysis
+
+1. **Annual maxima per hydrological year.** A year starts on the first day of
+   `hydrological_year_start_month` and is labelled by the calendar year it starts in.
+   - **Complete years only.** Every day must be present, and for a cell every value must be
+     finite.
+   - **Minimum record.** Cells with fewer than `min_years` complete years are dropped from
+     the outputs.
+2. **Gumbel by L-moments:**
+   - b0 = mean, b1 = Σ (i−1)/(n−1) · x(i) / n over the ascending sample, l1 = b0,
+     l2 = 2 b1 − b0;
+   - α = l2 / ln 2, ξ = l1 − 0.5772 α;
+   - RP(Q) = 1 / (1 − exp(−exp(−(Q − ξ)/α))), and Q(RP) = ξ − α ln(−ln(1 − 1/RP)).
+3. **`fit_rmse`.** RMSE between the sorted maxima and the fitted quantiles at Gringorten
+   positions (i − 0.44)/(n + 0.12), in m³/s.
+
+**Why Gumbel with L-moments.** It is stable for 20–45 annual maxima and has no shape
 parameter to over-fit.
 
 **Known weakness: heavy-tailed rivers.** The Gumbel tail is lighter than theirs, so a large
@@ -975,27 +1113,82 @@ discharge receives a higher RP than it really has.
   bound.
 - **Flooded tests** give upper bounds that are too high, which only loosens them.
 
-A three-parameter GEV would capture the tail but is unstable for single cells with about 40
-maxima; regional pooling of cells would be the next step. Cells with fewer than 10 complete
-years are logged.
+A three-parameter GEV would capture the tail but is unstable for single cells with this
+record length; regional pooling of cells would be the next step.
 
-### 11.4 Event return periods and bounds
+### 11.5 Matching sites to discharge cells (`rp_bounds.py`)
 
-- **held:** discharge on the acquisition day. Its RP is a **lower bound** of the protection,
-  because the levee withstood at least that.
-- **flooded:** the maximum discharge over `flooded_window_days` up to and including the
-  acquisition day. Its RP is an **upper bound**: the compartment flooded during an event of
-  at most that RP, and the window covers a peak that may have passed before the overpass.
-- **Per compartment:**
-  - `n_held`, `n_flooded`;
-  - `obs_rp_low` = maximum over held tests;
-  - `obs_rp_high` = minimum over flooded tests;
-  - `obs_conflict` if `obs_rp_low > obs_rp_high`.
+1. **Sites:**
+   - every explicit compartment, at its source river cell (`source_x`, `source_y`);
+   - the implied compartments of the Stage E run `IMPLIED_RUN`, at their nearest river point.
+2. **Upstream area of the river.** From `river_upstream_area_field` (nearest river
+   feature), otherwise from `upstream_area_raster`. Without either, the matching is skipped
+   and no observed bounds are written. A site without a value gets no match.
+3. **Candidates per source:**
+   - cells within `search_radius_km` (great-circle distance; the site is transformed to
+     EPSG:4326 with OSR);
+   - with an upstream area ratio (cell / river) within [`upstream_ratio_min`,
+     `upstream_ratio_max`].
+4. **Same river.** A candidate is on the same river when its centre lies within
+   `match_river_distance_m` of the site's river line. The lines come from
+   `rivers_snapped.gpkg` (Stage E1) if it exists, otherwise from `rivers_sources.gpkg`.
+5. **Choice:**
+   1. same-river candidates first;
+   2. then the smallest |log ratio|;
+   3. then the shortest distance.
+6. **Stored per site and source:** `<source>_cell_id`, `<source>_distance_km`,
+   `<source>_ratio`, `<source>_same_river`, `<source>_match_quality`.
+   - **Quality:** `good` (same river), `weak` (other candidates only), `none`.
+   - **`discharge_matches.gpkg`** draws a line from each site to its matched cell.
+
+**Why the river preference.** At a confluence, the tributary cell can be closer and have the
+better ratio. The test places the source on the main river just upstream of a tributary of
+similar size: with the preference, the main river cell wins; without it, the tributary
+cell.
+
+**GloFAS cells are large.** At 50° N a 0.05° cell measures about 3.6 × 5.6 km. Its centre
+rarely lies within 500 m of the river line, so with the template value most GloFAS matches
+are `weak`. They are still used: the quality is a flag, and only matters when there is a
+choice. See §15.4.
+
+### 11.6 Event return periods and combination of the sources
+
+1. **Event discharge per test and matched source:**
+   - **held:** the daily discharge of the acquisition day. Its RP is a **lower bound** of
+     the protection: the levee withstood at least that.
+   - **flooded:** the maximum over the `flooded_window_days` days up to and including the
+     acquisition day. Its RP is an **upper bound**: the window covers a peak that may have
+     passed before the overpass.
+2. **RP** from the Gumbel fit of the matched cell, capped at `max_rp_extrapolation`. A
+   capped value is flagged `extrapolated`.
+3. **`event_rp.csv`:** `compartment_id`, `item_id`, `datetime`, `outcome`, `source`,
+   `cell_id`, `q_event`, `rp_event`, `extrapolated`.
+4. **One RP per test (`source_mode`; written to `event_rp_combined.csv`):**
+   - **`prefer_efas` / `prefer_glofas`:** the preferred source, unless only its match is
+     `weak` while the other source matches `good`; then the other source.
+   - **`conservative_both`:** a held test takes the **lower** RP of the two sources and a
+     flooded test the **higher**. When the sources disagree, the bounds widen instead of
+     resting on the more favourable source.
+   - **`source_disagreement`:** the two RPs of a test differ by more than the factor
+     `rp_disagreement_ratio`.
+   - **Stage E** reads these combined values for the implied compartments
+     (`implied_protection.py` caps, `implied_evaluate.py` errors), so `source_mode` applies
+     there too. Taking `event_rp.csv` directly would mean the minimum over the sources,
+     against `conservative_both` for flooded tests.
+5. **Per explicit compartment:**
+   - `n_held`, `n_flooded`;
+   - `obs_rp_low` = maximum over held tests and `obs_rp_high` = minimum over flooded tests;
+   - the same per source: `rp_obs_low_<source>`, `rp_obs_high_<source>`;
+   - `obs_source` (`both`, `glofas` or `efas`);
+   - `source_disagreement` if any of its tests disagrees;
+   - `obs_conflict` if `obs_rp_low > obs_rp_high`.
 
 The SAR image says *whether* the compartment was wet. The matched discharge series says
 *how rare* the day was at the same river reach.
 
-### 11.5 Combination with the model interval
+### 11.7 Combination with the model interval
+
+Unchanged from Stage C:
 
 | Case | Condition | Result |
 |---|---|---|
@@ -1019,6 +1212,38 @@ The SAR image says *whether* the compartment was wet. The matched discharge seri
   evidence therefore gives the same result as a first run (tested). After rerunning
   `rp_index.py`, rerun `rp_bounds.py`.
 - **Log.** Counts per case are logged.
+
+### 11.8 Plots
+
+Plots go to `plots/discharge/<RUN_ID>/`, with an `index.html`. They follow the budget of
+`implied.plots` (§18).
+
+| Type | Content |
+|---|---|
+| `match_map` | One panel per source, in km from the site: candidate cells coloured by the upstream area ratio (diverging around 1), the search radius, the same-river band, the chosen cell |
+| `fit` | Annual maxima at Gringorten positions and the Gumbel curves of the matched cells |
+| `event` | ±15 days around the acquisition, one panel per source with the RP 2/10/50/100 thresholds of its fit, the flooded window and the discharge the event RP comes from |
+| `source_comparison` | Event RP of GloFAS against EFAS per test, held and flooded, with the disagreement ratio |
+| `summary` | Matches by quality and source, event RP distribution per source, compartment flags |
+
+`discharge_prepare.py` writes `fit_<source>` plots per cell to `plots/discharge/prepare/`.
+Selection priority: weak matches, disagreeing tests, the worst fits and short records.
+
+### 11.9 Status of step F1
+
+F1 could not be completed from this session. The hosts `ewds.climate.copernicus.eu`,
+`confluence.ecmwf.int` and `european-flood.emergency.copernicus.eu` are blocked by the
+network policy, and the test requests need your EWDS key.
+
+Still due:
+1. **Test requests:** one year of GloFAS and one month of EFAS, with the values copied
+   from the forms.
+2. **Measurements:** the real volume and queue time.
+3. **Time convention:** the log line on the downloaded files, and the known flood event.
+4. **EFAS:** the discharge variable and the upstream area file (source and units).
+5. **Access:** EFAS access with your account.
+
+The inventory of replaced code and keys is in §3 and §14.
 
 ## 12. Validation
 
@@ -1131,10 +1356,19 @@ Its cost is one screening read per scene plus the copies of the kept unit window
 `gfm_download_threads` requests at a time. On local files the test needs 5 s for 5 scenes,
 4 units and 16 copied windows.
 
-**`download_glofas.py`:**
-- **Test.** 41 years × 63 cells from NetCDF take 3 s; 3 years from GRIB take 1.3 s.
-- **Real data.** 46 yearly files of 365 bands with one small window per band take minutes.
-  The EWDS queue, not the reading, sets the pace of a download.
+**Stage F** (§11):
+- **`discharge_prepare.py` at EFAS size.** The box was 7° × 3° at 1 arcmin (420 × 180
+  cells), with 12 989 river cells kept and 6-hourly steps.
+  - **Measured.** 3 monthly NetCDF files (360 bands) took 1.3 s, peak 325 MB. That is about
+    0.45 s per month, so 30 years take about 3 minutes.
+  - **Memory over 30 years:** the daily series of 570 MB plus its copy when written, about
+    1.2 GB.
+  - **GloFAS** is a tenth of that.
+- **Test country T6.** It has one cell per source and 20 years:
+  - the three runs of `download_discharge.py` take 2 s each (260 local copies with checks);
+  - `discharge_prepare.py` takes 1.9 s for 240 EFAS files and 0.4 s for 20 GloFAS files;
+  - `rp_bounds.py` takes 3.5 s, of which plots take 2 s.
+- **Downloads.** The EWDS queue, not the reading, sets the pace (§11.2).
 
 **`rp_bounds.py` and `validate.py`** take about 1 s on the test country. Their loops run
 over compartments and tests (KD-tree queries, one Gumbel fit per matched cell), so 10 000
@@ -1245,8 +1479,9 @@ compartments take seconds.
     - **GFM:** five scenes at 20 m in EPSG:3035, with flood extents drawn from the
       undefended HAND of the units;
     - **STAC:** a local mock API with token check and GET and POST paging;
-    - **GloFAS:** discharge as NetCDF (1981–2021) and GRIB (2019–2021), plus an upstream
-      area map;
+    - **GloFAS:** yearly NetCDF files (1981–2021) and GRIB files (2019–2021) in local
+      EWDS folders, plus an upstream area map. They run through the Stage F chain:
+      `download_discharge`, `discharge_prepare`, `rp_bounds`;
     - **references:** reference polygons with RPs.
   - **`download_gfm`:**
     - one search;
@@ -1276,6 +1511,51 @@ compartments take seconds.
     - `model_obs_conflict` with rp = 200.
   - **Validation:** recall and precision against an independent computation; the
     confusion matrix and both shares.
+- **`pixi run test-stage-f`, 15 checks,** on its own synthetic country T6.
+  - **Setup.** T6 is a 20 km box with one river (5000 km²) and two compartments. GloFAS
+    (0.05°, daily, one file per year) and EFAS (1 arcmin, 6-hourly, one file per month)
+    cover 2001–2020. The files are served from a local EWDS folder. EFAS is 30 % higher on
+    the event days.
+  - **Units:**
+    - **Gumbel:** L-moments recover ξ and α of a 5000-value sample, and the RP of its median
+      is 1.98 (≈ 2);
+    - **time convention:** a 24 h value stamped 00 UTC belongs to the day before; 6 h values
+      stamped 06, 18, 24 and 30 h fall on the right days; `start` marks keep the stamp's
+      day;
+    - **EFAS aggregation:** daily mean 14 and daily maximum 20 of four steps; a day with
+      three steps is NaN;
+    - **confluence:** the main river cell (same river) wins over a closer tributary cell
+      with a better ratio; without the preference the tributary wins; a cell beyond the
+      radius is ignored;
+    - **static check:** no rasterio import and no `layer=` argument anywhere in the
+      repository.
+  - **Chain:**
+    - **download:** 260 requests; a rerun skips all of them; after one file was deleted and
+      one truncated, exactly those two are downloaded again;
+    - **preparation:**
+      - one cell per source and 20 complete years;
+      - GloFAS keeps the value of its own day;
+      - EFAS gives the daily mean, and with `daily_max` the maximum (GloFAS falls back to
+        the mean, logged);
+    - **days spanning two files:** EFAS steps stamped 00–18 UTC with an extra file to
+      close the year. All 365 days of 2001 are complete and exact, the half day before is
+      NaN, and the annual maximum is right;
+    - **`conservative_both`:** held takes the lower RP of the two sources, flooded the
+      higher;
+    - **bounds:**
+      - C1 gets observed bounds from both sources and the model interval narrowed to
+        20–60;
+      - `source_disagreement` matches the ratio of the RPs;
+      - match qualities match the cell geometry;
+    - **one source only:** C2 has no EFAS cell within 2 km and takes its bounds from GloFAS
+      alone;
+    - **implied compartment (Stage E):** a flooded test gets the higher RP of the two
+      sources in `event_rp_combined.csv`; `compartments_rp.gpkg` keeps the explicit
+      compartments only;
+    - **outputs:**
+      - `discharge_matches.gpkg` has three lines from the explicit sites and two from the
+        implied site;
+      - every plot type is written and listed in `index.html`.
 
 `DEFENSES_TEST_DIR` keeps a test folder for inspection.
 
@@ -1362,8 +1642,9 @@ from outside.**
 - **L9. Hints use one HAND level per scene** (§10.3). Backwater into tributary valleys can
   create false hints.
 - **L10. GloFAS resolution.** At 0.05°, rivers with catchments below a few hundred km² are
-  poorly resolved. Their compartments often stay unmatched (`glofas_cell = −1`) and keep
-  the model RP.
+  poorly resolved. Their compartments often stay unmatched by GloFAS
+  (`glofas_cell_id = −1`). Where EFAS is available, its 1 arcmin grid resolves smaller
+  rivers; otherwise these compartments keep the model RP.
 - **L11. Discharge is not water level.**
   - **Stage.** Overtopping depends on stage. Backwater from confluences, ice jams, changes
     of the channel and hysteresis break the link between discharge RP and stage RP.
@@ -1371,7 +1652,7 @@ from outside.**
 - **L12. Acquisition time.** A held test uses the mean discharge of the acquisition day.
   If the peak arrived *after* the overpass, that mean exceeds the flow the levee had faced
   so far, and the lower bound is too high. The specification accepts this convention.
-- **L13. Day attribution of GloFAS values** is configurable but unverified (§11.1).
+- **L13. Time convention of the discharge files** is configurable per source but unverified (§11.3).
 - **L14. Land cover classes are coarse proxies for asset value.** A WorldCover
   "built-up" pixel can be a road, a yard or a building. Category values are national
   averages per m² and need your calibration (§9.3).
@@ -1398,11 +1679,22 @@ from outside.**
    - The configuration entries are empty; please confirm them.
 7. **GFM pixel codes.** Flood 1, exclusion 1, reference water 1 and nodata 255 are
    placeholders.
-8. **GloFAS:**
-   - the request to paste from the EWDS form;
-   - the day attribution (`glofas_valid_time_ends_day`);
-   - the URL of the upstream area map;
-   - approval of `cdsapi` if downloads should run from the script.
+8. **Stage F (discharge), §11:**
+   - **From the EWDS forms (F1):** request values, `data_format`, the years, and the EFAS
+     discharge variable.
+   - **Time convention** (`valid_time_marks`): check on downloaded files and on the known
+     flood event you will name.
+   - **EFAS inputs:** the upstream area file (source, variable, units), and access with
+     your account.
+   - **Licence:** the wording on the licence page.
+   - **`match_river_distance_m` = 500 m** makes most GloFAS matches `weak` (§11.5). A
+     per-source value, for example half a GloFAS cell diagonal (about 3 km), is an option.
+   - **`prefer_*` reading:** the preferred source unless only its match is weak and the
+     other one is good.
+   - **EFAS step:** 6-hourly (`daily_max` possible; one request per month) or the 24-hourly
+     variable of the dataset page (a quarter of the volume, one request per year).
+   - **`min_upstream_area_km2` = 100 km²** is a placeholder; 0 keeps every cell of the box
+     (memory, §11.3).
 9. **Combination rules** (§11.5). The specification leaves these open; the following
    readings were taken:
    - rp snaps to a class *inside* the combined interval;
@@ -1444,7 +1736,8 @@ from outside.**
 | GHSL built-up volume, total and non-residential, R2023A, 100 m | Exposure value | JRC GHSL data package 2023 | to be confirmed from the data package |
 | JRC global depth-damage functions | Maximum damage and damage curves | provided by the user as CSV | per the JRC publication |
 | Copernicus Emergency Management Service, Global Flood Monitoring (GFM) | held / flooded tests, missing-barrier hints | STAC API, endpoint to be confirmed (§15.4) | Copernicus data policy (free and open); confirm the attribution text on the product page |
-| GloFAS historical river discharge, `cems-glofas-historical` | event return periods | CEMS Early Warning Data Store (dataset page checked) | licence shown on the EWDS dataset page, accepted with the download |
+| GloFAS historical river discharge, `cems-glofas-historical` (v4.0, consolidated) | event return periods (§11) | CEMS Early Warning Data Store, API `https://ewds.climate.copernicus.eu/api` (verified) | CEMS-FLOODS datasets licence (rev. 1), accepted on the download form; notice "Contains modified Copernicus Emergency Management Service information [year]"; dataset citation on the dataset page (§11.1) |
+| EFAS historical river discharge, `efas-historical` (v5.0) | event return periods (§11) | CEMS Early Warning Data Store; access with your account to verify (the near-real-time part is reserved for EFAS partners) | CEMS-FLOODS datasets licence (rev. 1); the same notice (§11.1) |
 | ESA WorldCover 10 m 2021 v200 | land cover exposure (§9.3) | public bucket `esa-worldcover` (eu-central-1), verified | CC BY 4.0; attribution from the file: "ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium" |
 | Copernicus Land Monitoring Service, Urban Atlas | land cover exposure where available (§9.3); context zones (§17) | manual download from the CLMS portal | Copernicus data policy; confirm the attribution text with the download |
 | Copernicus Land Monitoring Service, CORINE Land Cover (raster) | context zones (§17) | manual download from the CLMS portal | Copernicus data policy; confirm the attribution text with the download |
@@ -1699,7 +1992,7 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
    - **Caps:**
      - the class above `regional_sop_rp` when uncorroborated, or when historic with the cap flag;
      - `implied_corroborated_max_rp` when corroborated;
-     - `rp_high` at most the event RP of a flooded test, once `event_rp.csv` (Stage F) holds the implied ids.
+     - `rp_high` at most the event RP of a flooded test, once `event_rp_combined.csv` (Stage F) holds the implied ids.
    - **Interval and confidence:**
      - `rp_low` = max(`regional_sop_rp`, class below); `rp_high` = class above within the caps;
      - confidence high / medium / low as specified;
@@ -1740,7 +2033,8 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
    every run.
    - **Error:** the event RP of the scene is at most the compartment's `rp`.
    - **Potential:** the event RP is unknown.
-   - **Event RP source:** `event_rp.csv` of Stage F, by implied id and scene, else by river and scene.
+   - **Event RP source:** `event_rp_combined.csv` of Stage F (one RP per test, combined by `source_mode`), by implied
+     id and scene, else by river and scene.
    - **`wrongly_protected_share`** = erroneous ÷ all wet built area.
    - **EMS extents** are not read yet (Stage D5).
 4. **Also reported:** `potential_share`, implied area flagged `historic_low_core`, counts by confidence and

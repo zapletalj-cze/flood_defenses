@@ -315,14 +315,15 @@ if __name__ == "__main__":
         raise SystemExit(f"Failed units: {list_fail}")
 
     # --- Metrics per run ---
+    # one event RP per test, combined over the sources by source_mode (Stage F)
     event = (
-        pd.read_csv(out_dir / "event_rp.csv")
-        if (out_dir / "event_rp.csv").exists()
+        pd.read_csv(out_dir / "event_rp_combined.csv")
+        if (out_dir / "event_rp_combined.csv").exists()
         else None
     )
     if event is None:
         log.warning(
-            "event_rp.csv (Stage F) missing: every wet built cell inside implied compartments counts as potential."
+            "event_rp_combined.csv (Stage F) missing: every wet built cell inside implied compartments counts as potential."
         )
     df_wet = pd.DataFrame(
         [w for r in list_res for w in r["wet"]],
@@ -355,8 +356,8 @@ if __name__ == "__main__":
                         & (river == str(comp["river_id"]))
                         & (event["item_id"] == w.item_id)
                     ]
-                if hit["rp_event"].notna().any():
-                    rp_event = float(hit["rp_event"].min())
+                if hit["rp_combined"].notna().any():
+                    rp_event = float(hit["rp_combined"].min())
             status = (
                 "potential"
                 if np.isnan(rp_event)

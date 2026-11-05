@@ -1298,15 +1298,16 @@ if __name__ == "__main__":
             "outcome",
         ],
     ).to_csv(run_dir / "implied_gfm_evidence.csv", index=False)
-    # Event return periods of flooded tests, from event_rp.csv of rp_bounds.py (Stage F) when present.
+    # Event return periods of flooded tests, one per test combined over the sources by source_mode
+    # (event_rp_combined.csv of rp_bounds.py, Stage F) when present.
     event_rp = {}
-    if (out_dir / "event_rp.csv").exists():
-        df_ev = pd.read_csv(out_dir / "event_rp.csv")
-        df_ev = df_ev[(df_ev["outcome"] == "flooded") & df_ev["rp_event"].notna()]
-        event_rp = df_ev.groupby("compartment_id")["rp_event"].min().to_dict()
+    if (out_dir / "event_rp_combined.csv").exists():
+        df_ev = pd.read_csv(out_dir / "event_rp_combined.csv")
+        df_ev = df_ev[(df_ev["outcome"] == "flooded") & df_ev["rp_combined"].notna()]
+        event_rp = df_ev.groupby("compartment_id")["rp_combined"].min().to_dict()
     else:
         log.info(
-            "event_rp.csv missing: no event caps for flooded implied compartments."
+            "event_rp_combined.csv missing: no event caps for flooded implied compartments."
         )
 
     # --- F. RP of the stratum "implied" ---

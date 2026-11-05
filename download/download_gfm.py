@@ -10,6 +10,8 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import geopandas as gpd
 import numpy as np
@@ -57,7 +59,8 @@ def gdal_path(href):
     if href.startswith(("http://", "https://")):
         return f"/vsicurl/{href}"
     if href.startswith("file://"):
-        return href[len("file://") :]
+        # file:///C:/path on Windows, file:///path elsewhere
+        return url2pathname(urlparse(href).path)
     if href.startswith("s3://"):
         return f"/vsis3/{href[len('s3://'):]}"
     return href

@@ -1048,19 +1048,20 @@ if stage_a_ok and imp_path.exists() and len(town_c):
                 }
             )
     pd.DataFrame(list_idx).to_csv(out / "gfm_index.csv", index=False)
+    # event RPs per test as rp_bounds.py combines them over the sources (Stage F); EFAS higher than GloFAS on
+    # SCENE_A, so that conservative_both (flooded: the higher RP) is what the Stage E scripts read
     pd.DataFrame(
         {
             "compartment_id": [town_id, town_id],
             "item_id": ["SCENE_A", "SCENE_B"],
-            "datetime": ["2020-05-01T10:00:00Z", "2021-06-01T10:00:00Z"],
             "outcome": ["flooded", "flooded"],
-            "source": ["glofas", "glofas"],
-            "cell_id": [1, 1],
-            "q_event": [100.0, 300.0],
-            "rp_event": [10.0, 50.0],
-            "extrapolated": [False, False],
+            "rp_combined": [10.0, 50.0],
+            "used": ["both", "glofas"],
+            "source_disagreement": [False, False],
+            "rp_glofas": [6.0, 50.0],
+            "rp_efas": [10.0, np.nan],
         }
-    ).to_csv(out / "event_rp.csv", index=False)
+    ).to_csv(out / "event_rp_combined.csv", index=False)
     gis.Vector.write_gpkg(
         gpd.GeoDataFrame(
             {"name": ["town"]},
