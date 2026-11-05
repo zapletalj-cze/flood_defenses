@@ -20,6 +20,8 @@ shapely = ">=2.0"
 pyproj = "*"
 # required by the existing import in gis.py (depends on affine, numba, numpy, scipy; no rasterio)
 pyflwdir = "*"
+# Stage E plots (approved); the base package without Qt
+matplotlib-base = "*"
 
 # Scripts run as modules from the repository root, so `import gis` resolves without sys.path changes.
 [tasks]
@@ -46,3 +48,5 @@ test-stage-c = "python -m tests.test_stage_c"
 test-hand-yz = "python -m tests.test_hand_yz"
 test-stage-d = "python -m tests.test_stage_d"
 make-benchmark-world = "python -m tests.make_benchmark_world"
+snap-rivers = "python -m processing.snap_rivers"
+test-stage-e = "python -m tests.test_stage_e"

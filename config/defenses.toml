@@ -33,6 +33,51 @@ placeholders = [
     "country.context.ghsl_smod_urban",
     "country.context.min_zone_area_m2",
     "sources.osm_tags_water",
+    "implied.recompute_hand",
+    "implied.envelope_hand_m",
+    "implied.subsegment_length_m",
+    "implied.subsegment_length_grid",
+    "implied.built_source",
+    "implied.exclude_building_tags",
+    "implied.built_share_min",
+    "implied.built_share_min_grid",
+    "implied.built_area_min_m2",
+    "implied.hand_bin_m",
+    "implied.min_bin_area_m2",
+    "implied.smooth_bins",
+    "implied.onset_fraction",
+    "implied.onset_persist_bins",
+    "implied.quantiles",
+    "implied.primary_level_method",
+    "implied.sharp_window_m",
+    "implied.sharp_high",
+    "implied.component_built_min_m2",
+    "implied.merge_max_dlevel_m",
+    "implied.merge_max_gap",
+    "implied.corroboration_distance_m",
+    "implied.corroboration_min",
+    "implied.explicit_overlap_max",
+    "implied.regional_sop_rp",
+    "implied.implied_corroborated_max_rp",
+    "implied.historic_low_core_uncorroborated_cap",
+    "implied.ghsl_epochs",
+    "implied.epoch_cutoff",
+    "implied.growth_low_share_min",
+    "implied.min_cells_temporal",
+    "implied.rp_distribution_classes",
+    "implied.rp_distribution_shares",
+    "implied.snap.step_m",
+    "implied.snap.resolution_m",
+    "implied.snap.max_offset_m",
+    "implied.snap.min_window_m",
+    "implied.snap.cost_epsilon",
+    "implied.snap.chunk_length_m",
+    "implied.snap.chunk_overlap_m",
+    "implied.snap.max_length_ratio",
+    "implied.snap.wide_river_m",
+    "implied.snap.direction_check_m",
+    "implied.snap.max_nodata_share",
+    "implied.snap.chainage_origin",
 ]
 
 [general]
@@ -317,3 +362,67 @@ coarse_match_distance_m = 100.0
 [review]
 top_n = 50
 flag_weights = { closure_gap = 1.0, crest_dsm = 0.5, truncated = 1.0, obs_conflict = 1.5, model_obs_conflict = 1.0, urban_no_test = 0.5, no_levee = 1.0 }
+
+# --- Stage E: implied protection in dense built-up reaches (experimental) ---
+# Values are placeholders (listed in `placeholders`) except the run settings units, include_* and [implied.plots].
+# Outputs stay separate; nothing enters defenses_clip.gpkg unless include_implied = true.
+[implied]
+units = []                          # empty means all units; set pilot units first
+recompute_hand = false              # true: recompute HAND per unit with snapped rivers
+envelope_hand_m = 10.0
+subsegment_length_m = 500.0         # base length
+subsegment_length_grid = [500.0, 1000.0, 2000.0]   # multiples of the base
+built_source = "max"                # footprints, ghsl or max
+exclude_building_tags = { building = ["boathouse", "houseboat"], man_made = ["wastewater_plant", "water_works"] }   # verify, report counts
+built_share_min = 0.3
+built_share_min_grid = [0.2, 0.3, 0.4]
+built_area_min_m2 = 20000.0
+hand_bin_m = 0.25
+min_bin_area_m2 = 2000.0
+smooth_bins = 3
+onset_fraction = 0.5
+onset_persist_bins = 4
+quantiles = [0.02, 0.05, 0.10]
+primary_level_method = "onset"      # onset, q0.02, q0.05 or q0.10
+sharp_window_m = 1.0
+sharp_high = 0.5
+component_built_min_m2 = 5000.0
+merge_max_dlevel_m = 0.5
+merge_max_gap = 1
+corroboration_distance_m = 50.0
+corroboration_min = 0.3
+explicit_overlap_max = 0.8
+regional_sop_rp = 10
+implied_corroborated_max_rp = 100
+historic_low_core_uncorroborated_cap = true
+ghsl_epochs = []                    # verify available epochs
+epoch_cutoff = 1990
+growth_low_share_min = 0.1
+min_cells_temporal = 20
+rp_distribution_classes = [20, 50, 100]
+rp_distribution_shares = [0.4, 0.4, 0.2]
+include_implied = false
+include_in_review = true
+
+[implied.snap]
+step_m = 5.0                        # spacing of river_points.gpkg and of the profile bins
+resolution_m = 2.0                  # grid of the least-cost path (gdal.Warp average)
+max_offset_m = 30.0                 # corridor half-width; cells outside are impassable
+min_window_m = 15.0                 # minimum filter of the narrow-river cost
+cost_epsilon = 0.01
+chunk_length_m = 5000.0
+chunk_overlap_m = 200.0
+max_length_ratio = 1.5              # snapped / original length per chunk; above it the original chunk is kept
+wide_river_m = 40.0                 # water polygon area in the corridor / chunk length above which the wide cost is used
+direction_check_m = 200.0
+max_nodata_share = 0.5              # addition to the specification: narrow-river chunks with more DTM nodata in the
+                                    # corridor keep the original line (DTM edge, e.g. a border river)
+chainage_origin = "downstream"      # downstream or upstream
+
+[implied.plots]
+enabled = true
+dpi = 120
+max_per_type = 200
+sample_seed = 42
+show_max = 10
+plot_all_in_units = []

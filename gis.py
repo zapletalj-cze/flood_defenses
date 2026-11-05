@@ -1608,6 +1608,33 @@ class Raster:
             out[inside] = lookup[ints[inside]]
         return out
 
+    @staticmethod
+    def hillshade(array, geotransform, wkt, z_factor=1.0, azimuth=315.0, altitude=45.0):
+        """
+        Hillshade of an elevation array with gdal.DEMProcessing to MEM
+        :param array: 2D elevation array, NaN = nodata
+        :param geotransform: GDAL geotransform
+        :param wkt: CRS as WKT
+        :param z_factor: vertical exaggeration
+        :param azimuth: light direction in degrees from north
+        :param altitude: light elevation in degrees
+        :return: uint8 array, 0 = nodata
+        """
+        mem = Raster.array_to_mem(
+            np.asarray(array, dtype=np.float32), geotransform, wkt
+        )
+        out = gdal.DEMProcessing(
+            "",
+            mem,
+            "hillshade",
+            format="MEM",
+            zFactor=z_factor,
+            azimuth=azimuth,
+            altitude=altitude,
+            computeEdges=True,
+        )
+        return out.GetRasterBand(1).ReadAsArray()
+
 
 class Vector:
     @staticmethod
@@ -2206,6 +2233,58 @@ class Vector:
         copied = None
         return str(out_path)
 
+    @staticmethod
+    def chaikin(line, iterations=2, max_shift=float("inf")):
+        """
+        Chaikin corner cutting of a line; the end points stay. A vertex whose corner
+        would move by more than max_shift is kept unsmoothed in every iteration. The
+        shift of a corner is 1/8 of |previous - 2 * vertex + next|: the distance from the
+        vertex to the midpoint of its cut chord, which the limit curve also passes.
+        :param line: shapely LineString
+        :param iterations: number of corner-cutting passes
+        :param max_shift: largest allowed movement of a vertex
+        :return: smoothed LineString
+        """
+        xy = shapely.get_coordinates(line)
+        fixed = np.zeros(len(xy), bool)
+        fixed[[0, -1]] = True
+        for _ in range(iterations):
+            if len(xy) < 3:
+                break
+            before, vertex, after = xy[:-2], xy[1:-1], xy[2:]
+            shift = 0.125 * np.hypot(*(before - 2 * vertex + after).T)
+            keep = fixed[1:-1] | (shift > max_shift)
+            counts = np.where(keep, 1, 2)
+            out = np.empty((counts.sum() + 2, 2))
+            out_fixed = np.zeros(len(out), bool)
+            out[0], out[-1] = xy[0], xy[-1]
+            out_fixed[[0, -1]] = True
+            first = 1 + np.concatenate([[0], np.cumsum(counts)[:-1]])
+            out[first[keep]] = vertex[keep]
+            out_fixed[first[keep]] = True
+            cut = ~keep
+            out[first[cut]] = 0.75 * vertex[cut] + 0.25 * before[cut]
+            out[first[cut] + 1] = 0.75 * vertex[cut] + 0.25 * after[cut]
+            xy, fixed = out, out_fixed
+        return shapely.LineString(xy)
+
+    @staticmethod
+    def interpolate_xy(line, distances):
+        """
+        Points at distances along a line, vectorized with numpy (one search in the
+        cumulative segment lengths instead of one GEOS walk along the line per point)
+        :param line: shapely LineString
+        :param distances: distances from the start; clipped to [0, length]
+        :return: (n, 2) float array of coordinates
+        """
+        xy = shapely.get_coordinates(line)
+        seg = np.hypot(*np.diff(xy, axis=0).T)
+        cum = np.r_[0.0, np.cumsum(seg)]
+        d = np.clip(np.asarray(distances, dtype=float), 0.0, cum[-1])
+        i = np.clip(np.searchsorted(cum, d, side="right") - 1, 0, len(seg) - 1)
+        t = np.divide(d - cum[i], seg[i], out=np.zeros(len(d)), where=seg[i] > 0)
+        return xy[i] + t[:, None] * (xy[i + 1] - xy[i])
+
 
 class Geometry:
     # from StackOverflow to be tested
@@ -2402,6 +2481,27 @@ class Hydro:
         return _chamfer_distance(
             np.ascontiguousarray(mask, dtype=np.bool_), np.float32(limit)
         )
+
+    @staticmethod
+    def least_cost_path(cost, start, end):
+        """
+        Least-cost path between two cells (Dijkstra, 8-connected). A step costs its
+        length in cells (1, diagonal sqrt 2) times the mean cost of the two cells.
+        :param cost: 2D float array of non-negative costs, NaN = impassable
+        :param start: (row, col) of the start cell
+        :param end: (row, col) of the end cell
+        :return: (int64 array of flat cell indices from start to end, empty if end is
+                  unreachable; total cost, inf if unreachable)
+        """
+        cost = np.ascontiguousarray(cost, dtype=np.float64)
+        rows, cols = cost.shape
+        for r, c in (start, end):
+            if not (0 <= r < rows and 0 <= c < cols) or np.isnan(cost[r, c]):
+                return np.empty(0, np.int64), float("inf")
+        path, total = _least_cost_path(
+            cost, np.int64(start[0] * cols + start[1]), np.int64(end[0] * cols + end[1])
+        )
+        return path, float(total)
 
 
 class MosaicRasters:
@@ -3174,6 +3274,61 @@ def _priority_flood(surface, seeds):
     )
 
 
+@njit(cache=True)
+def _least_cost_path(cost, start, end):
+    # Dijkstra on an 8-connected grid; a step costs its length (1 or sqrt 2 cells) times the mean cost of its cells.
+    rows, cols = cost.shape
+    flat = cost.ravel()
+    n = rows * cols
+    dist = np.full(n, np.inf)
+    prev = np.full(n, -1, np.int64)
+    done = np.zeros(n, np.bool_)
+    keys = np.empty(4096, np.float64)
+    vals = np.empty(4096, np.int64)
+    size = 0
+    dist[start] = 0.0
+    keys, vals, size = _heap_push(keys, vals, size, 0.0, np.int64(start))
+    d_row = np.array([-1, 1, 0, 0, -1, -1, 1, 1])
+    d_col = np.array([0, 0, -1, 1, -1, 1, -1, 1])
+    diag = sqrt(2.0)
+    step = np.array([1.0, 1.0, 1.0, 1.0, diag, diag, diag, diag])
+    while size > 0:
+        d, c, size = _heap_pop(keys, vals, size)
+        if done[c]:
+            continue
+        done[c] = True
+        if c == end:
+            break
+        ci = c // cols
+        cj = c - ci * cols
+        for k in range(8):
+            ni = ci + d_row[k]
+            nj = cj + d_col[k]
+            if ni < 0 or ni >= rows or nj < 0 or nj >= cols:
+                continue
+            nb = ni * cols + nj
+            if done[nb] or np.isnan(flat[nb]):
+                continue
+            nd = d + step[k] * 0.5 * (flat[c] + flat[nb])
+            if nd < dist[nb]:
+                dist[nb] = nd
+                prev[nb] = c
+                keys, vals, size = _heap_push(keys, vals, size, nd, np.int64(nb))
+    if not done[end]:
+        return np.empty(0, np.int64), np.inf
+    count = 0
+    c = end
+    while c >= 0:
+        count += 1
+        c = prev[c]
+    path = np.empty(count, np.int64)
+    c = end
+    for i in range(count - 1, -1, -1):
+        path[i] = c
+        c = prev[c]
+    return path, dist[end]
+
+
 class Config:
     """
     TOML configuration of the Defenses package. Keys are dotted names; the prefix
@@ -3388,12 +3543,74 @@ class Config:
         "coarse.coarse_match_distance_m": "float",
         "review.top_n": "int",
         "review.flag_weights": "table",
+        # Stage E: implied protection (experimental)
+        "implied.units": "str_list",
+        "implied.recompute_hand": "bool",
+        "implied.envelope_hand_m": "float",
+        "implied.subsegment_length_m": "float",
+        "implied.subsegment_length_grid": "float_list",
+        "implied.built_source": "str",
+        "implied.exclude_building_tags": "table",
+        "implied.built_share_min": "float",
+        "implied.built_share_min_grid": "float_list",
+        "implied.built_area_min_m2": "float",
+        "implied.hand_bin_m": "float",
+        "implied.min_bin_area_m2": "float",
+        "implied.smooth_bins": "int",
+        "implied.onset_fraction": "float",
+        "implied.onset_persist_bins": "int",
+        "implied.quantiles": "float_list",
+        "implied.primary_level_method": "str",
+        "implied.sharp_window_m": "float",
+        "implied.sharp_high": "float",
+        "implied.component_built_min_m2": "float",
+        "implied.merge_max_dlevel_m": "float",
+        "implied.merge_max_gap": "int",
+        "implied.corroboration_distance_m": "float",
+        "implied.corroboration_min": "float",
+        "implied.explicit_overlap_max": "float",
+        "implied.regional_sop_rp": "int",
+        "implied.implied_corroborated_max_rp": "int",
+        "implied.historic_low_core_uncorroborated_cap": "bool",
+        "implied.ghsl_epochs": "int_list",
+        "implied.epoch_cutoff": "int",
+        "implied.growth_low_share_min": "float",
+        "implied.min_cells_temporal": "int",
+        "implied.rp_distribution_classes": "int_list",
+        "implied.rp_distribution_shares": "float_list",
+        "implied.include_implied": "bool",
+        "implied.include_in_review": "bool",
+        **{
+            f"implied.snap.{key}": "float"
+            for key in (
+                "step_m",
+                "resolution_m",
+                "max_offset_m",
+                "min_window_m",
+                "cost_epsilon",
+                "chunk_length_m",
+                "chunk_overlap_m",
+                "max_length_ratio",
+                "wide_river_m",
+                "direction_check_m",
+                "max_nodata_share",
+            )
+        },
+        "implied.snap.chainage_origin": "str",
+        "implied.plots.enabled": "bool",
+        "implied.plots.dpi": "int",
+        "implied.plots.max_per_type": "int",
+        "implied.plots.sample_seed": "int",
+        "implied.plots.show_max": "int",
+        "implied.plots.plot_all_in_units": "str_list",
     }
     CONTEXTS = ("industrial", "dense_urban", "urban", "rural")
     ALLOWED = {
         "country.dtm_conversion": {"A", "B"},
         "country.dtm_compress": {"ZSTD", "DEFLATE", "LZW"},
         "general.log_level": {"DEBUG", "INFO", "WARNING", "ERROR"},
+        "implied.built_source": {"footprints", "ghsl", "max"},
+        "implied.snap.chainage_origin": {"downstream", "upstream"},
     }
 
     @staticmethod
@@ -3683,6 +3900,33 @@ class Config:
                             f"{subset}.{key} values {sorted(set(list_val) - set(list_known))} "
                             "are not in sources.osm_tags_hydraulic"
                         )
+        implied = cfg.get("implied", {})
+        snap = implied.get("snap", {})
+        for key in ["resolution_m", "step_m", "chunk_length_m", "cost_epsilon"]:
+            if f"implied.snap.{key}" in keys and snap[key] <= 0:
+                list_err.append(f"implied.snap.{key} must be positive")
+        if {"implied.snap.chunk_length_m", "implied.snap.chunk_overlap_m"} <= keys:
+            if snap["chunk_overlap_m"] >= snap["chunk_length_m"]:
+                list_err.append(
+                    "implied.snap.chunk_overlap_m must be shorter than chunk_length_m"
+                )
+        if "implied.snap.max_length_ratio" in keys and snap["max_length_ratio"] < 1:
+            list_err.append("implied.snap.max_length_ratio must be at least 1")
+        if "implied.snap.max_nodata_share" in keys and snap["max_nodata_share"] > 1:
+            list_err.append("implied.snap.max_nodata_share must not exceed 1")
+        if {"implied.snap.min_window_m", "implied.snap.resolution_m"} <= keys:
+            if snap["min_window_m"] < snap["resolution_m"]:
+                list_err.append(
+                    "implied.snap.min_window_m must be at least one cell (resolution_m)"
+                )
+        if {"implied.primary_level_method", "implied.quantiles"} <= keys:
+            methods = {"onset"} | {f"q{q:.2f}" for q in implied["quantiles"]}
+            if implied["primary_level_method"] not in methods:
+                list_err.append(
+                    f"implied.primary_level_method must be one of {sorted(methods)}"
+                )
+        if "implied.plots.dpi" in keys and implied["plots"]["dpi"] < 1:
+            list_err.append("implied.plots.dpi must be at least 1")
         return list_err
 
     @staticmethod

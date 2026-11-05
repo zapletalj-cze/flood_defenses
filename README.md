@@ -23,7 +23,7 @@ explicitly.
 | C | `download_gfm.py`, `gfm_evidence.py`, `download_glofas.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes, and the GloFAS day convention not verified |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
-| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | plan (step E.2) approved; E1 in progress |
+| E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1 done** (`snap_rivers.py`, `plots.py`; 16 checks); E2–E5 in progress |
 
 ---
 
@@ -46,6 +46,7 @@ explicitly.
 15. [Bugs, fixes, limitations, open decisions](#15-bugs-fixes-limitations-open-decisions)
 16. [Data sources and licences](#16-data-sources-and-licences)
 17. [Stage D (in progress): industrial sites, dense urban areas, large systems](#17-stage-d-in-progress-industrial-sites-dense-urban-areas-large-systems)
+18. [Stage E (experimental): implied protection in dense built-up reaches](#18-stage-e-experimental-implied-protection-in-dense-built-up-reaches)
 
 ---
 
@@ -106,6 +107,7 @@ only if you install it (§11.1); otherwise it reads files downloaded through the
 
 ```
 gis.py                     shared GIS library (existing; new functions appended, nothing changed)
+plots.py                   Stage E plotting helpers (matplotlib): budget, saving, colours, index.html
 config/defenses.toml       configuration template
 config/osmconf.ini         OSM driver configuration exposing the tag keys used
 docs/navod_cs.md           short guide to running the scripts, in Czech
@@ -126,6 +128,7 @@ processing/
   rp_index.py              exposure, score, RP per compartment
   HAND_YZ.py               land cover exposure (WorldCover, Urban Atlas) supplementing GHSL
   context_zones.py         industrial / dense urban / urban / rural zones of the corridor (Stage D)
+  snap_rivers.py           river lines snapped to the thalweg, river points with chainage (Stage E1)
   gfm_evidence.py          held / flooded tests per compartment and scene; missing-barrier hints
   rp_bounds.py             event return periods, observed bounds, combination with the model
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
@@ -136,6 +139,7 @@ tests/
   test_stage_c.py          end-to-end Stage C on the Stage B country (26 checks)
   test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
+  test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -165,6 +169,9 @@ function was modified. The only change to existing lines is the import block.
 | `Http` | `get_json(url, params, body, retries, pause_s, headers)` | JSON GET with query parameters or POST of a JSON body, with backoff (STAC search and its `next` links) |
 | `Stats` | `percentile_rank`, `quantile_classes` | Ranks and quantile mapping for the RP score |
 | `Stats` | `gumbel_lmoments(sample)`, `gumbel_rp(q, xi, alpha)` | Gumbel fit by L-moments; return period of a discharge |
+| `Hydro` | `least_cost_path(cost, start, end)` | Dijkstra on an 8-connected grid (numba), NaN impassable; thalweg snapping |
+| `Vector` | `chaikin(line, iterations, max_shift)`, `interpolate_xy(line, distances)` | Chaikin smoothing that keeps vertices which would move more than `max_shift`; points along a line in one numpy pass |
+| `Raster` | `hillshade(array, geotransform, wkt)` | Hillshade with `gdal.DEMProcessing` to MEM (plots) |
 
 ### Naming in the code
 
@@ -1178,6 +1185,18 @@ compartments take seconds.
   - **context zones:** precedence of the order, small zones falling through to later
     contexts, rural as the rest, no overlaps, the corridor tiled exactly;
   - **`zones_to_grid`** on a unit grid.
+- **`pixi run test-stage-e`** (step E1: 16 checks), on its own synthetic country T5 (8 × 3.2 km, 1 m DTM):
+  - **kernels:** least-cost path through the only gap of a wall; Chaikin keeps its end points, moves no
+    vertex more than `max_shift` and keeps a sharper corner; hillshade with nodata 0;
+  - **snapping:** a valley minimum 15 m off the line is found within one cell (2 m); a ditch 1 m deeper
+    than the channel but beyond `max_offset_m` is not chosen; a line drawn upstream is flipped; a wide
+    river with a nodata water surface follows the water polygon centre; a zigzag channel twice the length
+    of its line keeps the original line (quality check); only `is_source` rivers are snapped;
+  - **outputs:** two chunks stitched into one line; river points every `step_m` with chainage 0 at the
+    downstream end and tangents pointing downstream;
+  - **pilot units and plots:** rivers clipped to the pilot window; `plot_all_in_units` overriding
+    `max_per_type`; `SHOW_PLOTS` without a display only warns; `index.html` lists every figure with its
+    metrics.
 - **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
@@ -1454,3 +1473,73 @@ follow.
    for the steps that follow.
 5. **Measured.** 7.3 s on a synthetic corridor of 2829 km² with 50 000 Urban Atlas
    polygons, 5000 OSM areas, 2 M CORINE pixels and SMOD at 1 km.
+
+## 18. Stage E (experimental): implied protection in dense built-up reaches
+
+Plan and measured estimates: [docs/stage_e_plan.md](docs/stage_e_plan.md). Outputs stay separate and never enter
+`defenses_clip.gpkg` unless `implied.include_implied = true`. All values of `[implied]` are placeholders.
+
+### 18.1 Thalweg snapping (`snap_rivers.py`, step E1)
+
+Snaps the river lines to the thalweg of the DTM. HAND and the bank subsegments of the next steps use the result.
+
+1. **Rivers.**
+   - **Source:** `rivers_sources.gpkg` features with `is_source = true` (Stage B), else the rivers input.
+   - **Merging:** features joined end to end are merged into one line; confluences and crossings stay breaks.
+   - **Pilot units:** with `implied.units`, the lines are clipped to the unit windows, and chainage starts at
+     the clipped ends.
+2. **Direction.** Mean DTM elevation over the first and the last `direction_check_m`; a line whose start is
+   lower than its end is reversed (`flipped`).
+3. **Chunks.** `chunk_length_m` with `chunk_overlap_m` overlap. Per chunk:
+   - **Read:** `gdal.Warp` average to `resolution_m` over the bounding box of the corridor (chunk buffered by
+     `max_offset_m`); cells outside the corridor are impassable.
+   - **Narrow river:** cost = z − minimum filter of z over `min_window_m` + `cost_epsilon`.
+     - **Nodata** in the corridor is taken as a water surface removed from the DTM and gets the lowest cost.
+     - **Corridor mostly nodata** (more than `max_nodata_share`, e.g. a border river at the DTM edge): the
+       original chunk is kept. This key is an addition to the specification.
+   - **Wide river** (water polygon area in the corridor / chunk length > `wide_river_m`): cost =
+     1 / (distance to the water polygon edge + `cost_epsilon`); outside the polygons impassable. The distance
+     comes from the polygons rasterized on a window padded by 2 × `max_offset_m` with a dry border, so the
+     window edge never acts as a bank.
+   - **Path:** `gis.Hydro.least_cost_path` (Dijkstra, numba, 8-connected, diagonal steps × √2) from the cell
+     of the chunk start to the cell of its end, or the nearest passable cells.
+   - **Quality check:** simplified path length / chunk length at most `max_length_ratio`; otherwise the
+     original chunk is kept (`kept_original`) and the reason is logged. Mean and max offset are recorded.
+4. **Stitching and smoothing.** Each chunk keeps the part between the middles of its overlaps. The stitched line
+   is simplified with tolerance `resolution_m` / 2 and smoothed with two Chaikin iterations; a vertex that would
+   move more than `resolution_m` keeps its place.
+5. **Chainage** from `chainage_origin` (default: the downstream end) per line, without M values.
+6. **Outputs.**
+   - `rivers_snapped.gpkg`:
+     - specified fields: `river_id`, `flipped`, `n_chunks`, `n_kept_original`, `mean_offset_m`, `max_offset_m`,
+       `wide_river_chunks`;
+     - additions: `source_river_ids`, `name`, `length_m`, `length_original_m`, `upstream_elev_m`,
+       `downstream_elev_m`.
+   - `river_points.gpkg`: points every `step_m` with `river_id`, `chainage_m`, and the unit tangent
+     `tangent_dx`, `tangent_dy` pointing downstream.
+   - `snap_rivers_performance.json`: timings per step and peak RAM.
+7. **Plots** (`plots.py`), in `plots/implied/<RUN_ID>/` with `index.html`:
+   - **`snap_profile`** per river: DTM elevation along the original and the snapped line against chainage,
+     chunk boundaries, kept-original chunks shaded.
+   - **`snap_map`** per chunk: overview with the chunk and a detail crop (8 × `max_offset_m`) at the largest
+     offset, both on a hillshade with the original line, the least-cost path and the water polygons.
+   - **Order of plotting:** flagged items first (kept original, wide, any nodata in the corridor, path at the
+     corridor edge, flipped river), then a random sample (`sample_seed`) up to `max_per_type`. Units in
+     `plot_all_in_units` get all their items.
+   - **`SHOW_PLOTS`** (run variable instead of `--show-plots`): up to `show_max` figures per type are shown
+     without blocking; without a display a warning is logged.
+   - **Colours** are fixed per entity: water blue, snapped orange, original aqua and dashed (its contrast is
+     below 3:1, so the dash and the legend carry it).
+8. **Measured** on the benchmark world of Stage A (24 × 24 km, 1 m, 3 rivers, 47 km, 12 chunks, 2 workers):
+
+   | DTM layout | Reads, storage cold (first run) | Reads, OS cache cleared | Cost + path + stitch | Plots (15) | Peak RAM main / worker |
+   |---|---|---|---|---|---|
+   | tiled, overviews (option A) | 13.9 s (0.30 s/km) | 0.47 s (0.010 s/km) | 0.90 s (0.019 s/km) | 5.2 s | 572 / 438 MB |
+   | strip, no overviews | 75.4 s (1.6 s/km) | 5.4 s (0.11 s/km) | 0.79 s | 7.9 s | 1025 / 764 MB |
+
+   - **The two read columns** show how much storage matters. The first run read files idle since the day
+     before; the repeat dropped only the page cache of the machine (`posix_fadvise`), while the storage below
+     stayed warm.
+   - **Per 1000 km of river:** about 20 s of computation plus 10–300 s of reads on a tiled DTM, or 110–1600 s
+     on a strip DTM, divided by the number of workers. Plots add 0.35–0.5 s per figure; the main process
+     reads the plot windows with the configured GDAL cache (`gdal_cachemax_mb`).
