@@ -23,13 +23,13 @@ COUNTRY = "XX"  # "XX": the country of [general] country
 CORE = [
     "processing.prepare_dtm",
     "processing.build_units",
-    "download.download_osm",
-    "processing.osm_hydraulics",
     "processing.compartments",
     "download.download_ghsl",
     "processing.rp_index",
 ]
 OPTIONAL = [
+    "download.download_osm",
+    "processing.osm_hydraulics",
     "download.download_gfm",
     "processing.gfm_evidence",
     "download.download_discharge",
@@ -147,7 +147,7 @@ if __name__ == "__main__":
     pbf, region = country.get("osm_pbf", ""), country.get("geofabrik_region", "")
     if pbf:
         add(
-            "inputs",
+            "inputs (optional)",
             "osm_pbf",
             Path(pbf).exists(),
             (
@@ -158,10 +158,10 @@ if __name__ == "__main__":
         )
     else:
         add(
-            "inputs",
+            "inputs (optional)",
             "osm_pbf / geofabrik_region",
             bool(region),
-            region or "set one of them",
+            region or "not set: no OSM water sources and pumping stations (optional)",
         )
     for key in ("max_damage_csv", "depth_damage_csv"):
         path = country.get("rp", {}).get(key, "")
