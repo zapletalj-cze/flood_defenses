@@ -24,6 +24,10 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 3. **Kontrola před během:** `pixi run check`. Vypíše OK nebo PROBLEM u každého skriptu a
    vstupu (soubory, sloupce, CRS, složky).
 
+4. **Report po běhu:** `pixi run report` zapíše do repozitáře `reports/<země>/report.md`
+   (souhrn vstupů, výstupů a logů, max. 60 KB) a `overview.png`. Složku commitněte a
+   pushněte, ať je výsledek vidět i jinde.
+
 ## 2. Spouštění
 
 - **Odkud:** vždy z kořene repozitáře: `pixi run <úloha>`.

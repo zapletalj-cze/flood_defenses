@@ -126,6 +126,7 @@ download/
   download_clms.py         CORINE (legend mapping verified on known pixels) and Urban Atlas from local files
 processing/
   check_inputs.py          configuration and input check before a run (pixi run check)
+  data_report.py           compact report of inputs, outputs and logs into reports/<country>/ (pixi run report)
   prepare_dtm.py           DTM inspection, footprint, benchmark, estimates, optional conversion
   build_units.py           river corridor, processing units, memory estimate
   osm_hydraulics.py        water sources (closed streams), pumping stations
@@ -231,6 +232,17 @@ The configuration has two files:
   - the OSM extract, the damage tables, write access to the folders.
 
   It prints OK or PROBLEM per item and exits with 1 when a core step is blocked.
+- **Report after a run.** `pixi run report` (`processing/data_report.py`) writes a summary
+  to `reports/<country>/` in the repository, meant to be committed:
+  - **`report.md`** (cut at 60 KB):
+    - the configuration in use;
+    - DTM storage and elevation statistics from 24 random windows;
+    - levees and rivers inside the DTM footprint (counts, lengths, columns);
+    - every output layer and table (counts, areas, percentiles, the largest features);
+    - the newest log of every script (distinct warnings and errors, last lines);
+  - **`overview.png`:** the footprint, the levees and the compartments.
+
+  It reads samples and summaries only and never copies data.
 
 The tables of `advanced.toml`:
 - `[general]`: directories, workers, memory limits, GDAL cache and threads.

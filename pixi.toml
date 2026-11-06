@@ -28,6 +28,7 @@ cdsapi = ">=0.7.4"
 # Scripts run as modules from the repository root, so `import gis` resolves without sys.path changes.
 [tasks]
 check = "python -m processing.check_inputs"
+report = "python -m processing.data_report"
 prepare-dtm = "python -m processing.prepare_dtm"
 build-units = "python -m processing.build_units"
 compartments = "python -m processing.compartments"
