@@ -969,18 +969,8 @@ if __name__ == "__main__":
     list_done = [
         u for u in df_units.unit_id if (work_dir / "units" / u / "done.json").exists()
     ]
-    # units finished before the renaming (Stage G) hold compartments.gpkg
     list_pa = [
-        gpd.read_file(
-            next(
-                p
-                for p in (
-                    work_dir / "units" / u / "protected_areas.gpkg",
-                    work_dir / "units" / u / "compartments.gpkg",
-                )
-                if p.exists() or p.name == "compartments.gpkg"
-            )
-        )
+        gpd.read_file(work_dir / "units" / u / "protected_areas.gpkg")
         for u in list_done
     ]
     list_pa = [f for f in list_pa if len(f)]
