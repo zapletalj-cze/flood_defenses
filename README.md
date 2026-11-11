@@ -27,6 +27,40 @@ explicitly.
 | G | report review ([reports/report_review.md](reports/report_review.md)); OSM removed, rivers always snapped into their channel (§8), "compartment" renamed "protected area"; transport embankments next | **steps 1–2 done** (all tests pass); steps 3–4 pending |
 | F | discharge sources GloFAS and EFAS (§11): `download_discharge.py`, `discharge_prepare.py`, `rp_bounds.py` rewritten | **F2–F5 done**, tested on synthetic data (16 checks); **F1 blocked**: the EWDS is not reachable from the session and the test requests need your key, so request values, time convention and EFAS access are not verified |
 
+## How it works in brief
+
+```mermaid
+flowchart TD
+    subgraph IN["Inputs: files you prepare"]
+        DTM["DTM"]
+        LEV["Levee lines"]
+        RIV["River network with an upstream area column"]
+        GUI["Guide lines of the rivers (optional)"]
+        DMG["Damage tables"]
+    end
+    CHK["pixi run check: keys, files, columns, CRS"]
+    PD["prepare_dtm: inspection, footprint, read benchmark"]
+    BU["build_units: corridor along the rivers, units with a halo"]
+    PA["protected_areas: rivers snapped into the channel, barriers,
+    HAND and spill levels with and without barriers per unit (diagram in §5)"]
+    GH["download_ghsl: building volume"]
+    RI["rp_index: exposed value, score, return period class"]
+    OBS["optional observations: GFM scenes (gfm_evidence),
+    GloFAS and EFAS discharge (download_discharge, discharge_prepare, rp_bounds)"]
+    OUT["protected_areas_rp.gpkg, validate, pixi run report"]
+    IN --> CHK --> PD --> BU --> PA
+    PA -- "protected_areas.gpkg" --> RI
+    GH --> RI
+    RI --> OBS --> OUT
+    RI --> OUT
+```
+
+**Principle.** A cell is protected when the levees raise the level at which river water
+reaches it (§5.1). Below, the same calculation on a cross-section; the figures are made
+by `pixi run make-figures` (`docs/make_figures.py`) from synthetic data.
+
+![Principle on a cross-section](docs/img/principle_profile.png)
+
 ---
 
 ## Contents
@@ -114,6 +148,7 @@ plots.py                   plotting helpers of Stages E and F (matplotlib): budg
 config/defenses.toml       settings of a run: country, folders, input paths (short; you fill it)
 config/advanced.toml       all other keys with their defaults
 docs/navod_cs.md           short guide to running the scripts, in Czech
+docs/make_figures.py       explanatory figures of this README (docs/img/), from synthetic data
 docs/stage_d_plan.md       Stage D, step D.1: inventory, inputs, plan and measured runtime impact
 docs/stage_e_plan.md       Stage E, step E.2: outputs check, corridor read benchmark, plan (approved)
 download/
@@ -358,6 +393,34 @@ Run logs go to `output_dir/<country>/logs/<script>_<timestamp>.log`.
 ## 5. Method: from levee lines to protected areas
 
 ### 5.1 Principle
+
+```mermaid
+flowchart TD
+    subgraph C["Once per country, shared by all units"]
+        S1["Snap the rivers into their channel (§8) → rivers_channel.gpkg"]
+        S2["Merge the levee lines, bridge gaps up to gap_tolerance_m → barrier_lines.gpkg"]
+    end
+    subgraph U["Per unit (core plus halo window), in parallel, with checkpoints"]
+        U1["Read the DTM at the working cell"]
+        U2["Rasterize the barriers; crest = maximum of the native DTM near the line"]
+        U3["Rasterize the rivers: river cells are the water sources;
+        gated_crossings decides whether a crossing opens the barrier (§8.2)"]
+        U4["Undefended DTM: barrier cells removed and interpolated"]
+        U5["HAND on the undefended DTM: height above the river cell reached downstream"]
+        U6["Priority flood from the water sources over HAND:
+        spill_undef without and spill_def with the barrier crests"]
+        U7["margin = spill_def − spill_undef"]
+        U8["protected = margin ≥ min_margin_m and spill_undef ≤ max_level_m;
+        4-connected regions of at least min_area_m2"]
+    end
+    M["Merge the units: one area seen by two windows kept once,
+    truncated areas checked against the neighbours, ids
+    → protected_areas.gpkg, barriers.gpkg"]
+    C --> U1 --> U2 --> U3 --> U4 --> U5 --> U6 --> U7 --> U8 --> M
+```
+
+![From terrain to protected areas on one unit](docs/img/unit_steps.png)
+
 
 A levee protects an area if water from the river has to rise **higher** to reach that
 area with the levee than without it. Both cases are computed on the same
@@ -640,6 +703,21 @@ and combined as the minimum.
 
 ### 8.1 Snapping the rivers into their channel (always)
 
+```mermaid
+flowchart LR
+    A["River line"] --> B["Vertices every densify_m"]
+    B --> C{"Guide line within guide_search_m?"}
+    C -- yes --> D["Project onto the guide line, shift ≤ guide_max_shift_m"]
+    D --> F["Move to the lowest DTM cell within window_m, shift ≤ max_shift_m"]
+    C -- no --> G["Lowest DTM cell, shift ≤ max_shift_without_guide_m (default 0: stays)"]
+    F --> H["Remove sharp turns, short spikes and nearly straight short steps"]
+    G --> H
+    H --> I["rivers_channel.gpkg: water sources of all units"]
+```
+
+![River snapping](docs/img/river_snapping.png)
+
+
 River networks such as MERIT come from coarse grids (about 90 m). Their lines run beside
 the real channel, cross levees where the river does not, and put water sources on the
 protected side. `protected_areas.py` therefore snaps the rivers once per country, before
@@ -684,6 +762,9 @@ all units.
 - DTM-only snapping with an 80 m cap brings it to a median of 7.4 m.
 
 ### 8.2 Water sources and closed streams
+
+![Open and gated river crossings](docs/img/gated_crossings.png)
+
 
 - **Water sources.** Every river line is a water source; the OSM steps of Stage B (closures
   from sluices and pumping stations, `rivers_sources.gpkg`) were removed in Stage G.

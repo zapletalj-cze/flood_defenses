@@ -4,7 +4,7 @@
 
 # Krátký návod: práce se skripty
 
-Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
+Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`. Schémata postupu (mermaid) a vysvětlující obrázky jsou v jeho úvodu, v §5.1 a v §8.
 
 ## 1. Příprava
 

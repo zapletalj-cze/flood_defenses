@@ -29,6 +29,7 @@ cdsapi = ">=0.7.4"
 [tasks]
 check = "python -m processing.check_inputs"
 report = "python -m processing.data_report"
+make-figures = "python -m docs.make_figures"
 prepare-dtm = "python -m processing.prepare_dtm"
 build-units = "python -m processing.build_units"
 protected-areas = "python -m processing.protected_areas"
