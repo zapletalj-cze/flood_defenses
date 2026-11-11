@@ -21,3 +21,15 @@ geofabrik_region = ""           # alternative to osm_pbf: Geofabrik region to do
 [countries.NOR.rp]
 max_damage_csv = ""             # your table of maximum damage per category (rp_index.py)
 depth_damage_csv = ""           # your depth-damage table: depth_m + one damage fraction column per category
+
+[countries.POL]
+dtm = ["D:/01_Projects/997_SmallProjects/99_DEFENSES/02_DATA/Poland/PL_DEM_10m_borders_20220913.tif"]
+levees = ["D:/01_Projects/997_SmallProjects/99_DEFENSES/02_DATA/OSM/levees/europe-latest_man_made_embankment_or_dyke_lines.gpkg"]
+rivers = ["R:/01_Projects/900_FL_Europe/01_MD/01_HAZARD/02_RN/MERIT/MERIT_3035/MERIT_RN_with_IFLakeType_260728_addFrom_To_point_IFAddArea.gpkg"]
+river_upstream_area_field = "50"   # TO FIX: the NAME of the river column with the upstream area in km2 (not a value)
+osm_pbf = "D:/01_Projects/900_FL_Europe/01_MD/01_HAZARD/01_DTM/GEDTM/europe-latest.osm.pbf"   # a country extract is much faster
+geofabrik_region = ""           # alternative to osm_pbf: Geofabrik region to download
+
+[countries.POL.rp]
+max_damage_csv = ""             # your table of maximum damage per category (rp_index.py)
+depth_damage_csv = ""           # your depth-damage table: depth_m + one damage fraction column per category
