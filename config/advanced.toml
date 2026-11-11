@@ -29,7 +29,6 @@ placeholders = [
     "country.context.ghsl_smod_dense_urban",
     "country.context.ghsl_smod_urban",
     "country.context.min_zone_area_m2",
-    "sources.osm_tags_water",
     "implied.recompute_hand",
     "implied.envelope_hand_m",
     "implied.subsegment_length_m",
@@ -133,16 +132,13 @@ drop_contradicted_truncated = true  # drop compartments truncated everywhere if 
 contradiction_ratio = 0.5       # share of such a compartment that silent neighbouring windows must cover
 id_rounding_m = 10.0            # rounding of the representative point in compartment_id
 keep_intermediate = false       # write dtm, spill, margin, barrier and crest rasters per unit
-geofabrik_region = ""           # Geofabrik region path of the country (e.g. continent/country), used by the URL template
-osm_pbf = ""                    # optional local .osm.pbf instead of the download
-endpoint_elevation_radius_m = 5.0   # DTM sampled within this radius at river line ends (downstream end detection)
 # Stage D inputs (all optional)
 dsm = []                        # surface model files in the DTM CRS (flood walls classified as non-ground)
-building_footprints = []        # building polygons; OSM buildings are used if empty
+building_footprints = []        # building polygons (file prepared by the user)
 manual_barriers = []            # reviewed barrier lines; crest from Z or field crest_m
 industrial_registry = []        # points of regulated sites, e.g. EEA industrial reporting (verify the licence)
 ems_flood_extents = []          # manually downloaded Copernicus EMS flood delineations
-water_polygons = []             # water surfaces; OSM water polygons are used if empty
+water_polygons = []             # water surfaces (file prepared by the user)
 corine = []                     # CORINE Land Cover raster (class index per pixel), local copy from the CLMS portal
 corine_legend = ""              # legend table shipped with the raster: class index -> three-digit CLC code
 corine_legend_index_field = ""  # NOT VERIFIED: legend column with the raster value (check your legend file)
@@ -191,7 +187,6 @@ urban_atlas_industrial_codes = []    # verify in the data
 urban_atlas_dense_urban_codes = []   # verify in the data
 ghsl_smod_dense_urban = [30]         # verify class codes in the GHSL data package
 ghsl_smod_urban = [21, 22, 23]       # verify class codes in the GHSL data package
-osm_industrial = { landuse = ["industrial"], man_made = ["works"] }
 min_zone_area_m2 = 20000.0
 
 # Processing parameters per context (placeholders). rural keeps the country values of stages A to C.
@@ -260,10 +255,30 @@ urban_atlas_categories = {}     # NOT VERIFIED codes: Urban Atlas class code -> 
 max_damage_csv = ""             # user provided: columns country + one per category, value per m2 of land
 depth_damage_csv = ""           # user provided: depth_m + one damage fraction column per category
 
+# River snapping (always applied by compartments.py): vertices every densify_m are projected onto the nearest guide
+# line (country river_guides) within guide_search_m, then moved to the lowest DTM cell within window_m; sharp turns
+# and short spikes are removed. Defaults follow the MERIT snapping procedure; without guide lines nothing moves
+# unless max_shift_without_guide_m > 0.
+[river_snap]
+densify_m = 20.0
+guide_search_m = 150.0
+guide_max_shift_m = 180.0
+window_m = 90.0                    # 9 cells of a 10 m DTM
+max_shift_m = 120.0
+max_shift_without_guide_m = 0.0
+min_angle_deg = 35.0
+angle_passes = 2
+spike_angle_deg = 75.0
+spike_length_m = 120.0
+straight_angle_deg = 175.0
+straight_length_factor = 0.25
+straight_max_deviation_m = 2.0     # a nearly straight vertex is removed only this close to its neighbours' chord
+spike_passes = 6
+band_rows = 512                    # DTM rows read at a time
+
 [sources]
 request_pause_s = 1.0           # pause between requests; retry k waits request_pause_s * 2**k
 max_retries = 4
-geofabrik_url_template = ""     # NOT VERIFIED: pattern with {region}, from the official Geofabrik documentation
 # GHSL built-up volume (R2023A, 100 m): URL templates with {epoch} and {tile}, tiling schema (vector file or URL,
 # zipped shapefile allowed) and the schema attribute holding the tile id. NOT VERIFIED: fill from the JRC GHSL
 # documentation (tile naming not confirmed).
@@ -297,11 +312,6 @@ worldcover_grid_url = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v100
 worldcover_tile_field = "ll_tile"   # tile name field of the grid (lower-left corner, e.g. N48E015)
 worldcover_version = "v200"
 worldcover_year = 2021
-osm_tags_hydraulic = { waterway = ["sluice_gate", "lock_gate", "weir", "dam"], man_made = ["pumping_station"] }
-osm_tags_drains = { waterway = ["drain", "ditch", "canal"] }
-osm_tags_water = { natural = ["water"], waterway = ["riverbank"], landuse = ["reservoir", "basin"] }   # placeholder
-osm_tags_closing = { waterway = ["sluice_gate", "lock_gate"] }   # structures that close a river at a levee crossing
-osm_tags_pumping = { man_made = ["pumping_station"] }
 
 [evidence]
 comparison_distance_m = 2000.0
@@ -336,11 +346,7 @@ source_priority = ["manual", "crest_dsm", "ml", "osm", "crest_dtm"]
 dedupe_distance_m = 5.0
 dedupe_max_angle_deg = 20.0
 dedupe_min_overlap = 0.7
-osm_tags_walls = {}               # fill from the candidate counts that download_osm.py logs
-osm_tags_crossings = { highway = ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "service", "unclassified"], railway = ["rail", "tram", "light_rail"] }
-# Tags counted in the country extract to choose osm_tags_walls (taginfo was not reachable): documented OSM tags
 # for walls and dykes; counts only, nothing is extracted from this list.
-osm_wall_candidates = { barrier = ["wall", "retaining_wall"], wall = ["flood_wall"], man_made = ["dyke", "embankment"] }
 
 [coarse]
 coarse_resolution_m = 25.0

@@ -1,8 +1,8 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
-# End-to-end check of Stage B on a synthetic country: OSM download and extraction, water sources (gate at a levee
-# crossing, pumping station at a downstream end), pumping stations, GHSL download and mosaic, value warp totals,
-# exposure, score, quantile mapping, cap, interval and overrides.
+# End-to-end check of Stage B on a synthetic country: tributaries inside levee rings open (gated_crossings off) and
+# closed (on), GHSL download and mosaic, value warp totals, exposure, score, quantile mapping, cap, interval and
+# overrides.
 # Run: pixi run python -m tests.test_stage_b  (DEFENSES_TEST_DIR sets the working folder, default: temporary)
 
 import json
@@ -57,7 +57,8 @@ levees = {
 }
 rivers = {
     "main": (LineString([(WIDTH_M, RIVER_Y), (0, RIVER_Y)]), 5000.0),
-    "trib_gate": (LineString([(500, 1200), (500, RIVER_Y + 5)]), 15.0),
+    # drainage ditch inside ring 1, closed by the levee (it ends at the levee)
+    "trib_gate": (LineString([(500, 1200), (500, 958)]), 15.0),
     # digitised against the flow: the downstream end must come from the DTM
     "trib_pump": (LineString([(1300, 960), (1300, 1200)]), 3.0),
     "trib_free": (LineString([(2300, 1500), (2300, RIVER_Y + 5)]), 40.0),
@@ -109,45 +110,6 @@ gpd.GeoDataFrame(
     geometry=[world(Point(2000, 1100))],
     crs=EPSG,
 ).to_file(data / "overrides.gpkg", driver="GPKG")
-
-# --- OSM extract (synthetic .osm served through a file:// template) ---
-to_lonlat = Transformer.from_crs(EPSG, 4326, always_xy=True)
-list_node, list_way = [], []
-
-
-def node(x, y, tags=None):
-    lon, lat = to_lonlat.transform(X0 + x, Y_TOP - HEIGHT_M + y)
-    list_node.append((len(list_node) + 1, lat, lon, tags or {}))
-    return len(list_node)
-
-
-node(500, 953, {"waterway": "sluice_gate"})
-node(1300, 955, {"man_made": "pumping_station", "name": "PS ring 2"})
-node(2300, 1000, {"waterway": "weir"})
-list_far = [node(100, 1490), node(110, 1490), node(110, 1500), node(100, 1500)]
-list_way.append(
-    (1000, list_far + [list_far[0]], {"man_made": "pumping_station", "building": "yes"})
-)
-list_way.append((1001, [node(900, 1400), node(1000, 1400)], {"waterway": "ditch"}))
-list_xml = [
-    "<?xml version='1.0' encoding='UTF-8'?>",
-    '<osm version="0.6" generator="synthetic">',
-]
-for nid, lat, lon, tags in list_node:
-    list_xml.append(
-        f'  <node id="{nid}" lat="{lat:.8f}" lon="{lon:.8f}" version="1">'
-        + "".join(f'<tag k="{k}" v="{v}"/>' for k, v in tags.items())
-        + "</node>"
-    )
-for wid, list_ref, tags in list_way:
-    list_xml.append(
-        f'  <way id="{wid}" version="1">'
-        + "".join(f'<nd ref="{r}"/>' for r in list_ref)
-        + "".join(f'<tag k="{k}" v="{v}"/>' for k, v in tags.items())
-        + "</way>"
-    )
-list_xml.append("</osm>")
-(data / "test-region.osm").write_text("\n".join(list_xml))
 
 # --- GHSL: two zipped Mollweide tiles for epoch 2020, zipped tiling schema ---
 to_moll = Transformer.from_crs(EPSG, MOLLWEIDE, always_xy=True)
@@ -254,9 +216,6 @@ drop_contradicted_truncated = true
 contradiction_ratio = 0.5
 id_rounding_m = 10.0
 keep_intermediate = false
-geofabrik_region = "test-region"
-osm_pbf = ""
-endpoint_elevation_radius_m = 3.0
 
 [countries.T4.compartments]
 gap_tolerance_m = 20.0
@@ -267,7 +226,7 @@ barrier_removal_width_m = 10.0
 min_margin_m = 0.3
 max_level_m = 20.0
 min_area_m2 = 10000.0
-gated_crossings = false
+gated_crossings = true
 fill_nodata_holes = true
 stream_burn_m = 5.0
 stream_burn_buffer_m = 20.0
@@ -293,36 +252,26 @@ value_total_tolerance = 0.01
 [countries.T4.lulc]
 enabled = false
 
-[countries.T4.context]
-osm_industrial = {{ landuse = ["industrial"], man_made = ["works"] }}
-
 [sources]
 request_pause_s = 0.1
 max_retries = 1
-geofabrik_url_template = {json.dumps(data_url + "/{region}.osm")}
 ghsl_url_templates = {{ total = {json.dumps(data_url + "/GHS_BUILT_V_E{epoch}_TEST_{tile}.zip")}, non_residential = {json.dumps(data_url + "/GHS_BUILT_V_NRES_E{epoch}_TEST_{tile}.zip")} }}
 ghsl_tile_schema = {json.dumps(data_url + "/tiling_schema.zip")}
 ghsl_tile_field = "tile_id"
 ghsl_epoch = 0
 ghsl_nodata_as_zero = true
-osm_tags_hydraulic = {{ waterway = ["sluice_gate", "lock_gate", "weir", "dam"], man_made = ["pumping_station"] }}
-osm_tags_drains = {{ waterway = ["drain", "ditch", "canal"] }}
-osm_tags_closing = {{ waterway = ["sluice_gate", "lock_gate"] }}
-osm_tags_pumping = {{ man_made = ["pumping_station"] }}
-osm_tags_water = {{ natural = ["water"], waterway = ["riverbank"], landuse = ["reservoir", "basin"] }}
 
-[barriers]
-osm_tags_walls = {{}}
-osm_tags_crossings = {{ highway = ["residential", "service"], railway = ["rail"] }}
-osm_wall_candidates = {{ barrier = ["wall"], wall = ["flood_wall"], man_made = ["dyke", "embankment"] }}
 """
 (root / "test.toml").write_text(config)
+(root / "test_open.toml").write_text(
+    config.replace("gated_crossings = true", "gated_crossings = false")
+)
 
 
-def run(module, **variables):
+def run(module, config="test.toml", **variables):
     env = dict(
         os.environ,
-        DEFENSES_CONFIG_PATH=str(root / "test.toml"),
+        DEFENSES_CONFIG_PATH=str(root / config),
         DEFENSES_COUNTRY="T4",
         **{f"DEFENSES_{k}": v for k, v in variables.items()},
     )
@@ -349,7 +298,7 @@ for module in ["processing.prepare_dtm", "processing.build_units"]:
     proc = run(module, RUN_BENCHMARK="0")
     list_res.append((f"{module} runs", proc.returncode == 0))
 
-proc = run("processing.compartments")
+proc = run("processing.compartments", config="test_open.toml")
 gdf_before = (
     gpd.read_file(out / "compartments.gpkg")
     if proc.returncode == 0
@@ -357,81 +306,28 @@ gdf_before = (
 )
 list_res.append(
     (
-        "without OSM: tributaries inside rings 1 and 2 are water sources (no protection), ring 3 protected",
+        "gated_crossings off: tributaries inside rings 1 and 2 are water sources (no protection), ring 3 protected",
         proc.returncode == 0
         and hits(gdf_before, "R1_gate") == 0
         and hits(gdf_before, "R2_pump") == 0
         and hits(gdf_before, "R3_plain") == 1,
     )
 )
-
-proc = run("download.download_osm")
-gdf_pts = (
-    gpd.read_file(out / "osm_hydraulic_points.gpkg")
-    if proc.returncode == 0
-    else pd.DataFrame()
-)
-gdf_drain = (
-    gpd.read_file(out / "osm_drains.gpkg") if proc.returncode == 0 else pd.DataFrame()
-)
-list_res.append(
-    (
-        f"download_osm: 4 hydraulic points (nodes and a way as point), 1 drain; found {len(gdf_pts)}, {len(gdf_drain)}",
-        proc.returncode == 0
-        and len(gdf_pts) == 4
-        and len(gdf_drain) == 1
-        and set(gdf_pts.get("osm_element", [])) == {"node", "area"},
-    )
-)
-list_res.append(
-    ("download_osm logs counts per tag value", "waterway=sluice_gate: 1" in proc.stderr)
-)
-
-proc = run("processing.osm_hydraulics")
-gdf_src = (
-    gpd.read_file(out / "rivers_sources.gpkg").set_index("name")
-    if proc.returncode == 0
+gdf_channel = (
+    gpd.read_file(out / "rivers_channel.gpkg")
+    if (out / "rivers_channel.gpkg").exists()
     else None
 )
-expected_sources = {
-    "main": True,
-    "trib_gate": False,
-    "trib_pump": False,
-    "trib_free": True,
-}
 list_res.append(
     (
-        f"osm_hydraulics: water sources {expected_sources}",
-        gdf_src is not None
+        "rivers snapped once per country (rivers_channel.gpkg; without guide lines the lines stay where they are)",
+        gdf_channel is not None
+        and len(gdf_channel) == len(rivers)
         and all(
-            bool(gdf_src.loc[k, "is_source"]) == v for k, v in expected_sources.items()
+            g.equals(world(rivers[n][0]))
+            for n, g in zip(gdf_channel["name"], gdf_channel.geometry)
         ),
     )
-)
-if gdf_src is not None:
-    list_res.append(
-        (
-            "closed by a gate at the levee crossing",
-            "closing structure" in gdf_src.loc["trib_gate", "reason"],
-        )
-    )
-    pump_end = shapely.Point(
-        gdf_src.loc["trib_pump", "downstream_x"],
-        gdf_src.loc["trib_pump", "downstream_y"],
-    )
-    list_res.append(
-        (
-            "downstream end from the DTM (line digitised against the flow) next to the pumping station",
-            "pumping station" in gdf_src.loc["trib_pump", "reason"]
-            and gdf_src.loc["trib_pump", "downstream_method"] == "dtm elevation"
-            and pump_end.distance(world(Point(1300, 960))) < 1.0,
-        )
-    )
-gdf_pump = (
-    gpd.read_file(out / "osm_pumping.gpkg") if proc.returncode == 0 else pd.DataFrame()
-)
-list_res.append(
-    ("osm_pumping: only the pumping station next to a levee", len(gdf_pump) == 1)
 )
 
 proc = run("processing.compartments", FORCE="1")
@@ -442,19 +338,8 @@ gdf_after = (
 )
 list_res.append(
     (
-        "with closed tributaries all three rings are protected; ring 2 has pumping",
-        proc.returncode == 0
-        and all(hits(gdf_after, k) == 1 for k in probes)
-        and bool(
-            gdf_after[
-                gdf_after.covers(world(Point(*probes["R2_pump"])))
-            ].has_pumping.iloc[0]
-        )
-        and not bool(
-            gdf_after[
-                gdf_after.covers(world(Point(*probes["R1_gate"])))
-            ].has_pumping.iloc[0]
-        ),
+        "gated_crossings on: tributaries enclosed by the rings are closed, all three rings are protected",
+        proc.returncode == 0 and all(hits(gdf_after, k) == 1 for k in probes),
     )
 )
 

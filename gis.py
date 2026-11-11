@@ -2269,6 +2269,33 @@ class Vector:
         return shapely.LineString(xy)
 
     @staticmethod
+    def dominant_nearby(points, geoms, weights, tolerance):
+        """
+        Per point, the feature with the largest weight among those within the distance of
+        the nearest feature plus tolerance (e.g. the main river at a confluence, where the
+        tributary may be a little closer to a river cell)
+        :param points: array of points
+        :param geoms: array of geometries
+        :param weights: weight per geometry (NaN counts as the smallest)
+        :param tolerance: added distance, e.g. one working cell
+        :return: int array of geometry indices (-1 where there is none)
+        """
+        tree = shapely.STRtree(geoms)
+        i_pt, i_g = tree.query_nearest(points, all_matches=False)
+        near = np.full(len(points), np.inf)
+        near[i_pt] = shapely.distance(points[i_pt], geoms[i_g])
+        reach = np.where(np.isfinite(near), near + tolerance, 0.0)
+        p_idx, g_idx = tree.query(points, predicate="dwithin", distance=reach)
+        w = np.nan_to_num(np.asarray(weights, float)[g_idx], nan=-np.inf)
+        df = pd.DataFrame({"p": p_idx, "g": g_idx, "w": w}).sort_values(
+            ["p", "w"], ascending=[True, False], kind="stable"
+        )
+        best = df.drop_duplicates("p")
+        out = np.full(len(points), -1, np.int64)
+        out[best["p"].to_numpy()] = best["g"].to_numpy()
+        return out
+
+    @staticmethod
     def interpolate_xy(line, distances):
         """
         Points at distances along a line, vectorized with numpy (one search in the
@@ -2534,6 +2561,188 @@ class Hydro:
             cost, np.int64(start[0] * cols + start[1]), np.int64(end[0] * cols + end[1])
         )
         return path, float(total)
+
+    @staticmethod
+    def _drop_turns(xy, part, test, passes):
+        """
+        Removes interior vertices whose turn fails a test, all of one pass at once, until
+        nothing changes or passes are used up; the ends of every part stay
+        :param xy: (n, 2) coordinates ordered by part
+        :param part: part index per vertex
+        :param test: function (angle_deg, shorter_segment_length, distance to the chord of the
+                     two neighbours) -> bool array, True = remove
+        :param passes: maximum number of passes
+        :return: (xy, part) after removal
+        """
+        for _ in range(int(passes)):
+            if len(xy) < 3:
+                break
+            inner = np.zeros(len(xy), bool)
+            inner[1:-1] = (part[:-2] == part[1:-1]) & (part[2:] == part[1:-1])
+            idx = np.flatnonzero(inner)
+            v1, v2 = xy[idx - 1] - xy[idx], xy[idx + 1] - xy[idx]
+            n1, n2 = np.hypot(v1[:, 0], v1[:, 1]), np.hypot(v2[:, 0], v2[:, 1])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                cos = np.clip(np.sum(v1 * v2, axis=1) / (n1 * n2), -1.0, 1.0)
+            angle = np.degrees(np.arccos(cos))
+            chord = np.hypot(*(v2 - v1).T)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                dev = np.abs(v1[:, 0] * v2[:, 1] - v1[:, 1] * v2[:, 0]) / chord
+            drop = (n1 == 0) | (n2 == 0) | test(angle, np.minimum(n1, n2), dev)
+            if not drop.any():
+                break
+            keep = np.ones(len(xy), bool)
+            keep[idx[drop]] = False
+            xy, part = xy[keep], part[keep]
+        return xy, part
+
+    @staticmethod
+    def snap_to_channel(lines, dtm_path, guides, params):
+        """
+        Moves river lines into their channel. Vertices every densify_m are projected onto
+        the nearest guide line within guide_search_m (shift capped at guide_max_shift_m),
+        then moved to the lowest DTM cell within window_m around that point (by at most
+        max_shift_m, or max_shift_without_guide_m where no guide is near). Sharp turns
+        (below min_angle_deg) and short spikes (below spike_angle_deg, or nearly straight
+        above straight_angle_deg, on segments up to spike_length_m, the straight case up to
+        straight_length_factor of it and only within straight_max_deviation_m of the chord)
+        are removed afterwards. Parts in which no vertex moves stay unchanged. Vertices at
+        the same place move the same way, so connected lines stay connected. The DTM is
+        read once in bands of band_rows rows.
+        :param lines: array of LineString or MultiLineString in the DTM CRS
+        :param dtm_path: DTM at native resolution
+        :param guides: array of guide lines in the DTM CRS, or None
+        :param params: dict with the keys named above plus angle_passes and spike_passes
+        :return: (array of geometries, dict of statistics)
+        """
+        p = params
+        lines = np.asarray(lines, dtype=object)
+        valid = ~shapely.is_missing(lines) & ~shapely.is_empty(lines)
+        parts, owner = shapely.get_parts(lines[valid], return_index=True)
+        owner = np.flatnonzero(valid)[owner]
+        is_line = shapely.get_type_id(parts) == 1
+        parts, owner = parts[is_line], owner[is_line]
+        xy, part = shapely.get_coordinates(
+            shapely.segmentize(parts, p["densify_m"]), return_index=True
+        )
+        n = len(xy)
+        stats = {"lines": int(valid.sum()), "vertices": n}
+        if not n:
+            return lines.copy(), stats
+        stage = xy.copy()
+        cap = np.full(n, float(p["max_shift_without_guide_m"]))
+        # --- Guide lines: projection onto the nearest one within guide_search_m ---
+        guided = np.zeros(n, bool)
+        if guides is not None and len(guides):
+            guides = np.asarray(guides, dtype=object)
+            pts = shapely.points(xy)
+            i_pt, i_g = shapely.STRtree(guides).query_nearest(
+                pts, max_distance=p["guide_search_m"], all_matches=False
+            )
+            target = shapely.get_coordinates(
+                shapely.line_interpolate_point(
+                    guides[i_g], shapely.line_locate_point(guides[i_g], pts[i_pt])
+                )
+            )
+            d = target - xy[i_pt]
+            dist = np.hypot(d[:, 0], d[:, 1])
+            scale = np.minimum(1.0, p["guide_max_shift_m"] / np.maximum(dist, 1e-12))
+            stage[i_pt] = xy[i_pt] + d * scale[:, None]
+            guided[i_pt] = True
+            cap[i_pt] = min(p["max_shift_m"], p["guide_max_shift_m"])
+        stats["guided_share"] = float(guided.mean())
+        # --- DTM: lowest cell within the window, read in bands of rows ---
+        ds = gdal.Open(str(dtm_path))
+        band = ds.GetRasterBand(1)
+        gt, nodata = ds.GetGeoTransform(), band.GetNoDataValue()
+        half = max(int(round(p["window_m"] / abs(gt[1]) / 2)), 0)
+        col = np.floor((stage[:, 0] - gt[0]) / gt[1]).astype(np.int64)
+        row = np.floor((stage[:, 1] - gt[3]) / gt[5]).astype(np.int64)
+        todo = (
+            (cap > 0)
+            & (row >= 0)
+            & (row < ds.RasterYSize)
+            & (col >= 0)
+            & (col < ds.RasterXSize)
+        )
+        best = stage.copy()
+        off = np.arange(-half, half + 1)
+        size = len(off) ** 2
+        chunk = max(1, int(2e7 // size))
+        band_rows = int(p["band_rows"])
+        for r0 in range(0, ds.RasterYSize, band_rows):
+            sel = np.flatnonzero(todo & (row >= r0) & (row < r0 + band_rows))
+            if not len(sel):
+                continue
+            y0, y1 = max(r0 - half, 0), min(r0 + band_rows + half, ds.RasterYSize)
+            x0 = max(int(col[sel].min()) - half, 0)
+            x1 = min(int(col[sel].max()) + half + 1, ds.RasterXSize)
+            arr = band.ReadAsArray(x0, y0, x1 - x0, y1 - y0).astype(np.float64)
+            if nodata is not None:
+                arr[arr == nodata] = np.inf
+            arr[~np.isfinite(arr)] = np.inf
+            for k in range(0, len(sel), chunk):
+                s = sel[k : k + chunk]
+                rr = np.clip(
+                    row[s, None, None] - y0 + off[None, :, None], 0, y1 - y0 - 1
+                )
+                cc = np.clip(
+                    col[s, None, None] - x0 + off[None, None, :], 0, x1 - x0 - 1
+                )
+                rr, cc = np.broadcast_arrays(rr, cc)
+                win = arr[rr, cc].reshape(len(s), -1)
+                arg = np.argmin(win, axis=1)
+                ok = np.isfinite(win[np.arange(len(s)), arg])
+                br = rr.reshape(len(s), -1)[np.arange(len(s)), arg] + y0
+                bc = cc.reshape(len(s), -1)[np.arange(len(s)), arg] + x0
+                bx = gt[0] + (bc + 0.5) * gt[1]
+                by = gt[3] + (br + 0.5) * gt[5]
+                best[s[ok], 0], best[s[ok], 1] = bx[ok], by[ok]
+        ds = None
+        d = best - stage
+        dist = np.hypot(d[:, 0], d[:, 1])
+        scale = np.minimum(1.0, cap / np.maximum(dist, 1e-12))
+        moved = stage + d * scale[:, None]
+        shift = np.hypot(*(moved - xy).T)
+        stats.update(
+            {
+                "shift_mean_m": float(shift.mean()),
+                "shift_p95_m": float(np.percentile(shift, 95)),
+            }
+        )
+        # --- Clean-up: sharp turns, then short spikes and nearly straight short steps ---
+        xy2, part2 = Hydro._drop_turns(
+            moved,
+            part,
+            lambda a, s, e: a < p["min_angle_deg"],
+            p["angle_passes"],
+        )
+        xy2, part2 = Hydro._drop_turns(
+            xy2,
+            part2,
+            lambda a, s, e: ((a < p["spike_angle_deg"]) & (s <= p["spike_length_m"]))
+            | (
+                (a >= p["straight_angle_deg"])
+                & (s <= p["spike_length_m"] * p["straight_length_factor"])
+                & (e <= p["straight_max_deviation_m"])
+            ),
+            p["spike_passes"],
+        )
+        stats["vertices_out"] = len(xy2)
+        # every part keeps its two ends, so the new parts align with the old ones
+        new_parts = shapely.linestrings(xy2, indices=part2)
+        # a part collapsed into one cell, or with no vertex moved, keeps its original geometry
+        still = np.bincount(part, weights=shift > 0, minlength=len(parts)) == 0
+        bad = ~(shapely.length(new_parts) > 0) | still
+        new_parts[bad] = parts[bad]
+        stats["parts_unchanged"] = int(bad.sum())
+        out = lines.copy()
+        multi = shapely.get_type_id(lines) == 5
+        order = np.argsort(owner, kind="stable")
+        first = np.flatnonzero(np.r_[True, owner[order][1:] != owner[order][:-1]])
+        for i, sub in zip(owner[order][first], np.split(new_parts[order], first[1:])):
+            out[i] = shapely.multilinestrings(sub) if multi[i] else sub[0]
+        return out, stats
 
 
 class MosaicRasters:
@@ -3727,6 +3936,22 @@ class Config:
         "country.dtm": "paths",
         "country.levees": "paths",
         "country.rivers": "paths",
+        "country.river_guides": "opt_paths",
+        "river_snap.densify_m": "float",
+        "river_snap.guide_search_m": "float",
+        "river_snap.guide_max_shift_m": "float",
+        "river_snap.window_m": "float",
+        "river_snap.max_shift_m": "float",
+        "river_snap.max_shift_without_guide_m": "float",
+        "river_snap.min_angle_deg": "float",
+        "river_snap.angle_passes": "int",
+        "river_snap.spike_angle_deg": "float",
+        "river_snap.spike_length_m": "float",
+        "river_snap.straight_angle_deg": "float",
+        "river_snap.straight_length_factor": "float",
+        "river_snap.spike_passes": "int",
+        "river_snap.straight_max_deviation_m": "float",
+        "river_snap.band_rows": "int",
         "country.river_upstream_area_field": "str",
         "country.upstream_area_raster": "opt_path",
         "country.reference_protected_areas": "opt_paths",
@@ -3775,14 +4000,6 @@ class Config:
         "country.rp.max_damage_csv": "path",
         "country.rp.depth_damage_csv": "path",
         "country.rp.value_total_tolerance": "float",
-        "country.geofabrik_region": "str",
-        "country.osm_pbf": "opt_path",
-        "country.endpoint_elevation_radius_m": "float",
-        "sources.geofabrik_url_template": "str",
-        "sources.osm_tags_hydraulic": "table",
-        "sources.osm_tags_drains": "table",
-        "sources.osm_tags_closing": "table",
-        "sources.osm_tags_pumping": "table",
         "sources.request_pause_s": "float",
         "sources.max_retries": "int",
         "sources.ghsl_url_templates": "table",
@@ -3867,7 +4084,6 @@ class Config:
         "country.context.urban_atlas_dense_urban_codes": "int_list",
         "country.context.ghsl_smod_dense_urban": "int_list",
         "country.context.ghsl_smod_urban": "int_list",
-        "country.context.osm_industrial": "table",
         "country.context.min_zone_area_m2": "float",
         **{
             f"country.context.params.{context}.{key}": kind
@@ -3885,7 +4101,6 @@ class Config:
                 ("score_weight_upstream", "float"),
             )
         },
-        "sources.osm_tags_water": "table",
         **{
             f"crest_lines.{key}": "float"
             for key in (
@@ -3908,9 +4123,6 @@ class Config:
         "barriers.dedupe_distance_m": "float",
         "barriers.dedupe_max_angle_deg": "float",
         "barriers.dedupe_min_overlap": "float",
-        "barriers.osm_tags_walls": "table",
-        "barriers.osm_tags_crossings": "table",
-        "barriers.osm_wall_candidates": "table",
         "coarse.coarse_resolution_m": "float",
         "coarse.coarse_min_area_km2": "float",
         "coarse.coarse_match_distance_m": "float",
@@ -3976,7 +4188,6 @@ class Config:
         "implied.plots.sample_seed": "int",
         "implied.plots.show_max": "int",
         "implied.plots.plot_all_in_units": "str_list",
-        "country.compartments.use_snapped_rivers": "bool",
         # Stage F: discharge sources GloFAS and EFAS
         "discharge.sources": "str_list",
         "discharge.source_mode": "str",
@@ -4019,7 +4230,23 @@ class Config:
     }
     # Keys added after a stage was done: a missing key takes this default (logged), so older configurations stay valid.
     DEFAULTS = {
-        "country.compartments.use_snapped_rivers": False,
+        # river snapping (Stage G): values of the snapping procedure the method follows
+        "country.river_guides": [],
+        "river_snap.densify_m": 20.0,
+        "river_snap.guide_search_m": 150.0,
+        "river_snap.guide_max_shift_m": 180.0,
+        "river_snap.window_m": 90.0,
+        "river_snap.max_shift_m": 120.0,
+        "river_snap.max_shift_without_guide_m": 0.0,
+        "river_snap.min_angle_deg": 35.0,
+        "river_snap.angle_passes": 2,
+        "river_snap.spike_angle_deg": 75.0,
+        "river_snap.spike_length_m": 120.0,
+        "river_snap.straight_angle_deg": 175.0,
+        "river_snap.straight_length_factor": 0.25,
+        "river_snap.spike_passes": 6,
+        "river_snap.straight_max_deviation_m": 2.0,
+        "river_snap.band_rows": 512,
         # plot settings of Stage E, also used by Stage F scripts
         "implied.plots.enabled": True,
         "implied.plots.dpi": 120,
@@ -4423,16 +4650,6 @@ class Config:
                 list_err.append(
                     "sources.glofas_first_year must not exceed glofas_last_year"
                 )
-        sources = cfg.get("sources", {})
-        for subset in ["sources.osm_tags_closing", "sources.osm_tags_pumping"]:
-            if {subset, "sources.osm_tags_hydraulic"} <= keys:
-                for key, list_val in sources[subset.split(".")[1]].items():
-                    list_known = sources["osm_tags_hydraulic"].get(key, [])
-                    if not set(list_val) <= set(list_known):
-                        list_err.append(
-                            f"{subset}.{key} values {sorted(set(list_val) - set(list_known))} "
-                            "are not in sources.osm_tags_hydraulic"
-                        )
         implied = cfg.get("implied", {})
         snap = implied.get("snap", {})
         for key in ["resolution_m", "step_m", "chunk_length_m", "cost_epsilon"]:

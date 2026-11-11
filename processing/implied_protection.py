@@ -573,11 +573,6 @@ if __name__ == "__main__":
             country["building_footprints"], wkt, keep_columns=True
         )
         list_bld.append(("footprints", gdf_bld))
-    if (out_dir / "osm_buildings.gpkg").exists():
-        gis.Vector.check_single_layer(out_dir / "osm_buildings.gpkg")
-        list_bld.append(
-            ("OSM", gpd.read_file(out_dir / "osm_buildings.gpkg").to_crs(wkt))
-        )
     list_geom = []
     for label, gdf in list_bld:
         drop = np.zeros(len(gdf), bool)
@@ -625,7 +620,7 @@ if __name__ == "__main__":
     if imp["built_source"] in ("footprints", "max") and not len(buildings):
         if imp["built_source"] == "footprints":
             raise SystemExit(
-                "built_source = footprints, but no building footprints or OSM buildings exist."
+                "built_source = footprints, but no building_footprints are given."
             )
         log.warning(
             "No buildings: built_source = max uses the GHSL built-up surface only."
@@ -1317,13 +1312,8 @@ if __name__ == "__main__":
     upstream = {}
     field = country["river_upstream_area_field"]
     if field:
-        src_path = out_dir / "rivers_sources.gpkg"
-        gdf_src = (
-            gpd.read_file(src_path)
-            if src_path.exists()
-            else gis.Vector.read_merged(
-                country["rivers"], wkt, keep_columns=[field, "river_id"]
-            )
+        gdf_src = gis.Vector.read_merged(
+            country["rivers"], wkt, keep_columns=[field, "river_id"]
         )
         if field in gdf_src.columns and "river_id" in gdf_src.columns:
             area_of = dict(

@@ -39,6 +39,22 @@ KEYS = [
     "general.log_level",
     "country.levees",
     "country.rivers",
+    "country.river_guides",
+    "river_snap.densify_m",
+    "river_snap.guide_search_m",
+    "river_snap.guide_max_shift_m",
+    "river_snap.window_m",
+    "river_snap.max_shift_m",
+    "river_snap.max_shift_without_guide_m",
+    "river_snap.min_angle_deg",
+    "river_snap.angle_passes",
+    "river_snap.spike_angle_deg",
+    "river_snap.spike_length_m",
+    "river_snap.straight_angle_deg",
+    "river_snap.straight_length_factor",
+    "river_snap.straight_max_deviation_m",
+    "river_snap.spike_passes",
+    "river_snap.band_rows",
     "country.working_resolution_m",
     "country.bytes_per_cell",
     "country.crest_box_size_m",
@@ -62,7 +78,6 @@ KEYS = [
     "country.compartments.preserve_river_cells",
     "country.compartments.cap_river_holes",
     "country.compartments.max_fill_distance_m",
-    "country.compartments.use_snapped_rivers",
     "country.rp.levee_adjacent_distance_m",
 ]
 UNIT_COLUMNS = {
@@ -94,7 +109,6 @@ OUTPUT_COLUMNS = [
     "truncated",
     "touches_corridor_edge",
     "touches_dtm_edge",
-    "has_pumping",
     "no_levee",
     "unit_id",
     "unit_label",
@@ -516,9 +530,10 @@ def process_unit(task):
 
         # --- HAND on the undefended DTM ---
         t = time.perf_counter()
+        # outlets of the drainage: the water sources (closed streams in gated mode drain nowhere of their own)
         hand_undef, river_ref, n_unreached = gis.Hydro.hand_above_streams(
             dtm_undef,
-            stream,
+            seeds,
             p["stream_burn_m"],
             p["stream_burn_buffer_m"] / res,
             valid,
@@ -851,37 +866,49 @@ if __name__ == "__main__":
         time.perf_counter() - t,
     )
 
-    # --- Water sources ---
-    sources_path = out_dir / "rivers_sources.gpkg"
-    snapped_path = out_dir / "rivers_snapped.gpkg"
-    if country["compartments"]["use_snapped_rivers"]:
-        # Stage E1: the water sources snapped to the thalweg (off by default; stage A results unchanged).
-        if not snapped_path.exists():
-            raise SystemExit(
-                "use_snapped_rivers = true, but rivers_snapped.gpkg is missing; run snap_rivers.py."
-            )
-        gdf_rn = gpd.read_file(snapped_path).to_crs(wkt)
+    # --- Rivers snapped into their channel (always): once per country, shared by all units ---
+    t = time.perf_counter()
+    channel_path = out_dir / "rivers_channel.gpkg"
+    if channel_path.exists() and not run["FORCE"]:
+        gdf_rn = gpd.read_file(channel_path).to_crs(wkt)
         log.info(
-            "Water sources: %d rivers snapped to the thalweg (rivers_snapped.gpkg, use_snapped_rivers).",
+            "Rivers: %d lines from rivers_channel.gpkg (set FORCE to snap again).",
             len(gdf_rn),
-        )
-    elif sources_path.exists():
-        gdf_rn = gpd.read_file(sources_path).to_crs(wkt)
-        n_all = len(gdf_rn)
-        gdf_rn = gdf_rn[gdf_rn["is_source"].astype(bool)]
-        log.info(
-            "Water sources from rivers_sources.gpkg: %d of %d river features (closed streams are excluded "
-            "from the seeds and from the HAND drainage network).",
-            len(gdf_rn),
-            n_all,
         )
     else:
-        gdf_rn = gis.Vector.read_merged(country["rivers"], wkt, bbox=all_windows)
-        log.info(
-            "rivers_sources.gpkg not found (osm_hydraulics.py not run yet): all %d river features are water "
-            "sources.",
-            len(gdf_rn),
+        gdf_rn = gis.Vector.read_merged(
+            country["rivers"], wkt, bbox=all_windows, keep_columns=True
         )
+        gdf_rn = gdf_rn[
+            gdf_rn.geometry.notna() & ~gdf_rn.geometry.is_empty
+        ].reset_index(drop=True)
+        guides = None
+        if country["river_guides"]:
+            guides = gis.Vector.read_merged(
+                country["river_guides"], wkt, bbox=all_windows
+            ).geometry.values
+        geoms, snap_stats = gis.Hydro.snap_to_channel(
+            gdf_rn.geometry.values, str(vrt_path), guides, cfg["river_snap"]
+        )
+        gdf_rn = gdf_rn.set_geometry(gpd.GeoSeries(geoms, crs=wkt))
+        gis.Vector.write_gpkg(gdf_rn, channel_path)
+        log.info(
+            "Rivers snapped into their channel (rivers_channel.gpkg): %d lines, %d vertices (%.0f %% near a guide "
+            "line%s), shift mean %.1f m, p95 %.1f m, %d parts unchanged; %.1f s.",
+            snap_stats["lines"],
+            snap_stats["vertices"],
+            100 * snap_stats.get("guided_share", 0.0),
+            "" if guides is not None else ", no river_guides given",
+            snap_stats.get("shift_mean_m", 0.0),
+            snap_stats.get("shift_p95_m", 0.0),
+            snap_stats.get("parts_unchanged", 0),
+            time.perf_counter() - t,
+        )
+    log.info(
+        "Water sources: all %d river lines (rivers crossing a barrier: gated_crossings = %s).",
+        len(gdf_rn),
+        params["gated_crossings"],
+    )
     gis.Vector.write_gpkg(gdf_rn[["geometry"]], work_dir / "rivers_used.gpkg")
 
     # --- Units ---
@@ -915,12 +942,6 @@ if __name__ == "__main__":
         len(list_task),
         len(list_skip),
     )
-    if country["compartments"]["use_snapped_rivers"] and list_skip:
-        log.warning(
-            "use_snapped_rivers is on, but %d finished units keep their results with the earlier rivers; set "
-            "FORCE = True to recompute them.",
-            len(list_skip),
-        )
     if list_task:
         # Compile the numba kernels once so that worker processes load them from the cache.
         gis.Hydro.breach_to_streams(np.zeros((3, 3), np.float32), np.eye(3, dtype=bool))
@@ -1071,18 +1092,6 @@ if __name__ == "__main__":
         dup_rank > 0, ids + "_" + (dup_rank + 1).astype(str), ids
     )
     distance = country["rp"]["levee_adjacent_distance_m"]
-    pumping_path = out_dir / "osm_pumping.gpkg"
-    if pumping_path.exists() and len(gdf_final):
-        gdf_pump = gpd.read_file(pumping_path).to_crs(wkt)
-        hits, _ = gdf_pump.sindex.query(
-            gdf_final.geometry.values, predicate="dwithin", distance=distance
-        )
-        gdf_final["has_pumping"] = np.isin(np.arange(len(gdf_final)), hits)
-    else:
-        gdf_final["has_pumping"] = False
-        log.info(
-            "osm_pumping.gpkg not found (osm_hydraulics.py not run yet): has_pumping is False everywhere."
-        )
     gdf_final["no_levee"] = (
         gis.Vector.length_near_boundary(gdf_final, gdf_bl, distance) == 0
     )
@@ -1091,7 +1100,6 @@ if __name__ == "__main__":
             "truncated": bool,
             "touches_corridor_edge": bool,
             "touches_dtm_edge": bool,
-            "has_pumping": bool,
             "no_levee": bool,
         }
     )
@@ -1100,7 +1108,7 @@ if __name__ == "__main__":
     log.info(
         "Compartments: %d from %d unit candidates in %d finished units; truncated %d (%.1f %%; many truncated "
         "compartments mean the halo is too small), dropped as contradicted by neighbouring windows %d, touching "
-        "the corridor edge %d, no levee %d, with pumping %d. Merge took %.1f s.",
+        "the corridor edge %d, no levee %d. Merge took %.1f s.",
         len(gdf_final),
         len(gdf_cand),
         len(list_done),
@@ -1109,7 +1117,6 @@ if __name__ == "__main__":
         n_contra,
         int(gdf_final["touches_corridor_edge"].sum()),
         int(gdf_final["no_levee"].sum()),
-        int(gdf_final["has_pumping"].sum()),
         time.perf_counter() - t,
     )
 

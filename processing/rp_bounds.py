@@ -41,6 +41,7 @@ KEYS = [
     "country.rivers",
     "country.river_upstream_area_field",
     "country.upstream_area_raster",
+    "country.working_resolution_m",
     "discharge.sources",
     "discharge.source_mode",
     "discharge.max_rp_extrapolation",
@@ -119,22 +120,18 @@ if __name__ == "__main__":
 
     # --- Sites: explicit compartments at their source river cell, implied compartments at their river ---
     field = country["river_upstream_area_field"]
-    snapped = out_dir / "rivers_snapped.gpkg"
-    if snapped.exists():
-        gdf_line = gpd.read_file(snapped).to_crs(wkt)
-    elif (out_dir / "rivers_sources.gpkg").exists():
-        gdf_line = gpd.read_file(out_dir / "rivers_sources.gpkg").to_crs(wkt)
-        gdf_line = gdf_line[gdf_line["is_source"].astype(bool)]
-    else:
-        gdf_line = gis.Vector.read_merged(country["rivers"], wkt, keep_columns=True)
+    # river lines of the same-river test: the Stage E thalweg, else the channel lines of compartments.py
+    for name in ("rivers_snapped.gpkg", "rivers_channel.gpkg", ""):
+        if not name or (out_dir / name).exists():
+            break
+    gdf_line = (
+        gpd.read_file(out_dir / name).to_crs(wkt)
+        if name
+        else gis.Vector.read_merged(country["rivers"], wkt, keep_columns=True)
+    )
     gdf_area = None
     if field:
-        src_rivers = out_dir / "rivers_sources.gpkg"
-        gdf_area = (
-            gpd.read_file(src_rivers).to_crs(wkt)
-            if src_rivers.exists()
-            else gis.Vector.read_merged(country["rivers"], wkt, keep_columns=[field])
-        )
+        gdf_area = gis.Vector.read_merged(country["rivers"], wkt, keep_columns=[field])
         if field not in gdf_area.columns:
             raise SystemExit(
                 f"river_upstream_area_field {field!r} is not a column of the rivers."
@@ -178,15 +175,28 @@ if __name__ == "__main__":
                 len(gdf_imp),
             )
     pts = shapely.points(sites["x"].to_numpy(), sites["y"].to_numpy())
-    sites["river"] = shapely.STRtree(gdf_line.geometry.values).query_nearest(
-        pts, all_matches=False
-    )[1]
+    # at a confluence a river cell can lie nearest to the tributary: within one working cell of the nearest
+    # line, the line with the largest upstream area is the river of the site
+    tol = country["working_resolution_m"]
+    sites["river"] = gis.Vector.dominant_nearby(
+        pts,
+        gdf_line.geometry.values,
+        (
+            pd.to_numeric(gdf_line[field], errors="coerce")
+            if field and field in gdf_line.columns
+            else np.zeros(len(gdf_line))
+        ),
+        tol,
+    )
     if gdf_area is not None:
         sites["area_km2"] = pd.to_numeric(
             gdf_area[field].to_numpy()[
-                shapely.STRtree(gdf_area.geometry.values).query_nearest(
-                    pts, all_matches=False
-                )[1]
+                gis.Vector.dominant_nearby(
+                    pts,
+                    gdf_area.geometry.values,
+                    pd.to_numeric(gdf_area[field], errors="coerce"),
+                    tol,
+                )
             ],
             errors="coerce",
         )

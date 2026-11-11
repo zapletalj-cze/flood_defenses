@@ -28,8 +28,6 @@ CORE = [
     "processing.rp_index",
 ]
 OPTIONAL = [
-    "download.download_osm",
-    "processing.osm_hydraulics",
     "download.download_gfm",
     "processing.gfm_evidence",
     "download.download_discharge",
@@ -144,24 +142,16 @@ if __name__ == "__main__":
             False,
             "set river_upstream_area_field (column name) or upstream_area_raster",
         )
-    pbf, region = country.get("osm_pbf", ""), country.get("geofabrik_region", "")
-    if pbf:
+    for path in gis.Config.as_list(country.get("river_guides")):
         add(
             "inputs (optional)",
-            "osm_pbf",
-            Path(pbf).exists(),
+            f"river_guides {Path(path).name}",
+            Path(path).exists(),
             (
-                f"{Path(pbf).stat().st_size / 1e9:.1f} GB"
-                if Path(pbf).exists()
+                "guide lines for snapping the rivers"
+                if Path(path).exists()
                 else "file not found"
             ),
-        )
-    else:
-        add(
-            "inputs (optional)",
-            "osm_pbf / geofabrik_region",
-            bool(region),
-            region or "not set: no OSM water sources and pumping stations (optional)",
         )
     for key in ("max_damage_csv", "depth_damage_csv"):
         path = country.get("rp", {}).get(key, "")

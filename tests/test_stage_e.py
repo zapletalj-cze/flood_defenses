@@ -213,8 +213,8 @@ gdf_rn = gpd.GeoDataFrame(
     geometry=[world(g) for g in lines.values()],
     crs=f"EPSG:{EPSG}",
 )
-gis.Vector.write_gpkg(gdf_rn, out / "rivers_sources.gpkg")
-gis.Vector.write_gpkg(gdf_rn, data / "rivers.gpkg")
+# the rivers input holds the water sources only (the closed line is drawn in the DTM but is not a river)
+gis.Vector.write_gpkg(gdf_rn[gdf_rn["is_source"]], data / "rivers.gpkg")
 pd.DataFrame(
     {"country": ["T5"], "residential": [1000.0], "non_residential": [800.0]}
 ).to_csv(data / "max_damage.csv", index=False)
@@ -256,7 +256,6 @@ def write_config(name, **kw):
         "built_source": "footprints",
         "include_implied": "false",
         "reference": "[]",
-        "snapped": "false",
     }
     v.update(kw)
     (root / name).write_text(f"""[general]
@@ -316,7 +315,6 @@ stream_burn_buffer_m = 20.0
 preserve_river_cells = true
 cap_river_holes = true
 max_fill_distance_m = 100.0
-use_snapped_rivers = {v["snapped"]}
 
 [countries.T5.rp]
 levee_adjacent_distance_m = 10.0
@@ -487,7 +485,7 @@ if proc.returncode == 0:
     perf = json.loads((out / "snap_rivers_performance.json").read_text())
     list_res.append(
         (
-            f"only water sources are snapped (is_source): {sorted(gdf_snap.index)}",
+            f"all rivers of the input are snapped: {sorted(gdf_snap.index)}",
             sorted(gdf_snap.index) == ["main", "trib", "wide", "zigzag"],
         )
     )
@@ -1177,15 +1175,12 @@ if stage_a_ok and imp_path.exists() and len(town_c):
         )
     else:
         list_res.append(("implied_evaluate runs", False))
-    write_config("test_e_snap.toml", snapped="true")
-    proc = run(
-        "compartments_snapped", "test_e_snap.toml", "processing.compartments", FORCE=1
-    )
+    proc = run("compartments_force", "test_e.toml", "processing.compartments", FORCE=1)
     list_res.append(
         (
-            "use_snapped_rivers: compartments.py recomputes all units with rivers_snapped.gpkg as water sources",
+            "compartments.py snaps the rivers again with FORCE (rivers_channel.gpkg) and recomputes all units",
             proc.returncode == 0
-            and "rivers snapped to the thalweg" in proc.stderr
+            and "Rivers snapped into their channel (rivers_channel.gpkg)" in proc.stderr
             and "Units: 8 to process" in proc.stderr,
         )
     )

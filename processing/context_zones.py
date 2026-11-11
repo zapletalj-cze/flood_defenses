@@ -1,7 +1,7 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
 # Builds the context zones of the river corridor (industrial, dense urban, urban, rural) from CORINE, Urban Atlas, the
-# GHSL settlement model and OSM industrial areas; earlier contexts of context.order win where sources overlap.
+# GHSL settlement model; earlier contexts of context.order win where sources overlap.
 
 import time
 from pathlib import Path
@@ -117,7 +117,6 @@ if __name__ == "__main__":
             "dense_urban",
             context["urban_atlas_dense_urban_codes"],
         ),
-        ("OSM", out_dir / "osm_industrial.gpkg", "industrial", None),
     ]
     for label, path, name, list_code in list_vsrc:
         if list_code is not None and not list_code:
@@ -132,7 +131,7 @@ if __name__ == "__main__":
         if list_code is not None:
             gdf_vec = gdf_vec[gdf_vec["ua_code"].isin(list_code)]
         gdf_vec = gdf_vec[gdf_vec.geometry.notna()]
-        # OSM and Urban Atlas polygons can be invalid (self-touching rings); repair instead of dropping them.
+        # Urban Atlas polygons can be invalid (self-touching rings); repair instead of dropping them.
         gdf_vec = gdf_vec.set_geometry(shapely.make_valid(gdf_vec.geometry.values))
         if gdf_vec.empty:
             log.info("%s: no polygon for %s.", label, name)

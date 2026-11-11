@@ -1,11 +1,16 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
 # Checks of the numba kernels in gis.py on small synthetic grids: closed ring, gap, diagonal leak,
-# nested rings, seed propagation and breaching. Run: pixi run python -m tests.test_kernels
+# nested rings, seed propagation and breaching; river snapping into a channel of a small DTM file.
+# Run: pixi run python -m tests.test_kernels
 
 import sys
+import tempfile
+from pathlib import Path
 
 import numpy as np
+import shapely
+from osgeo import osr
 from scipy import ndimage
 
 import gis
@@ -174,6 +179,56 @@ list_res.append(
     (
         "B1 fixed: with burning every cell reaches the river within 2 columns",
         far_col(gis.Hydro.breach_to_streams(valley, river, 5.0, 5)) <= 2,
+    )
+)
+
+# River snapping: a 2 m DTM with a channel along a sine; the river line lies 60 m beside it.
+tmp = Path(tempfile.mkdtemp(prefix="defenses_kernels_"))
+nx, ny, res = 1000, 500, 2.0
+gx, gy = np.meshgrid((np.arange(nx) + 0.5) * res, 1000 - (np.arange(ny) + 0.5) * res)
+centre = 500 + 40 * np.sin(gx / 150)
+z = 100 + 0.002 * np.abs(gy - centre) - 2.0 * (np.abs(gy - centre) < 6) + 0.0001 * gx
+srs = osr.SpatialReference()
+srs.ImportFromEPSG(32633)
+gis.Raster.write_array(
+    tmp / "dtm.tif",
+    z.astype(np.float32),
+    (0, res, 0, 1000, 0, -res),
+    srs.ExportToWkt(),
+    nodata=-9999,
+)
+xs = np.linspace(5, 1995, 60)
+river = shapely.linestrings(np.c_[xs, 500 + 40 * np.sin(xs / 150) + 60])
+guide = shapely.linestrings(np.c_[xs, 500 + 40 * np.sin(xs / 150) + 3])
+snap_p = {
+    k.split(".")[1]: v
+    for k, v in gis.Config.DEFAULTS.items()
+    if k.startswith("river_snap.")
+}
+
+
+def channel_offset(line):
+    xy = shapely.get_coordinates(
+        shapely.line_interpolate_point(line, np.arange(0, line.length, 2.0))
+    )
+    return np.abs(xy[:, 1] - (500 + 40 * np.sin(xy[:, 0] / 150)))
+
+
+out_g, st_g = gis.Hydro.snap_to_channel([river], tmp / "dtm.tif", [guide], snap_p)
+out_n, _ = gis.Hydro.snap_to_channel([river], tmp / "dtm.tif", None, snap_p)
+out_d, _ = gis.Hydro.snap_to_channel(
+    [river], tmp / "dtm.tif", None, {**snap_p, "max_shift_without_guide_m": 80.0}
+)
+off_g, off_d = channel_offset(out_g[0]), channel_offset(out_d[0])
+list_res.append(
+    (
+        f"snap_to_channel: with a guide line the river lies in the channel (median {np.median(off_g):.1f} m, max "
+        f"{off_g.max():.1f} m from 60 m); without one it stays put; DTM only (80 m) median {np.median(off_d):.1f} m",
+        np.median(off_g) < 3.0
+        and off_g.max() < 7.0
+        and out_n[0].equals(river)
+        and np.median(off_d) < 10.0
+        and st_g["guided_share"] == 1.0,
     )
 )
 

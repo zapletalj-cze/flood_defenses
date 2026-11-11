@@ -1,8 +1,8 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
 # End-to-end checks of Stage D on the Stage B test country under its own code T4D. Step D1: DSM inspection and
-# benchmark, OSM buildings/water/crossings/walls/industrial and candidate wall tag counts, GHSL settlement model and
-# population, CORINE legend mapping verified on a known pixel, Urban Atlas preparation, context zones, zones_to_grid.
+# benchmark, GHSL settlement model and population, CORINE legend mapping verified on a known pixel, Urban Atlas
+# preparation, context zones, zones_to_grid.
 # Run: pixi run python -m tests.test_stage_d  (DEFENSES_TEST_DIR sets the working folder, default: temporary;
 # the Stage B test runs first in the same folder when its outputs are missing)
 
@@ -97,62 +97,6 @@ dsm_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
 dsm_ds.GetRasterBand(1).WriteArray(surface.astype(np.float32))
 dsm_ds = dtm_ds = None
 del surface, rows, cols, lx, ly
-
-# --- OSM extract: buildings, water, crossings, walls, industrial areas ---
-to_lonlat = Transformer.from_crs(EPSG, 4326, always_xy=True)
-list_node, list_way = [], []
-
-
-def node(x, y):
-    lon, lat = to_lonlat.transform(X0 + x, Y_TOP - HEIGHT_M + y)
-    list_node.append((len(list_node) + 1, lat, lon))
-    return len(list_node)
-
-
-def closed(bounds):
-    list_id = [node(bounds[0], bounds[1]), node(bounds[2], bounds[1])]
-    list_id += [node(bounds[2], bounds[3]), node(bounds[0], bounds[3])]
-    return list_id + [list_id[0]]
-
-
-def line(points):
-    return [node(x, y) for x, y in points]
-
-
-way_id = 1000
-for list_ref, tags in [
-    (closed((300, 1000, 330, 1020)), {"building": "yes"}),
-    (closed((340, 1000, 370, 1020)), {"building": "yes"}),
-    (closed((1200, 1500, 1230, 1530)), {"building": "industrial"}),
-    (closed((1500, 400, 1550, 450)), {"natural": "water"}),
-    (line([(400, 700), (400, 1300)]), {"highway": "residential"}),
-    (line([(1000, 1500), (2400, 1500)]), {"railway": "rail"}),
-    (line([(600, 600), (600, 650)]), {"highway": "footway"}),
-    (line([(100, 820), (900, 820)]), {"barrier": "wall", "wall": "flood_wall"}),
-    (line([(1000, 830), (1600, 830)]), {"man_made": "dyke"}),
-    (line([(50, 1550), (150, 1550)]), {"barrier": "wall"}),
-    (closed((1000, 1200, 1150, 1450)), {"landuse": "industrial"}),
-    (closed((200, 300, 350, 450)), {"man_made": "works"}),
-]:
-    list_way.append((way_id, list_ref, tags))
-    way_id += 1
-list_xml = [
-    "<?xml version='1.0' encoding='UTF-8'?>",
-    '<osm version="0.6" generator="synthetic">',
-]
-list_xml += [
-    f'  <node id="{nid}" lat="{lat:.8f}" lon="{lon:.8f}" version="1"/>'
-    for nid, lat, lon in list_node
-]
-for wid, list_ref, tags in list_way:
-    list_xml.append(
-        f'  <way id="{wid}" version="1">'
-        + "".join(f'<nd ref="{r}"/>' for r in list_ref)
-        + "".join(f'<tag k="{k}" v="{v}"/>' for k, v in tags.items())
-        + "</way>"
-    )
-list_xml.append("</osm>")
-(data_d / "t4d.osm").write_text("\n".join(list_xml))
 
 # --- GHSL settlement model and population: zipped Mollweide tiles of the Stage B tiling schema ---
 gdf_sch = gpd.read_file(f"/vsizip/{data / 'tiling_schema.zip'}/tiling_schema.shp")
@@ -272,7 +216,6 @@ corine_check = [[{check_x}, {check_y}, 121]]
 """,
     1,
 )
-t4d = t4d.replace('osm_pbf = ""', f'osm_pbf = "{data_d / "t4d.osm"}"', 1)
 t4d = t4d.replace(
     "[countries.T4D.lulc]\nenabled = false\n",
     f"""[countries.T4D.lulc]
@@ -283,9 +226,7 @@ urban_atlas_class_field = "code_2018"
 """,
     1,
 )
-t4d = re.sub(
-    r"\[countries\.T4D\.context\]\n(?:[^\[\n][^\n]*\n|\n)*",
-    """[countries.T4D.context]
+context_block = """[countries.T4D.context]
 order = ["industrial", "dense_urban", "urban", "rural"]
 corine_industrial_codes = [121, 123]
 corine_dense_urban_codes = [111]
@@ -293,13 +234,14 @@ urban_atlas_industrial_codes = [12100]
 urban_atlas_dense_urban_codes = [11100]
 ghsl_smod_dense_urban = [30]
 ghsl_smod_urban = [21, 22, 23]
-osm_industrial = { landuse = ["industrial"], man_made = ["works"] }
 min_zone_area_m2 = 20000.0
 
-""",
-    t4d,
-    count=1,
+"""
+t4d, n_ctx = re.subn(
+    r"\[countries\.T4D\.context\]\n(?:[^\[\n][^\n]*\n|\n)*", context_block, t4d, count=1
 )
+if not n_ctx:
+    t4d += "\n" + context_block
 config = base.replace("[sources]\n", t4d + "[sources]\n", 1)
 config = re.sub(
     r"(ghsl_url_templates = \{[^\n]*?)\s*\}\n",
@@ -308,11 +250,6 @@ config = re.sub(
     + f'pop = "file://{data_d}/GHS_POP_E{{epoch}}_TEST_{{tile}}.zip" }}\n',
     config,
     count=1,
-)
-config = config.replace(
-    "osm_tags_walls = {}",
-    'osm_tags_walls = { wall = ["flood_wall"], man_made = ["dyke"] }',
-    1,
 )
 (root / "test_d.toml").write_text(config)
 (root / "test_d_bad_check.toml").write_text(
@@ -377,49 +314,6 @@ list_res.append(
 proc = run("processing.build_units", "build_units")
 list_res.append(("build_units for T4D", proc.returncode == 0))
 
-# --- download_osm.py: Stage D outputs and candidate counts ---
-proc = run("download.download_osm", "download_osm", FORCE="1")
-
-
-def count(name):
-    path = out / f"{name}.gpkg"
-    return len(gpd.read_file(path)) if path.exists() else -1
-
-
-osm_counts = {
-    n: count(n)
-    for n in [
-        "osm_buildings",
-        "osm_water",
-        "osm_crossings",
-        "osm_walls",
-        "osm_industrial",
-    ]
-}
-list_res.append(
-    (
-        f"download_osm: buildings, water, crossings (no footway), walls, industrial areas {osm_counts}",
-        proc.returncode == 0
-        and osm_counts
-        == {
-            "osm_buildings": 3,
-            "osm_water": 1,
-            "osm_crossings": 2,
-            "osm_walls": 2,
-            "osm_industrial": 2,
-        },
-    )
-)
-list_res.append(
-    (
-        "candidate wall tags counted in the extract (barrier=wall 2, wall=flood_wall 1, man_made=dyke 1)",
-        all(
-            t in proc.stderr
-            for t in ["barrier=wall: 2", "wall=flood_wall: 1", "man_made=dyke: 1"]
-        ),
-    )
-)
-
 # --- download_ghsl.py: settlement model and population of the same epoch ---
 proc = run("download.download_ghsl", "download_ghsl")
 smod_ok = False
@@ -479,9 +373,7 @@ gdf_zone = (
 )
 probes = {
     "industrial (CORINE 121)": ((800, 1300), "industrial"),
-    "industrial (OSM landuse)": ((1075, 1300), "industrial"),
     "industrial (Urban Atlas over SMOD urban)": ((2100, 1300), "industrial"),
-    "industrial (OSM works in the rural part)": ((275, 375), "industrial"),
     "small industrial pixel dropped -> dense_urban": (small_xy, "dense_urban"),
     "dense_urban (SMOD 30)": ((400, 1000), "dense_urban"),
     "dense_urban (CORINE 111 over SMOD urban)": ((1800, 1300), "dense_urban"),

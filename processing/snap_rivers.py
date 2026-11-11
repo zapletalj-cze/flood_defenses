@@ -399,23 +399,15 @@ if __name__ == "__main__":
     wkt = gdal.Open(str(vrt_path)).GetProjection()
     res, off = snap["resolution_m"], snap["max_offset_m"]
 
-    # --- Rivers: water sources of Stage B (is_source), else the rivers input ---
-    src_path = out_dir / "rivers_sources.gpkg"
-    if src_path.exists():
-        gis.Vector.check_single_layer(src_path)
-        gdf_rn = gpd.read_file(src_path).to_crs(wkt)
-        n_all = len(gdf_rn)
-        gdf_rn = gdf_rn[gdf_rn["is_source"].astype(bool)]
-        log.info(
-            "Rivers: %s, %d of %d features are water sources (is_source).",
-            src_path.name,
-            len(gdf_rn),
-            n_all,
-        )
+    # --- Rivers: snapped into their channel by compartments.py (rivers_channel.gpkg), else the rivers input ---
+    channel_path = out_dir / "rivers_channel.gpkg"
+    if channel_path.exists():
+        gdf_rn = gpd.read_file(channel_path).to_crs(wkt)
+        log.info("Rivers: rivers_channel.gpkg (%d features).", len(gdf_rn))
     else:
         gdf_rn = gis.Vector.read_merged(country["rivers"], wkt, keep_columns=True)
         log.info(
-            "Rivers: the rivers input (%d features); rivers_sources.gpkg of osm_hydraulics.py not found.",
+            "Rivers: the rivers input (%d features); rivers_channel.gpkg not found.",
             len(gdf_rn),
         )
     gdf_rn = gdf_rn[gdf_rn.geometry.notna() & ~gdf_rn.geometry.is_empty].explode(
@@ -491,10 +483,6 @@ if __name__ == "__main__":
     if country["water_polygons"]:
         gdf_wb = gis.Vector.read_merged(country["water_polygons"], wkt)
         log.info("Water polygons: water_polygons input (%d).", len(gdf_wb))
-    elif (out_dir / "osm_water.gpkg").exists():
-        gis.Vector.check_single_layer(out_dir / "osm_water.gpkg")
-        gdf_wb = gpd.read_file(out_dir / "osm_water.gpkg").to_crs(wkt)
-        log.info("Water polygons: osm_water.gpkg (%d).", len(gdf_wb))
     else:
         log.warning("No water polygons: the wide-river cost is disabled.")
     water = np.empty(0, object)

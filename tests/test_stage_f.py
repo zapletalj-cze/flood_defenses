@@ -204,7 +204,7 @@ gis.Vector.write_gpkg(
         geometry=[river],
         crs=crs,
     ),
-    out / "rivers_sources.gpkg",
+    data / "rivers.gpkg",
 )
 src_pts = [(X0 + 8000.0, Y0 + 10000.0), (X0 + 12000.0, Y0 + 10000.0)]
 gis.Vector.write_gpkg(
@@ -389,7 +389,8 @@ output_dir = "{(root / output).as_posix()}"
 log_level = "INFO"
 
 [countries.T6]
-rivers = "{(out / 'rivers_sources.gpkg').as_posix()}"
+working_resolution_m = 5.0
+rivers = "{(data / 'rivers.gpkg').as_posix()}"
 river_upstream_area_field = "upstream_km2"
 upstream_area_raster = ""
 [countries.T6.rp]
