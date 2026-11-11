@@ -55,7 +55,7 @@ inside[21:40, 21:40] = True
 margin = spill_def - spill_undef
 labels, n = ndimage.label((margin >= 0.3) & ~closed)
 list_res.append(
-    ("closed ring: one protected compartment", n == 1 and labels[inside].min() > 0)
+    ("closed ring: one protected area", n == 1 and labels[inside].min() > 0)
 )
 list_res.append(
     (
@@ -87,7 +87,7 @@ list_res.append(
     )
 )
 
-# Nested rings: the inner compartment is protected up to the higher of the two crests.
+# Nested rings: the inner protected area is protected up to the higher of the two crests.
 outer = ring(10, 50, 10, 50)
 inner = ring(25, 35, 25, 35)
 core = np.zeros((rows, cols), bool)

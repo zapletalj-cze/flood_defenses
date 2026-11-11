@@ -1,7 +1,7 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-05
 # Stage E, step E5: sensitivity of the implied protection to level method, built_share_min and subsegment length;
-# recall of built area in reference protected areas and wet built area inside implied compartments per run.
+# recall of built area in reference protected areas and wet built area inside implied protected areas per run.
 
 import json
 import os
@@ -25,7 +25,7 @@ COUNTRY = "XX"
 BASE_RUN = "base"  # run of implied_protection.py whose curves (base length) every sensitivity run reuses
 EVAL_ID = "sensitivity"  # plots in <output_dir>/<country>/plots/implied/<EVAL_ID>
 SHOW_PLOTS = False  # show up to implied.plots.show_max figures per type while running (needs a display)
-FORCE = False  # recompute runs whose implied_compartments.gpkg exists
+FORCE = False  # recompute runs whose implied_protected_areas.gpkg exists
 
 KEYS = [
     "general.work_dir",
@@ -64,7 +64,7 @@ GFM_KEYS = [
 
 def evaluate_unit(task):
     # Worker: per unit (core cells), built area of the reference areas covered by explicit and by explicit plus implied
-    # compartments of every run; wet built area per (run, implied compartment, scene).
+    # protected areas of every run; wet built area per (run, implied protected area, scene).
     start = time.perf_counter()
     unit_dir = Path(task["unit_dir"])
     arrays = {}
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     )
     t = time.perf_counter()
     for r in list_run:
-        target = out_dir / "implied" / r["run_id"] / "implied_compartments.gpkg"
+        target = out_dir / "implied" / r["run_id"] / "implied_protected_areas.gpkg"
         if target.exists() and not run["FORCE"]:
             continue
         env = dict(
@@ -218,13 +218,13 @@ if __name__ == "__main__":
         log.warning(
             "No reference_protected_areas: the positive metric is not computed."
         )
-    explicit_path = out_dir / "compartments_rp.gpkg"
+    explicit_path = out_dir / "protected_areas_rp.gpkg"
     if not explicit_path.exists():
-        explicit_path = out_dir / "compartments.gpkg"
+        explicit_path = out_dir / "protected_areas.gpkg"
     gdf_expl = gpd.read_file(explicit_path).to_crs(wkt)
     gdf_runs = {
         r["run_id"]: gpd.read_file(
-            out_dir / "implied" / r["run_id"] / "implied_compartments.gpkg"
+            out_dir / "implied" / r["run_id"] / "implied_protected_areas.gpkg"
         ).to_crs(wkt)
         for r in list_run
     }
@@ -289,7 +289,7 @@ if __name__ == "__main__":
                         ]
                     )
                 ),
-                # all compartments of every run, in their order, so the burnt value maps back to the row
+                # all protected areas of every run, in their order, so the burnt value maps back to the row
                 "runs": {
                     k: list(shapely.to_wkb(g.geometry.values))
                     for k, g in gdf_runs.items()
@@ -323,7 +323,7 @@ if __name__ == "__main__":
     )
     if event is None:
         log.warning(
-            "event_rp_combined.csv (Stage F) missing: every wet built cell inside implied compartments counts as potential."
+            "event_rp_combined.csv (Stage F) missing: every wet built cell inside implied protected areas counts as potential."
         )
     df_wet = pd.DataFrame(
         [w for r in list_res for w in r["wet"]],
@@ -341,19 +341,21 @@ if __name__ == "__main__":
         wet_r = df_wet[df_wet["run_id"] == r["run_id"]]
         tot = {"error": 0.0, "ok": 0.0, "potential": 0.0}
         for w in wet_r.itertuples():
-            comp = gdf_r.iloc[w.index]
+            pa = gdf_r.iloc[w.index]
             rp_event = np.nan
             if event is not None:
                 hit = event[
-                    (event["compartment_id"] == comp["implied_id"])
+                    (event["protected_area_id"] == pa["implied_id"])
                     & (event["item_id"] == w.item_id)
                 ]
                 if hit.empty:
                     # an event RP is a property of the flood at the river: same river and scene
-                    river = event["compartment_id"].astype(str).str.split("_").str[1]
+                    river = event["protected_area_id"].astype(str).str.split("_").str[1]
                     hit = event[
-                        event["compartment_id"].astype(str).str.startswith("implied_")
-                        & (river == str(comp["river_id"]))
+                        event["protected_area_id"]
+                        .astype(str)
+                        .str.startswith("implied_")
+                        & (river == str(pa["river_id"]))
                         & (event["item_id"] == w.item_id)
                     ]
                 if hit["rp_combined"].notna().any():
@@ -361,16 +363,16 @@ if __name__ == "__main__":
             status = (
                 "potential"
                 if np.isnan(rp_event)
-                else ("error" if rp_event <= comp["rp"] else "ok")
+                else ("error" if rp_event <= pa["rp"] else "ok")
             )
             tot[status] += w.wet_built_m2
             list_test.append(
                 {
                     "run_id": r["run_id"],
-                    "implied_id": comp["implied_id"],
+                    "implied_id": pa["implied_id"],
                     "item_id": w.item_id,
                     "wet_built_m2": w.wet_built_m2,
-                    "rp": comp["rp"],
+                    "rp": pa["rp"],
                     "rp_event": rp_event,
                     "status": status,
                 }
@@ -380,7 +382,7 @@ if __name__ == "__main__":
         list_row.append(
             {
                 **r,
-                "implied_compartments": len(gdf_r),
+                "implied_protected_areas": len(gdf_r),
                 "implied_area_km2": area / 1e6,
                 "recall_built": b_cov / b_ref if b_ref > 0 else np.nan,
                 "recall_built_explicit": b_expl / b_ref if b_ref > 0 else np.nan,

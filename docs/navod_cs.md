@@ -13,8 +13,9 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 2. **Konfigurace:** vyplňuje se jen krátký soubor `config/defenses.toml`:
    - **`[general]`:** `country` (kód země), `work_dir` (rychlý disk pro mezivýsledky),
      `output_dir`, `n_workers` (počet pracovníků × paměť jednotky se musí vejít do RAM);
-   - **`[countries.<kód>]`:** cesty k DTM, hrázím a řekám, název sloupce s plochou povodí
-     v km² a OSM (`osm_pbf` nebo `geofabrik_region`);
+   - **`[countries.<kód>]`:** cesty k DTM, hrázím a řekám (soubory, které připravíte),
+     název sloupce s plochou povodí v km² a volitelně vodicí linie řek (`river_guides`,
+     např. vodní toky), podle kterých se řeky přichytí do koryta;
    - **`[countries.<kód>.rp]`:** tabulky škod.
 
    Ostatní hodnoty jsou ve `config/advanced.toml`. Klíč zapsaný v `defenses.toml` má
@@ -50,9 +51,8 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 |---|---|---|
 | 1 | `prepare-dtm` | `dtm_inspection.csv`, `dtm_benchmark.csv` (s DSM i `dsm_*`) |
 | 2 | `build-units` | `corridor.gpkg`, `units_core.gpkg` |
-| 3 | `download-osm`, `osm-hydraulics` | `rivers_sources.gpkg` (`is_source`, `reason`) |
-| 4 | `compartments`: nejdřív dvě jednotky (`DEFENSES_UNITS`), pak vše | `compartments.gpkg`, `barriers.gpkg`, `performance.json` |
-| 5 | `download-ghsl`, `rp-index` | `compartments_rp.gpkg` (`rp`, `rp_low`, `rp_high`) |
+| 3 | `protected-areas`: nejdřív dvě jednotky (`DEFENSES_UNITS`), pak vše | `rivers_channel.gpkg` (řeky v korytě), `protected_areas.gpkg`, `barriers.gpkg`, `performance.json` |
+| 4 | `download-ghsl`, `rp-index` | `protected_areas_rp.gpkg` (`rp`, `rp_low`, `rp_high`) |
 | volitelně | `download-worldcover`, `hand-yz`, `lulc.enabled = true`, znovu `rp-index` | `exposure_lulc.csv` |
 | volitelně | `download-gfm`, `gfm-evidence` | `gfm_evidence.gpkg` |
 | Stage F | `download-discharge`, `discharge-prepare`, `rp-bounds` | `download_log.csv`, `discharge_cells_<zdroj>.gpkg`, `event_rp.csv`, `obs_rp_low`, `obs_rp_high`, `plots/discharge/base/index.html` |
@@ -60,7 +60,7 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 | Stage D | `download-clms`, `context-zones` | `corine_codes.tif`, `urban_atlas.gpkg`, `zones.gpkg` |
 | Stage E1 | `snap-rivers` | `rivers_snapped.gpkg`, `river_points.gpkg`, `plots/implied/base/index.html` |
 | Stage E2 | `implied-segments` | `subsegments.gpkg` |
-| Stage E3–E4 | `implied-protection` | `implied/base/implied_subsegments.gpkg`, `implied_compartments.gpkg` |
+| Stage E3–E4 | `implied-protection` | `implied/base/implied_subsegments.gpkg`, `implied_protected_areas.gpkg` |
 | Stage E5 | `implied-evaluate` | `sensitivity.csv`, `plots/implied/sensitivity/index.html` |
 
 **Stage E** je experimentální a nejdřív se pouští na pilotní jednotky (`[implied] units`). Výsledky se do
@@ -81,7 +81,7 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 
 | Změna | Spustit |
 |---|---|
-| hráze, řeky, parametry kompartmentů, OSM | `compartments` s FORCE, pak `rp-index` (a `hand-yz`, `gfm-evidence`, `rp-bounds`) |
+| hráze, řeky, vodicí linie, parametry chráněných území | `protected-areas` s FORCE, pak `rp-index` (a `hand-yz`, `gfm-evidence`, `rp-bounds`) |
 | tabulky škod, výška podlaží | `rp-index` s FORCE, pak `rp-bounds` |
 | třídy, strop, váhy, ruční zásahy | `rp-index`, pak `rp-bounds` |
 | hodnoty land cover | `hand-yz`, pak `rp-index`, `rp-bounds` |
@@ -89,7 +89,6 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`.
 | parametry `[discharge]`, nové roky | `download-discharge`, `discharge-prepare`, `rp-bounds` |
 | řeky (Stage E) | `snap-rivers`, `implied-segments` s FORCE, `implied-protection` |
 | parametry `[implied]`, budovy | `implied-protection`, pak `implied-evaluate` |
-| `use_snapped_rivers = true` | `compartments` s FORCE, pak navazující kroky |
 
 Po každém `rp-index` znovu `rp-bounds`, pokud se používají pozorování.
 
@@ -100,7 +99,6 @@ Po každém `rp-index` znovu `rp-bounds`, pokud se používají pozorování.
 - **Nedostatek paměti:** snižte `n_workers` nebo `unit_core_size_m`, pak znovu
   `build-units`.
 - **Neověřené URL:** data stáhněte ručně.
-  - **OSM:** `osm_pbf`.
   - **GHSL:** šablona `file://…`.
   - **GloFAS, EFAS:** soubory z formuláře EWDS uložte do `<složka>/<zdroj>/<rok>[_<měsíc>].<přípona>` a
     nastavte `ewds_api_url = "file:///<složka>"` (ve Windows např. `file:///C:/data/ewds`).

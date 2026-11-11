@@ -23,7 +23,7 @@ COUNTRY = "XX"  # "XX": the country of [general] country
 CORE = [
     "processing.prepare_dtm",
     "processing.build_units",
-    "processing.compartments",
+    "processing.protected_areas",
     "download.download_ghsl",
     "processing.rp_index",
 ]

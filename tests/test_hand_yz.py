@@ -1,7 +1,7 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
 # End-to-end check of HAND_YZ on the Stage B test country: WorldCover tiles found through the tile grid and the URL
-# template, Urban Atlas from a two-layer file, land cover value per compartment against an independent computation,
+# template, Urban Atlas from a two-layer file, land cover value per protected area against an independent computation,
 # checkpoint hash, and the sum of building and land cover value in rp_index.py.
 # Run: pixi run python -m tests.test_hand_yz  (DEFENSES_TEST_DIR sets the working folder, default: temporary;
 # the Stage B test runs first in the same folder when its outputs are missing)
@@ -59,7 +59,7 @@ out = root / "output" / "T4"
 data = root / "data_hand_yz"
 (data / "wc").mkdir(parents=True, exist_ok=True)
 print(f"Test folder: {root}")
-if not (out / "compartments_rp.gpkg").exists():
+if not (out / "protected_areas_rp.gpkg").exists():
     print("Stage B outputs missing: running tests.test_stage_b in the same folder.")
     proc = subprocess.run(
         [sys.executable, "-m", "tests.test_stage_b"],
@@ -72,12 +72,12 @@ if not (out / "compartments_rp.gpkg").exists():
     if proc.returncode != 0:
         print(proc.stdout[-3000:])
         sys.exit("The Stage B test failed; HAND_YZ needs its outputs.")
-# rp_index.py rewrites compartments_rp.gpkg: the Stage B result is kept and restored at the end.
-stage_b = root / "compartments_rp_stage_b.gpkg"
+# rp_index.py rewrites protected_areas_rp.gpkg: the Stage B result is kept and restored at the end.
+stage_b = root / "protected_areas_rp_stage_b.gpkg"
 if not stage_b.exists():
-    shutil.copy(out / "compartments_rp.gpkg", stage_b)
+    shutil.copy(out / "protected_areas_rp.gpkg", stage_b)
 gdf_model = gpd.read_file(stage_b)
-gdf_comp = gpd.read_file(out / "compartments.gpkg")
+gdf_pa = gpd.read_file(out / "protected_areas.gpkg")
 
 
 def world(geometry):
@@ -91,7 +91,7 @@ def grown(bounds, margin):
 
 
 member = {
-    k: gdf_comp[gdf_comp.covers(world(Point(*xy)))].iloc[0] for k, xy in probes.items()
+    k: gdf_pa[gdf_pa.covers(world(Point(*xy)))].iloc[0] for k, xy in probes.items()
 }
 
 # --- Synthetic WorldCover: two tiles of the official grid (the corridor crosses 15 degrees east) ---
@@ -149,7 +149,7 @@ list_ua = [
         box(1080, 930, UA_SPLIT_X, 1270),
     ),  # no category: ring 2 west of the line has no value
     ("12210", grown(interiors["R3"], 20)),  # transport over ring 3
-    ("12210", box(100, 100, 200, 200)),  # touches no compartment: filtered out
+    ("12210", box(100, 100, 200, 200)),  # touches no protected area: filtered out
 ]
 ua_path = data / "urban_atlas_test.gpkg"
 if ua_path.exists():
@@ -227,7 +227,7 @@ def run(module, label, config_name="test_hand_yz.toml", **variables):
 
 
 def expected_value(label, factor=1.0, urban_atlas=True):
-    # Independent computation from the unit rasters: category of each compartment cell from the synthetic layout.
+    # Independent computation from the unit rasters: category of each protected area cell from the synthetic layout.
     row = member[label]
     unit_dir = root / "work" / "T4" / "units" / row.unit_id
     labels_ds = gdal.Open(str(unit_dir / "labels.tif"))
@@ -279,16 +279,18 @@ list_res.append(
 # --- HAND_YZ.py ---
 proc = run("processing.HAND_YZ", "hand_yz")
 df_exp = (
-    pd.read_csv(out / "exposure_lulc.csv").set_index("compartment_id")
+    pd.read_csv(out / "exposure_lulc.csv").set_index("protected_area_id")
     if proc.returncode == 0
     else pd.DataFrame()
 )
 if len(df_exp):
-    got = {k: float(df_exp.loc[member[k].compartment_id, "value_lulc"]) for k in probes}
+    got = {
+        k: float(df_exp.loc[member[k].protected_area_id, "value_lulc"]) for k in probes
+    }
     want = {k: expected_value(k) for k in probes}
     list_res.append(
         (
-            "land cover value per compartment equals the independent computation "
+            "land cover value per protected area equals the independent computation "
             + ", ".join(f"{k} {got[k]:.0f}/{want[k]:.0f}" for k in probes),
             all(abs(got[k] - want[k]) <= 1e-6 * max(want[k], 1.0) for k in probes)
             and all(want[k] > 0 for k in probes),
@@ -297,15 +299,16 @@ if len(df_exp):
     list_res.append(
         (
             "WorldCover classes: cropland -> agriculture (ring 1), built-up -> built_up (ring 2)",
-            df_exp.loc[member["R1"].compartment_id, "lulc_agriculture"] == got["R1"]
-            and df_exp.loc[member["R2"].compartment_id, "lulc_built_up"] == got["R2"],
+            df_exp.loc[member["R1"].protected_area_id, "lulc_agriculture"] == got["R1"]
+            and df_exp.loc[member["R2"].protected_area_id, "lulc_built_up"]
+            == got["R2"],
         )
     )
     list_res.append(
         (
             "Urban Atlas takes precedence: ring 3 (tree cover) valued as transport, west of ring 2 without value",
-            df_exp.loc[member["R3"].compartment_id, "lulc_transport"] == got["R3"]
-            and df_exp.loc[member["R3"].compartment_id, "lulc_built_up"] == 0
+            df_exp.loc[member["R3"].protected_area_id, "lulc_transport"] == got["R3"]
+            and df_exp.loc[member["R3"].protected_area_id, "lulc_built_up"] == 0
             and 0 < got["R2"] < 0.8 * expected_value("R2", urban_atlas=False),
         )
     )
@@ -319,7 +322,7 @@ gdf_kept = (
 )
 list_res.append(
     (
-        f"Urban Atlas layer copied from the two-layer file; {len(gdf_kept)} polygons touch compartments",
+        f"Urban Atlas layer copied from the two-layer file; {len(gdf_kept)} polygons touch protected areas",
         len(list_copy) == 1 and len(gdf_kept) == 2,
     )
 )
@@ -335,7 +338,7 @@ pd.DataFrame(
 ).to_csv(data / "lulc_max_damage.csv", index=False)
 proc = run("processing.HAND_YZ", "hand_yz_new_values")
 df_dbl = (
-    pd.read_csv(out / "exposure_lulc.csv").set_index("compartment_id")
+    pd.read_csv(out / "exposure_lulc.csv").set_index("protected_area_id")
     if proc.returncode == 0
     else pd.DataFrame()
 )
@@ -352,13 +355,13 @@ list_res.append(
 # --- rp_index.py: building value plus land cover value ---
 proc = run("processing.rp_index", "rp_index_lulc")
 gdf_comb = (
-    gpd.read_file(out / "compartments_rp.gpkg")
+    gpd.read_file(out / "protected_areas_rp.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
 if len(gdf_comb):
-    gdf_mrg = gdf_comb.set_index("compartment_id")
-    gdf_before = gdf_model.set_index("compartment_id")
+    gdf_mrg = gdf_comb.set_index("protected_area_id")
+    gdf_before = gdf_model.set_index("protected_area_id")
     list_res.append(
         (
             "rp_index: value_exposed = value_ghsl + value_lulc, GHSL part unchanged from Stage B",
@@ -374,7 +377,7 @@ if len(gdf_comb):
     )
 else:
     list_res.append(("rp_index runs with land cover exposure", False))
-shutil.copy(stage_b, out / "compartments_rp.gpkg")
+shutil.copy(stage_b, out / "protected_areas_rp.gpkg")
 
 for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")

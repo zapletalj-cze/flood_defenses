@@ -119,7 +119,8 @@ cdir.mkdir(exist_ok=True)
 )
 (cdir / "defenses.toml").write_text(
     '[general]\ncountry = "ZZ"\nn_workers = 8\n[countries.ZZ]\ncorridor_buffer_m = 500.0\n'
-    '[countries.ZZ.rp]\nmax_rp = 100\n[discharge.glofas]\nrequest = { c = ["3"] }\n'
+    "[countries.ZZ.rp]\nmax_rp = 100\n[countries.ZZ.compartments]\nmin_area_m2 = 5.0\n"
+    '[discharge.glofas]\nrequest = { c = ["3"] }\n'
 )
 os.environ.pop("DEFENSES_COUNTRY", None)
 run_split = gis.Run.env_overrides(CONFIG_PATH=str(cdir / "defenses.toml"), COUNTRY="XX")
@@ -132,12 +133,13 @@ cfg_split = gis.Config.load(
         "country.corridor_buffer_m",
         "country.rp.max_rp",
         "country.rp.storey_height_m",
+        "country.protected_areas.min_area_m2",
         "discharge.glofas.request",
     ],
 )
 list_res.append(
     (
-        f"configuration split: country {run_split['COUNTRY']}, n_workers {cfg_split['general']['n_workers']}, "
+        f"configuration split (old table compartments read as protected_areas): country {run_split['COUNTRY']}, n_workers {cfg_split['general']['n_workers']}, "
         f"buffer {cfg_split['country']['corridor_buffer_m']}, rp {cfg_split['country']['rp']}, request "
         f"{cfg_split['discharge']['glofas']['request']}",
         run_split["COUNTRY"] == "ZZ"
@@ -146,7 +148,8 @@ list_res.append(
         and cfg_split["country"]["corridor_buffer_m"] == 500.0
         and cfg_split["country"]["rp"] == {"max_rp": 100, "storey_height_m": 3.0}
         and cfg_split["discharge"]["glofas"]["request"] == {"c": ["3"]}
-        and cfg_split["placeholders"] == ["general.log_level"],
+        and cfg_split["placeholders"] == ["general.log_level"]
+        and cfg_split["country"]["protected_areas"]["min_area_m2"] == 5.0,
     )
 )
 list_bad = []
@@ -181,7 +184,7 @@ list_res.append(
     )
 )
 
-# --- Synthetic country T6: footprint, rivers, compartments, GFM tests ---
+# --- Synthetic country T6: footprint, rivers, protected areas, GFM tests ---
 X0, Y0 = 500000.0, 5500000.0
 crs = f"EPSG:{EPSG}"
 gis.Vector.write_gpkg(
@@ -210,7 +213,7 @@ src_pts = [(X0 + 8000.0, Y0 + 10000.0), (X0 + 12000.0, Y0 + 10000.0)]
 gis.Vector.write_gpkg(
     gpd.GeoDataFrame(
         {
-            "compartment_id": ["C1", "C2"],
+            "protected_area_id": ["C1", "C2"],
             "source_x": [p[0] for p in src_pts],
             "source_y": [p[1] for p in src_pts],
             "rp": [50.0, 50.0],
@@ -224,7 +227,7 @@ gis.Vector.write_gpkg(
         ],
         crs=crs,
     ),
-    out / "compartments_rp.gpkg",
+    out / "protected_areas_rp.gpkg",
 )
 # Discharge: annual maxima with Gumbel(1000, 300) quantiles, EFAS 30 % higher on event days; within a day the four
 # EFAS steps are q - 3, q - 1, q + 1, q + 3 (mean q, max q + 3).
@@ -246,7 +249,7 @@ for day, (_, value) in events.items():
     q[days == np.datetime64(day)] = value
 pd.DataFrame(
     {
-        "compartment_id": ["C1", "C1", "C2"],
+        "protected_area_id": ["C1", "C1", "C2"],
         "unit_id": ["000_000"] * 3,
         "item_id": ["S1", "S2", "S1"],
         "datetime": [
@@ -515,7 +518,7 @@ if proc.returncode == 0:
     run("prepare_again", "processing.discharge_prepare")
 else:
     list_res.append(("discharge_prepare runs", False))
-# A Stage E implied compartment on the same river with a flooded test (implied/base and river_points.gpkg)
+# A Stage E implied protected area on the same river with a flooded test (implied/base and river_points.gpkg)
 imp = out / "implied" / "base"
 imp.mkdir(parents=True, exist_ok=True)
 IMP_ID = "implied_0_L_0001"
@@ -525,7 +528,7 @@ gis.Vector.write_gpkg(
         geometry=[shapely.box(X0 + 8000.0, Y0 + 10200.0, X0 + 9000.0, Y0 + 11000.0)],
         crs=crs,
     ),
-    imp / "implied_compartments.gpkg",
+    imp / "implied_protected_areas.gpkg",
 )
 chain = np.arange(0.0, 20001.0, 100.0)
 gis.Vector.write_gpkg(
@@ -538,7 +541,7 @@ gis.Vector.write_gpkg(
 )
 pd.DataFrame(
     {
-        "compartment_id": [IMP_ID],
+        "protected_area_id": [IMP_ID],
         "unit_id": ["000_000"],
         "item_id": ["S2"],
         "datetime": ["2020-03-05T10:00:00Z"],
@@ -549,7 +552,7 @@ proc = run("bounds", "processing.rp_bounds")
 if proc.returncode == 0:
     ev = pd.read_csv(out / "event_rp.csv")
     comb = pd.read_csv(out / "event_rp_combined.csv").set_index(
-        ["compartment_id", "item_id"]
+        ["protected_area_id", "item_id"]
     )
     held = comb.loc[("C1", "S1")]
     flooded = comb.loc[("C1", "S2")]
@@ -563,7 +566,9 @@ if proc.returncode == 0:
             and held["rp_glofas"] != held["rp_efas"],
         )
     )
-    gdf_c = gpd.read_file(out / "compartments_rp.gpkg").set_index("compartment_id")
+    gdf_c = gpd.read_file(out / "protected_areas_rp.gpkg").set_index(
+        "protected_area_id"
+    )
     c1, c2 = gdf_c.loc["C1"], gdf_c.loc["C2"]
     # Same river: the cell centre lies within match_river_distance_m (500 m) of the river line.
     expect = {
@@ -614,14 +619,14 @@ if proc.returncode == 0:
     imp_row = comb.loc[(IMP_ID, "S2")] if (IMP_ID, "S2") in comb.index else None
     list_res.append(
         (
-            "implied compartment (Stage E): its flooded test on S2 gets "
+            "implied protected area (Stage E): its flooded test on S2 gets "
             + (
                 f"GloFAS {imp_row['rp_glofas']:.1f}, EFAS {imp_row['rp_efas']:.1f} -> {imp_row['rp_combined']:.1f} "
                 "(the higher) in event_rp_combined.csv"
                 if imp_row is not None
                 else "no row in event_rp_combined.csv"
             )
-            + "; compartments_rp.gpkg keeps the explicit compartments only",
+            + "; protected_areas_rp.gpkg keeps the explicit protected areas only",
             imp_row is not None
             and imp_row["rp_combined"] == max(imp_row["rp_glofas"], imp_row["rp_efas"])
             and IMP_ID not in set(gdf_c.index)
@@ -635,7 +640,7 @@ if proc.returncode == 0:
             f"discharge_matches.gpkg: {len(m_exp)} lines from explicit sites (C1 both, C2 GloFAS) and "
             f"{len(matches) - len(m_exp)} from the implied site to their matched cells",
             len(m_exp) == 3
-            and sorted(zip(m_exp["compartment_id"], m_exp["source"]))
+            and sorted(zip(m_exp["protected_area_id"], m_exp["source"]))
             == [("C1", "efas"), ("C1", "glofas"), ("C2", "glofas")]
             and set(matches.loc[matches["kind"] == "implied", "source"])
             == {"efas", "glofas"},

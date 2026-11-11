@@ -43,7 +43,7 @@ data = root / "data"
 data_d = root / "data_d"
 data_d.mkdir(parents=True, exist_ok=True)
 print(f"Test folder: {root}")
-if not (root / "output" / "T4" / "compartments_rp.gpkg").exists():
+if not (root / "output" / "T4" / "protected_areas_rp.gpkg").exists():
     print("Stage B outputs missing: running tests.test_stage_b in the same folder.")
     proc = subprocess.run(
         [sys.executable, "-m", "tests.test_stage_b"],

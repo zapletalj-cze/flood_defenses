@@ -125,12 +125,12 @@ convert_dtm = false             # prepare_dtm.py converts only when true
 dtm_conversion = "B"            # "A": whole file tiled + overviews; "B": corridor-clipped tiled copy
 dtm_compress = "ZSTD"           # ZSTD (falls back to DEFLATE if GDAL lacks it), DEFLATE or LZW
 footprint_resolution_m = 100.0  # cell size of the valid-data footprint
-bytes_per_cell = 180.0          # peak RAM per window cell; replace with the value logged by compartments.py
+bytes_per_cell = 180.0          # peak RAM per window cell; replace with the value logged by protected_areas.py
 crest_box_size_m = 500.0        # crest boxes around levees; adjacent boxes in a row are merged
-merge_overlap_ratio = 0.5       # candidates from different units overlapping more are the same compartment
-drop_contradicted_truncated = true  # drop compartments truncated everywhere if neighbouring windows see no protection
-contradiction_ratio = 0.5       # share of such a compartment that silent neighbouring windows must cover
-id_rounding_m = 10.0            # rounding of the representative point in compartment_id
+merge_overlap_ratio = 0.5       # candidates from different units overlapping more are the same protected area
+drop_contradicted_truncated = true  # drop protected areas truncated everywhere if neighbouring windows see no protection
+contradiction_ratio = 0.5       # share of such a protected area that silent neighbouring windows must cover
+id_rounding_m = 10.0            # rounding of the representative point in protected_area_id
 keep_intermediate = false       # write dtm, spill, margin, barrier and crest rasters per unit
 # Stage D inputs (all optional)
 dsm = []                        # surface model files in the DTM CRS (flood walls classified as non-ground)
@@ -145,7 +145,7 @@ corine_legend_index_field = ""  # NOT VERIFIED: legend column with the raster va
 corine_legend_code_field = ""   # NOT VERIFIED: legend column with the CLC code
 corine_check = []               # known pixels [[x, y, code], ...] in the raster CRS; the mapping is verified on them
 
-[country_defaults.compartments]
+[country_defaults.protected_areas]
 gap_tolerance_m = 20.0
 touch_tolerance_m = 0.01                 # endpoint closer than this to another line is connected
 self_close_min_length_factor = 3.0       # a line closes on itself only if longer than factor x gap
@@ -255,7 +255,7 @@ urban_atlas_categories = {}     # NOT VERIFIED codes: Urban Atlas class code -> 
 max_damage_csv = ""             # user provided: columns country + one per category, value per m2 of land
 depth_damage_csv = ""           # user provided: depth_m + one damage fraction column per category
 
-# River snapping (always applied by compartments.py): vertices every densify_m are projected onto the nearest guide
+# River snapping (always applied by protected_areas.py): vertices every densify_m are projected onto the nearest guide
 # line (country river_guides) within guide_search_m, then moved to the lowest DTM cell within window_m; sharp turns
 # and short spikes are removed. Defaults follow the MERIT snapping procedure; without guide lines nothing moves
 # unless max_shift_without_guide_m > 0.
@@ -323,7 +323,7 @@ river_level_percentile = 90.0   # scene water level in HAND for missing-barrier 
 hint_margin_m = 0.5             # placeholder: a cell is clearly below the scene level by this margin
 hint_dry_share = 0.8            # placeholder: share of tested scenes in which a hint cell stays dry
 hint_min_scenes = 3             # placeholder: minimum number of tested scenes per hint cell
-hint_exclusion_m = 40.0         # placeholder: cells this close to a barrier line or compartment are not tested
+hint_exclusion_m = 40.0         # placeholder: cells this close to a barrier line or protected area are not tested
 
 # --- Stage D ---
 [crest_lines]
@@ -422,7 +422,7 @@ show_max = 10
 plot_all_in_units = []
 
 # --- Stage F: discharge sources GloFAS and EFAS (replaces the GloFAS keys of [sources] and [evidence]) ---
-# Discharge only turns observed outcomes into return periods; it never delineates compartments and is never a hazard.
+# Discharge only turns observed outcomes into return periods; it never delineates protected areas and is never a hazard.
 # Request parameters, data formats, years, the EFAS variable and the EFAS upstream area source are copied from the
 # EWDS download form ("Show API request") and never guessed: entries marked "from the form" stay empty until then.
 # The personal EWDS key goes into ~/.cdsapirc (url and key) or CDSAPI_KEY, never into this file.

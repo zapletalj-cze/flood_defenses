@@ -1,6 +1,6 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-03
-# Derives areas protected by flood levees (compartments) per processing unit and merges the units: priority-flood
+# Derives areas protected by flood levees (protected areas) per processing unit and merges the units: priority-flood
 # spill levels above the river (HAND on the undefended DTM) with and without barriers; margin = difference.
 
 import json
@@ -63,21 +63,21 @@ KEYS = [
     "country.contradiction_ratio",
     "country.id_rounding_m",
     "country.keep_intermediate",
-    "country.compartments.gap_tolerance_m",
-    "country.compartments.touch_tolerance_m",
-    "country.compartments.self_close_min_length_factor",
-    "country.compartments.crest_search_radius_m",
-    "country.compartments.barrier_removal_width_m",
-    "country.compartments.min_margin_m",
-    "country.compartments.max_level_m",
-    "country.compartments.min_area_m2",
-    "country.compartments.gated_crossings",
-    "country.compartments.fill_nodata_holes",
-    "country.compartments.stream_burn_m",
-    "country.compartments.stream_burn_buffer_m",
-    "country.compartments.preserve_river_cells",
-    "country.compartments.cap_river_holes",
-    "country.compartments.max_fill_distance_m",
+    "country.protected_areas.gap_tolerance_m",
+    "country.protected_areas.touch_tolerance_m",
+    "country.protected_areas.self_close_min_length_factor",
+    "country.protected_areas.crest_search_radius_m",
+    "country.protected_areas.barrier_removal_width_m",
+    "country.protected_areas.min_margin_m",
+    "country.protected_areas.max_level_m",
+    "country.protected_areas.min_area_m2",
+    "country.protected_areas.gated_crossings",
+    "country.protected_areas.fill_nodata_holes",
+    "country.protected_areas.stream_burn_m",
+    "country.protected_areas.stream_burn_buffer_m",
+    "country.protected_areas.preserve_river_cells",
+    "country.protected_areas.cap_river_holes",
+    "country.protected_areas.max_fill_distance_m",
     "country.rp.levee_adjacent_distance_m",
 ]
 UNIT_COLUMNS = {
@@ -96,7 +96,7 @@ UNIT_COLUMNS = {
     "touches_dtm_edge": "bool",
 }
 OUTPUT_COLUMNS = [
-    "compartment_id",
+    "protected_area_id",
     "area_m2",
     "protection_level_m",
     "margin_median_m",
@@ -558,14 +558,14 @@ def process_unit(task):
         margin = spill_def - spill_undef
         times["flood"] = time.perf_counter() - t
     else:
-        log.warning("No river cells in the window; no compartments.")
+        log.warning("No river cells in the window; no protected areas.")
         dtm_undef = dtm
         river_ref = hand_undef = spill_undef = spill_def = margin = np.full(
             shape, np.nan, np.float32
         )
         seed_def = order_def = np.full(shape, -1, np.int32)
 
-    # --- Protected compartments ---
+    # --- Protected areas ---
     t = time.perf_counter()
     protected = (
         (margin >= p["min_margin_m"]) & (spill_undef <= p["max_level_m"]) & ~barrier
@@ -579,7 +579,7 @@ def process_unit(task):
     labels = relabel[labels]
     ids = np.arange(1, len(keep) + 1)
     if len(ids):
-        # Statistics over compartment cells only (scipy.ndimage label statistics scan the whole window).
+        # Statistics over protected area cells only (scipy.ndimage label statistics scan the whole window).
         cells = np.flatnonzero(labels.ravel())
         df_cells = pd.DataFrame(
             {
@@ -592,7 +592,7 @@ def process_unit(task):
             }
         )
         grouped = df_cells.groupby("label")
-        # Entry = first compartment cell reached by the defended flood; source = seed river cell of its path.
+        # Entry = first protected area cell reached by the defended flood; source = seed river cell of its path.
         entry_rows, entry_cols = np.divmod(
             df_cells["cell"].to_numpy()[
                 grouped["order"].idxmin().reindex(ids).to_numpy()
@@ -605,7 +605,7 @@ def process_unit(task):
             np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
         )
         touching = np.unique(labels[ndimage.binary_dilation(~domain) & (labels > 0)])
-        # Missing DTM coverage acts as a wall: such compartments may be closed artificially.
+        # Missing DTM coverage acts as a wall: such protected areas may be closed artificially.
         at_dtm_edge = np.unique(
             labels[ndimage.binary_dilation(np.isnan(dtm) & domain) & (labels > 0)]
         )
@@ -637,10 +637,10 @@ def process_unit(task):
     gdf_poly = gis.Raster.polygonize_labels(labels, gt, wkt).rename(
         columns={"label": "unit_label"}
     )
-    gdf_comp = gdf_poly.merge(df_stats, on="unit_label", how="inner")
-    gdf_comp["unit_id"] = unit_id
-    counts["compartments"] = len(gdf_comp)
-    times["compartments"] = time.perf_counter() - t
+    gdf_pa = gdf_poly.merge(df_stats, on="unit_label", how="inner")
+    gdf_pa["unit_id"] = unit_id
+    counts["protected_areas"] = len(gdf_pa)
+    times["protected_areas"] = time.perf_counter() - t
 
     # --- Crest statistics of barrier lines inside the core ---
     t = time.perf_counter()
@@ -692,7 +692,7 @@ def process_unit(task):
             ("crest", np.where(barrier, crest, np.nan)),
         ]:
             gis.Raster.write_array(unit_dir / f"{name}.tif", array, gt, wkt)
-    gis.Vector.write_gpkg(gdf_comp, unit_dir / "compartments.gpkg")
+    gis.Vector.write_gpkg(gdf_pa, unit_dir / "protected_areas.gpkg")
     gis.Vector.write_gpkg(gdf_encl, unit_dir / "enclosed_streams.gpkg")
     pd.DataFrame(
         list_crest, columns=["line_id", "crest_min_m", "crest_hand_min_m"]
@@ -712,7 +712,7 @@ def process_unit(task):
         **counts,
     }
     done["summary"] = (
-        f"unit {unit_id}: {len(gdf_comp)} compartments in {seconds:.0f} s (read {times['read_terrain']:.1f} s, "
+        f"unit {unit_id}: {len(gdf_pa)} protected areas in {seconds:.0f} s (read {times['read_terrain']:.1f} s, "
         f"crest {times['crest_read']:.1f} s in {counts['crest_boxes']} boxes, hand {times.get('hand', 0):.1f} s, "
         f"flood {times.get('flood', 0):.1f} s, write {times['write']:.1f} s), peak RSS {peak_mb / 1024:.2f} GB "
         f"({done['bytes_per_cell']:.0f} B per window cell)"
@@ -732,7 +732,7 @@ if __name__ == "__main__":
     )
     cfg = gis.Config.load(run["CONFIG_PATH"], run["COUNTRY"], KEYS)
     general, country = cfg["general"], cfg["country"]
-    params = dict(country["compartments"])
+    params = dict(country["protected_areas"])
     params.update(
         {
             "crest_box_size_m": country["crest_box_size_m"],
@@ -741,7 +741,7 @@ if __name__ == "__main__":
     )
     work_dir = Path(general["work_dir"]) / run["COUNTRY"]
     out_dir = Path(general["output_dir"]) / run["COUNTRY"]
-    log = gis.Run.logger("compartments", out_dir / "logs", general["log_level"])
+    log = gis.Run.logger("protected_areas", out_dir / "logs", general["log_level"])
     gis.Config.warn_placeholders(cfg)
     if params["stream_burn_m"] <= 0:
         log.warning(
@@ -969,13 +969,14 @@ if __name__ == "__main__":
     list_done = [
         u for u in df_units.unit_id if (work_dir / "units" / u / "done.json").exists()
     ]
-    list_comp = [
-        gpd.read_file(work_dir / "units" / u / "compartments.gpkg") for u in list_done
+    list_pa = [
+        gpd.read_file(work_dir / "units" / u / "protected_areas.gpkg")
+        for u in list_done
     ]
-    list_comp = [f for f in list_comp if len(f)]
-    if list_comp:
+    list_pa = [f for f in list_pa if len(f)]
+    if list_pa:
         gdf_cand = gpd.GeoDataFrame(
-            pd.concat(list_comp, ignore_index=True), geometry="geometry", crs=wkt
+            pd.concat(list_pa, ignore_index=True), geometry="geometry", crs=wkt
         )
     else:
         gdf_cand = gpd.GeoDataFrame(
@@ -994,7 +995,7 @@ if __name__ == "__main__":
             rep_pt,
             shapely.boundary(gdf_win.geometry.reindex(gdf_cand.unit_id).values),
         )
-        # The same compartment seen from several unit windows: candidates of different units overlapping by at
+        # The same protected area seen from several unit windows: candidates of different units overlapping by at
         # least merge_overlap_ratio of the smaller one form one group.
         left, right = gdf_cand.sindex.query(geoms, predicate="intersects")
         pair = (left < right) & (
@@ -1048,7 +1049,7 @@ if __name__ == "__main__":
         gdf_final = gpd.GeoDataFrame(
             pd.concat(list_keep, ignore_index=True), geometry="geometry", crs=wkt
         )
-        # A compartment truncated in every window may exist only because window edges
+        # A protected area truncated in every window may exist only because window edges
         # closed it. Units whose windows see the same area and found nothing there have
         # the better view (an edge can only add walls); drop it if they cover enough.
         n_contra = 0
@@ -1088,7 +1089,7 @@ if __name__ == "__main__":
         dtype=str,
     )
     dup_rank = ids.groupby(ids).cumcount()
-    gdf_final["compartment_id"] = np.where(
+    gdf_final["protected_area_id"] = np.where(
         dup_rank > 0, ids + "_" + (dup_rank + 1).astype(str), ids
     )
     distance = country["rp"]["levee_adjacent_distance_m"]
@@ -1103,11 +1104,11 @@ if __name__ == "__main__":
             "no_levee": bool,
         }
     )
-    gis.Vector.write_gpkg(gdf_final, out_dir / "compartments.gpkg")
+    gis.Vector.write_gpkg(gdf_final, out_dir / "protected_areas.gpkg")
     n_truncated = int(gdf_final["truncated"].sum())
     log.info(
-        "Compartments: %d from %d unit candidates in %d finished units; truncated %d (%.1f %%; many truncated "
-        "compartments mean the halo is too small), dropped as contradicted by neighbouring windows %d, touching "
+        "Protected areas: %d from %d unit candidates in %d finished units; truncated %d (%.1f %%; many truncated "
+        "protected areas mean the halo is too small), dropped as contradicted by neighbouring windows %d, touching "
         "the corridor edge %d, no levee %d. Merge took %.1f s.",
         len(gdf_final),
         len(gdf_cand),

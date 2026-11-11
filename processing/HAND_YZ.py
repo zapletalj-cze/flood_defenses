@@ -1,6 +1,6 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
-# HAND_YZ: land use / land cover exposure of each compartment (ESA WorldCover; Urban Atlas where available), valued
+# HAND_YZ: land use / land cover exposure of each protected area (ESA WorldCover; Urban Atlas where available), valued
 # with category damages at the HAND depth of the protection level. Supplements the GHSL value of rp_index.py.
 
 import hashlib
@@ -21,7 +21,7 @@ import gis
 CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
 FORCE = False  # recompute units whose land cover exposure is up to date
-UNITS = []  # unit ids to process; empty = all units with compartments
+UNITS = []  # unit ids to process; empty = all units with protected areas
 
 KEYS = [
     "general.work_dir",
@@ -48,7 +48,7 @@ def exposure_unit(task):
     labels_ds = gdal.Open(str(unit_dir / "labels.tif"))
     gt, wkt = labels_ds.GetGeoTransform(), labels_ds.GetProjection()
     labels = labels_ds.ReadAsArray()
-    # Only the bounding box of the unit's kept compartments is valued.
+    # Only the bounding box of the unit's kept protected areas is valued.
     kept = np.isin(labels, np.array(list(task["levels"]), dtype=labels.dtype))
     rows_any, cols_any = np.flatnonzero(kept.any(axis=1)), np.flatnonzero(
         kept.any(axis=0)
@@ -152,7 +152,7 @@ def exposure_unit(task):
         "cells": int(labels.size),
         "urban_atlas_cells": ua_cells,
         "summary": (
-            f"unit {task['unit_id']}: {len(df_res)} compartments, land cover value "
+            f"unit {task['unit_id']}: {len(df_res)} protected areas, land cover value "
             f"{df_res['value_lulc'].sum():.3g}, Urban Atlas cells {ua_cells}, {seconds:.1f} s"
         ),
     }
@@ -176,8 +176,10 @@ if __name__ == "__main__":
     gis.Run.configure_gdal(
         general["gdal_cachemax_mb"], general["gdal_threads_per_worker"]
     )
-    if not (out_dir / "compartments.gpkg").exists():
-        raise SystemExit("compartments.gpkg is missing; run compartments.py first.")
+    if not (out_dir / "protected_areas.gpkg").exists():
+        raise SystemExit(
+            "protected_areas.gpkg is missing; run protected_areas.py first."
+        )
     if not lulc["max_damage_csv"] or not lulc["depth_damage_csv"]:
         raise SystemExit(
             "Set countries.<code>.lulc.max_damage_csv and depth_damage_csv (values per category)."
@@ -236,9 +238,9 @@ if __name__ == "__main__":
         ", ".join(f"{k} {v:g}" for k, v in values.items()),
     )
 
-    # --- Urban Atlas: single-layer copies, class codes to category ids, only polygons touching compartments ---
-    gdf_comp = gpd.read_file(out_dir / "compartments.gpkg")
-    wkt = gdf_comp.crs.to_wkt()
+    # --- Urban Atlas: single-layer copies, class codes to category ids, only polygons touching protected areas ---
+    gdf_pa = gpd.read_file(out_dir / "protected_areas.gpkg")
+    wkt = gdf_pa.crs.to_wkt()
     urban_atlas, list_ua = "", []
     if lulc["urban_atlas"]:
         list_path = []
@@ -267,11 +269,11 @@ if __name__ == "__main__":
                 )
         field = lulc["urban_atlas_class_field"]
         gdf_poly = gis.Vector.read_merged(
-            list_path, wkt, bbox=tuple(gdf_comp.total_bounds), keep_columns=[field]
+            list_path, wkt, bbox=tuple(gdf_pa.total_bounds), keep_columns=[field]
         )
         if field not in gdf_poly.columns:
             raise SystemExit(f"Field {field!r} not found in the Urban Atlas files.")
-        touching, _ = gdf_comp.sindex.query(
+        touching, _ = gdf_pa.sindex.query(
             gdf_poly.geometry.values, predicate="intersects"
         )
         gdf_poly = gdf_poly.iloc[np.unique(touching)].reset_index(drop=True)
@@ -285,7 +287,7 @@ if __name__ == "__main__":
         gdf_poly["category_id"] = codes.map(mapping).fillna(0).astype(int)
         list_unmap = sorted(set(codes[gdf_poly["category_id"] == 0]))
         log.info(
-            "Urban Atlas: %d polygons touch compartments; classes without a category (no value): %s.",
+            "Urban Atlas: %d polygons touch protected areas; classes without a category (no value): %s.",
             len(gdf_poly),
             ", ".join(list_unmap) or "none",
         )
@@ -312,7 +314,7 @@ if __name__ == "__main__":
     phash = hashlib.sha256(
         json.dumps([parameters, stamp], sort_keys=True, default=str).encode()
     ).hexdigest()
-    list_unit = sorted(gdf_comp["unit_id"].unique())
+    list_unit = sorted(gdf_pa["unit_id"].unique())
     if run["UNITS"]:
         list_unit = [u for u in list_unit if u in run["UNITS"]]
     list_task, list_skip = [], []
@@ -327,7 +329,7 @@ if __name__ == "__main__":
         ):
             list_skip.append(unit_id)
             continue
-        gdf_mem = gdf_comp[gdf_comp["unit_id"] == unit_id]
+        gdf_mem = gdf_pa[gdf_pa["unit_id"] == unit_id]
         list_task.append(
             {
                 "unit_id": unit_id,
@@ -344,7 +346,7 @@ if __name__ == "__main__":
             }
         )
     log.info(
-        "Units with compartments: %d to process, %d up to date and skipped.",
+        "Units with protected areas: %d to process, %d up to date and skipped.",
         len(list_task),
         len(list_skip),
     )
@@ -365,14 +367,14 @@ if __name__ == "__main__":
         for u in list_unit
         if (work_dir / "units" / u / "hand_yz.csv").exists()
     ]
-    df_exp = gdf_comp[["compartment_id", "unit_id", "unit_label"]].merge(
+    df_exp = gdf_pa[["protected_area_id", "unit_id", "unit_label"]].merge(
         pd.concat(list_exp, ignore_index=True),
         on=["unit_id", "unit_label"],
         how="inner",
     )
     df_exp.to_csv(out_dir / "exposure_lulc.csv", index=False)
     log.info(
-        "exposure_lulc.csv: %d compartments, land cover value %.4g (%s).",
+        "exposure_lulc.csv: %d protected areas, land cover value %.4g (%s).",
         len(df_exp),
         df_exp["value_lulc"].sum(),
         ", ".join(f"{n} {df_exp[f'lulc_{n}'].sum():.3g}" for n in list_cat),

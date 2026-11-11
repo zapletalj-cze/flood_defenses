@@ -217,7 +217,7 @@ contradiction_ratio = 0.5
 id_rounding_m = 10.0
 keep_intermediate = false
 
-[countries.T4.compartments]
+[countries.T4.protected_areas]
 gap_tolerance_m = 20.0
 touch_tolerance_m = 0.01
 self_close_min_length_factor = 3.0
@@ -298,9 +298,9 @@ for module in ["processing.prepare_dtm", "processing.build_units"]:
     proc = run(module, RUN_BENCHMARK="0")
     list_res.append((f"{module} runs", proc.returncode == 0))
 
-proc = run("processing.compartments", config="test_open.toml")
+proc = run("processing.protected_areas", config="test_open.toml")
 gdf_before = (
-    gpd.read_file(out / "compartments.gpkg")
+    gpd.read_file(out / "protected_areas.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
@@ -330,9 +330,9 @@ list_res.append(
     )
 )
 
-proc = run("processing.compartments", FORCE="1")
+proc = run("processing.protected_areas", FORCE="1")
 gdf_after = (
-    gpd.read_file(out / "compartments.gpkg")
+    gpd.read_file(out / "protected_areas.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
@@ -372,7 +372,7 @@ list_res.append(
     )
 )
 gdf_rp = (
-    gpd.read_file(out / "compartments_rp.gpkg")
+    gpd.read_file(out / "protected_areas_rp.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
@@ -402,7 +402,10 @@ if len(gdf_rp) and all(
         "model_obs_conflict",
     ]
     list_res.append(
-        ("compartments_rp has all columns", all(c in gdf_rp.columns for c in list_col))
+        (
+            "protected_areas_rp has all columns",
+            all(c in gdf_rp.columns for c in list_col),
+        )
     )
     list_res.append(
         (
@@ -479,7 +482,7 @@ if not (
     len(gdf_rp)
     and all(int(gdf_rp.covers(world(Point(*xy))).sum()) == 1 for xy in probes.values())
 ):
-    list_res.append(("compartments_rp contains the three rings", False))
+    list_res.append(("protected_areas_rp contains the three rings", False))
 for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")
 sys.exit(0 if all(ok for _, ok in list_res) else 1)

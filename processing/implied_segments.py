@@ -32,8 +32,8 @@ KEYS = [
     "general.gdal_cachemax_mb",
     "general.gdal_threads_per_worker",
     "country.working_resolution_m",
-    "country.compartments.stream_burn_m",
-    "country.compartments.stream_burn_buffer_m",
+    "country.protected_areas.stream_burn_m",
+    "country.protected_areas.stream_burn_buffer_m",
     "implied.units",
     "implied.recompute_hand",
     "implied.envelope_hand_m",
@@ -171,7 +171,7 @@ if __name__ == "__main__":
     run = gis.Run.env_overrides(CONFIG_PATH=CONFIG_PATH, COUNTRY=COUNTRY, FORCE=FORCE)
     cfg = gis.Config.load(run["CONFIG_PATH"], run["COUNTRY"], KEYS)
     general, implied = cfg["general"], cfg["implied"]
-    burn = cfg["country"]["compartments"]
+    burn = cfg["country"]["protected_areas"]
     work_dir = Path(general["work_dir"]) / run["COUNTRY"]
     out_dir = Path(general["output_dir"]) / run["COUNTRY"]
     log = gis.Run.logger("implied_segments", out_dir / "logs", general["log_level"])
@@ -185,7 +185,7 @@ if __name__ == "__main__":
     list_miss = [str(p) for p in list_need if not p.exists()]
     if list_miss:
         raise SystemExit(
-            f"Missing inputs {list_miss}; run build_units.py, compartments.py and snap_rivers.py first."
+            f"Missing inputs {list_miss}; run build_units.py, protected_areas.py and snap_rivers.py first."
         )
     df_units = pd.read_csv(out_dir / "units.csv", dtype={"unit_id": str})
     if implied["units"]:
@@ -198,7 +198,7 @@ if __name__ == "__main__":
     )
     if not has_hand.all():
         log.warning(
-            "No hand_undef.tif (compartments.py) for units %s; they are skipped.",
+            "No hand_undef.tif (protected_areas.py) for units %s; they are skipped.",
             sorted(df_units.loc[~has_hand, "unit_id"]),
         )
     df_units = df_units[has_hand]
@@ -210,7 +210,7 @@ if __name__ == "__main__":
         ]
         if list_miss:
             raise SystemExit(
-                "recompute_hand needs dtm_undefended.tif of stage A; run compartments.py with "
+                "recompute_hand needs dtm_undefended.tif of stage A; run protected_areas.py with "
                 f"keep_intermediate = true (missing for units {list_miss})."
             )
     if df_units.empty:

@@ -159,7 +159,7 @@ if __name__ == "__main__":
     )
     if no_river.any():
         log.warning(
-            "%d unit windows contain no river; they cannot produce compartments: %s",
+            "%d unit windows contain no river; they cannot produce protected areas: %s",
             int(no_river.sum()),
             ", ".join(df_units.unit_id[no_river]),
         )

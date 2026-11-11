@@ -1,7 +1,7 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
-# End-to-end check of prepare_dtm.py, build_units.py and compartments.py on a synthetic country: closed ring across
-# a core boundary (seam), bridged and wide gaps, diagonal levee, nested rings, compartment wider than a window,
+# End-to-end check of prepare_dtm.py, build_units.py and protected_areas.py on a synthetic country: closed ring across
+# a core boundary (seam), bridged and wide gaps, diagonal levee, nested rings, protected area wider than a window,
 # nodata hole, empty levee input, DTM conversion options A and B, unit selection and checkpointing.
 # Run: pixi run python -m tests.test_pipeline  (DEFENSES_TEST_DIR sets the working folder, default: temporary)
 
@@ -81,7 +81,7 @@ levees = {
     # B3/B4: U-shaped levee open towards a strip without DTM coverage (x >= 2960).
     "U_open": (LineString([(2960, 600), (2700, 600), (2700, 800), (2960, 800)]), 2.5),
 }
-probes = {  # local point -> expected number of compartments covering it
+probes = {  # local point -> expected number of protected areas covering it
     "A_seam": ((1020, 1250), 1),
     "B_bridged": ((1800, 1200), 1),
     "C_wide": ((2400, 1250), 0),
@@ -196,7 +196,7 @@ contradiction_ratio = 0.5
 id_rounding_m = 10.0
 keep_intermediate = true
 
-[countries.{code}.compartments]
+[countries.{code}.protected_areas]
 gap_tolerance_m = 20.0
 touch_tolerance_m = 0.01
 self_close_min_length_factor = 3.0
@@ -314,11 +314,11 @@ print(
     else "no overview message"
 )
 
-# Compartments: first two units only, then the rest (checkpoints), then a rerun that must skip everything.
+# Protected areas: first two units only, then the rest (checkpoints), then a rerun that must skip everything.
 list_unit = sorted(gpd.read_file(root / "output" / "T1" / "units_core.gpkg").unit_id)
-proc = run("compartments", "T1", UNITS=",".join(list_unit[:2]))
-list_res.append(("T1: compartments on two selected units", proc.returncode == 0))
-proc = run("compartments", "T1")
+proc = run("protected_areas", "T1", UNITS=",".join(list_unit[:2]))
+list_res.append(("T1: protected areas on two selected units", proc.returncode == 0))
+proc = run("protected_areas", "T1")
 list_res.append(
     (
         "T1: remaining units processed, finished units skipped",
@@ -326,7 +326,7 @@ list_res.append(
         and f"{len(list_unit) - 2} to process, 2 already finished" in proc.stderr,
     )
 )
-proc = run("compartments", "T1")
+proc = run("protected_areas", "T1")
 list_res.append(
     (
         "T1: rerun skips every unit",
@@ -334,22 +334,22 @@ list_res.append(
     )
 )
 
-gdf_final = gpd.read_file(root / "output" / "T1" / "compartments.gpkg")
+gdf_final = gpd.read_file(root / "output" / "T1" / "protected_areas.gpkg")
 for label, ((px, py), expected) in probes.items():
     hits = int(gdf_final.covers(world(Point(px, py))).sum())
     list_res.append(
         (
-            f"{label}: {expected} compartment(s) at the probe, found {hits}",
+            f"{label}: {expected} protected area(s) at the probe, found {hits}",
             hits == expected,
         )
     )
 list_res.append(
-    (f"T1: total compartments 9, found {len(gdf_final)}", len(gdf_final) == 9)
+    (f"T1: total protected areas 9, found {len(gdf_final)}", len(gdf_final) == 9)
 )
 gdf_uopen = gdf_final[gdf_final.covers(world(Point(2830, 700)))]
 list_res.append(
     (
-        "B3: compartment closed by missing DTM coverage kept and flagged touches_dtm_edge",
+        "B3: protected area closed by missing DTM coverage kept and flagged touches_dtm_edge",
         len(gdf_uopen) == 1
         and bool(gdf_uopen.touches_dtm_edge.iloc[0])
         and not bool(gdf_uopen.truncated.iloc[0]),
@@ -357,7 +357,7 @@ list_res.append(
 )
 others_flagged = int(gdf_final.touches_dtm_edge.astype(bool).sum()) - len(gdf_uopen)
 list_res.append(
-    ("B3: no other compartment flagged touches_dtm_edge", others_flagged == 0)
+    ("B3: no other protected area flagged touches_dtm_edge", others_flagged == 0)
 )
 
 # B2: river cells under the removal zone of the bank levee keep their elevation.
@@ -430,13 +430,15 @@ list_res.append(
 gdf_long = gdf_final[gdf_final.covers(world(Point(1500, 1440)))]
 list_res.append(
     (
-        "G_long: truncated pieces merged into one compartment spanning the valley",
+        "G_long: truncated pieces merged into one protected area spanning the valley",
         len(gdf_long) == 1
         and bool(gdf_long.truncated.iloc[0])
         and gdf_long.geometry.iloc[0].length > 5000,
     )
 )
-list_res.append(("compartment ids are unique", gdf_final.compartment_id.is_unique))
+list_res.append(
+    ("protected area ids are unique", gdf_final.protected_area_id.is_unique)
+)
 river_world = world(river)
 source_ok = (
     shapely.distance(
@@ -452,7 +454,7 @@ entry_ok = (
 )
 list_res.append(
     (
-        "source cells lie on the river, entry cells on their compartment",
+        "source cells lie on the river, entry cells on their protected area",
         source_ok.all() and entry_ok.all(),
     )
 )
@@ -519,8 +521,8 @@ list_res.append(
 )
 
 # B4: in gated mode a tributary entering from missing DTM coverage is a water source.
-proc = run("compartments", "T2")
-gdf_gated = gpd.read_file(root / "output" / "T2" / "compartments.gpkg")
+proc = run("protected_areas", "T2")
+gdf_gated = gpd.read_file(root / "output" / "T2" / "protected_areas.gpkg")
 u_gated = int(gdf_gated.covers(world(Point(2830, 700))).sum())
 others_same = all(
     int(gdf_gated.covers(world(Point(*xy))).sum()) == expected
@@ -529,15 +531,15 @@ others_same = all(
 )
 list_res.append(
     (
-        f"B4: tributary from missing coverage floods the U in gated mode ({u_gated} compartments "
+        f"B4: tributary from missing coverage floods the U in gated mode ({u_gated} protected areas "
         f"at the U, other probes unchanged: {others_same})",
         proc.returncode == 0 and u_gated == 0 and others_same,
     )
 )
 
 # T3: the whole river is nodata; gaps are filled and the river cells capped at the waterline.
-proc = run("compartments", "T3")
-gdf_water = gpd.read_file(root / "output" / "T3" / "compartments.gpkg")
+proc = run("protected_areas", "T3")
+gdf_water = gpd.read_file(root / "output" / "T3" / "protected_areas.gpkg")
 water_hits = {
     label: int(gdf_water.covers(world(Point(*xy))).sum())
     for label, (xy, expected) in probes.items()
@@ -547,13 +549,13 @@ water_ok = all(
 )
 list_res.append(
     (
-        f"T3 river entirely nodata: same compartments as T1 ({len(gdf_water)}; probes "
+        f"T3 river entirely nodata: same protected areas as T1 ({len(gdf_water)}; probes "
         f"{'ok' if water_ok else water_hits})",
         proc.returncode == 0 and water_ok and len(gdf_water) == 9,
     )
 )
 
-proc = run("compartments", "T0")
+proc = run("protected_areas", "T0")
 list_margin = [
     gdal.Open(str(d / "margin.tif")).ReadAsArray()
     for d in (root / "work" / "T0" / "units").iterdir()
@@ -561,10 +563,10 @@ list_margin = [
 max_margin = max(
     float(np.nanmax(np.abs(m))) if np.isfinite(m).any() else 0.0 for m in list_margin
 )
-gdf_empty = gpd.read_file(root / "output" / "T0" / "compartments.gpkg")
+gdf_empty = gpd.read_file(root / "output" / "T0" / "protected_areas.gpkg")
 list_res.append(
     (
-        f"T0 empty levees: margin zero everywhere (max |margin| {max_margin}), no compartments",
+        f"T0 empty levees: margin zero everywhere (max |margin| {max_margin}), no protected areas",
         proc.returncode == 0 and max_margin == 0.0 and len(gdf_empty) == 0,
     )
 )

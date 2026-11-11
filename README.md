@@ -1,29 +1,30 @@
 # flood_defenses — Defenses layer for the fluvial flood hazard pipeline
 
-The package derives **compartments**: areas protected by flood levees. Each compartment
+The package derives **protected areas**: areas protected by flood levees. Each protected area
 gets a return period (RP) of protection. The layer clips fluvial hazard maps in
-post-processing, so it is built **only from terrain, levee lines, the river network and
-free open data** (OpenStreetMap, GHSL, Copernicus GFM, GloFAS and EFAS). No hazard map, hydraulic
+post-processing, so it is built **only from terrain, levee lines, the river network (files
+you prepare) and free open data** (GHSL, Copernicus GFM, GloFAS and EFAS). No hazard map, hydraulic
 model output, local hazard dataset or FABDEM is used anywhere. Satellite flood extents
 (GFM) and simulated discharge (GloFAS, EFAS) enter only as *observations* that bound the
-modelled return period; they never draw a compartment.
+modelled return period; they never draw a protected area.
 
 **Czech quick guide:** [docs/navod_cs.md](docs/navod_cs.md): a short guide to running the
 scripts.
 
-**Error priority: recall.** When the evidence is ambiguous, a compartment is kept rather
+**Error priority: recall.** When the evidence is ambiguous, a protected area is kept rather
 than dropped. Every design choice below that trades precision for recall says so
 explicitly.
 
 | Stage | Content | Status |
 |---|---|---|
-| A | `gis.py` additions, `prepare_dtm.py`, `build_units.py`, `compartments.py` | done, tested, benchmarked |
+| A | `gis.py` additions, `prepare_dtm.py`, `build_units.py`, `protected_areas.py` | done, tested, benchmarked |
 | A+ | faster kernels; fixes B1–B4; gap filling for water surfaces | done, tested, benchmarked |
-| B | `download_osm.py`, `osm_hydraulics.py`, `download_ghsl.py`, `rp_index.py` | done, tested on synthetic data; download URLs not verified |
+| B | `download_ghsl.py`, `rp_index.py` | done, tested on synthetic data; download URLs not verified. The OSM steps (`download_osm.py`, `osm_hydraulics.py`) were removed in Stage G |
 | C | `download_gfm.py`, `gfm_evidence.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes not verified; the GloFAS part is replaced by Stage F |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
-| D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, OSM and GHSL extensions, `download_clms.py`, `context_zones.py`; 10 checks); D2–D5 pending |
+| D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, GHSL extensions, `download_clms.py`, `context_zones.py`; 8 checks); D2–D5 pending |
 | E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E5 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`, `implied_protection.py`, `implied_evaluate.py`; 44 checks); integration with D4 outputs once they exist |
+| G | report review ([reports/report_review.md](reports/report_review.md)); OSM removed, rivers always snapped into their channel (§8), "compartment" renamed "protected area"; transport embankments next | **steps 1–2 done** (all tests pass); steps 3–4 pending |
 | F | discharge sources GloFAS and EFAS (§11): `download_discharge.py`, `discharge_prepare.py`, `rp_bounds.py` rewritten | **F2–F5 done**, tested on synthetic data (16 checks); **F1 blocked**: the EWDS is not reachable from the session and the test requests need your key, so request values, time convention and EFAS access are not verified |
 
 ---
@@ -34,10 +35,10 @@ explicitly.
 2. [Repository layout](#2-repository-layout)
 3. [Configuration](#3-configuration)
 4. [Run order and outputs](#4-run-order-and-outputs)
-5. [Method: from levee lines to protected compartments](#5-method-from-levee-lines-to-protected-compartments)
+5. [Method: from levee lines to protected areas](#5-method-from-levee-lines-to-protected-protected areas)
 6. [Large DTMs: corridors, storage layout, units](#6-large-dtms-corridors-storage-layout-units)
 7. [Parallel processing, checkpoints, merging](#7-parallel-processing-checkpoints-merging)
-8. [Water sources and pumping stations from OpenStreetMap](#8-water-sources-and-pumping-stations-from-openstreetmap)
+8. [River lines and water sources](#8-river-lines-and-water-sources)
 9. [Return period index](#9-return-period-index)
 10. [Observational evidence: Copernicus GFM](#10-observational-evidence-copernicus-gfm)
 11. [Observed bounds of the return period: GloFAS and EFAS (Stage F)](#11-observed-bounds-of-the-return-period-glofas-and-efas-stage-f)
@@ -59,7 +60,7 @@ explicitly.
 CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
 FORCE = False   # recompute finished units / footprint / conversion / extraction
-UNITS = []      # compartments.py, rp_index.py, download_gfm.py, gfm_evidence.py: selected units, empty = all
+UNITS = []      # protected_areas.py, rp_index.py, download_gfm.py, gfm_evidence.py: selected units, empty = all
 ```
 
 `gfm_evidence.py` has three more: `HINTS` (missing-barrier hints, §10.3) and `DATE_FROM`,
@@ -77,22 +78,21 @@ working directory on `sys.path`, so `import gis` works without `sys.path` manipu
 packaging:
 
 ```
-pixi run prepare-dtm        pixi run download-osm       pixi run download-gfm       pixi run test-kernels
-pixi run build-units        pixi run osm-hydraulics     pixi run gfm-evidence       pixi run test-pipeline
-pixi run compartments       pixi run download-ghsl      pixi run download-discharge pixi run test-stage-b
-                            pixi run rp-index           pixi run discharge-prepare  pixi run test-stage-c
-pixi run download-worldcover                            pixi run rp-bounds          pixi run test-hand-yz
-pixi run hand-yz                                        pixi run validate           pixi run test-stage-f
+pixi run check              pixi run download-ghsl      pixi run download-gfm       pixi run test-kernels
+pixi run prepare-dtm        pixi run rp-index           pixi run gfm-evidence       pixi run test-pipeline
+pixi run build-units        pixi run download-worldcover pixi run download-discharge pixi run test-stage-b
+pixi run protected-areas    pixi run hand-yz            pixi run discharge-prepare  pixi run test-stage-c
+pixi run report                                         pixi run rp-bounds          pixi run test-hand-yz
+                                                        pixi run validate           pixi run test-stage-f
 ```
 
-`pixi run python -m processing.compartments` works the same way. Running a script by its
+`pixi run python -m processing.protected_areas` works the same way. Running a script by its
 file path does **not** work, because Python then puts the script folder on the path
 instead of the root.
 
 **Dependencies** are listed in `pixi.toml`:
 - `python ≥ 3.11` (for `tomllib` and `ProcessPoolExecutor(max_tasks_per_child)`),
-- `gdal ≥ 3.11` (`MEM` vector datasets; the OSM driver; SpatiaLite SQL for the OSM
-  extraction),
+- `gdal ≥ 3.11` (`MEM` vector datasets),
 - `libgdal-netcdf`, `libgdal-grib`: GDAL's NetCDF and GRIB drivers, which conda-forge
   ships as separate plugin packages (GloFAS and EFAS files),
 - `numpy`, `scipy`, `numba`, `geopandas ≥ 1.0`, `shapely ≥ 2.0`, `pyproj`,
@@ -113,12 +113,10 @@ gis.py                     shared GIS library (existing; new functions appended,
 plots.py                   plotting helpers of Stages E and F (matplotlib): budget, saving, colours, index.html
 config/defenses.toml       settings of a run: country, folders, input paths (short; you fill it)
 config/advanced.toml       all other keys with their defaults
-config/osmconf.ini         OSM driver configuration exposing the tag keys used
 docs/navod_cs.md           short guide to running the scripts, in Czech
 docs/stage_d_plan.md       Stage D, step D.1: inventory, inputs, plan and measured runtime impact
 docs/stage_e_plan.md       Stage E, step E.2: outputs check, corridor read benchmark, plan (approved)
 download/
-  download_osm.py          Geofabrik extract -> hydraulic points, drains (single-layer GeoPackages)
   download_ghsl.py         GHSL building volume tiles -> VRT mosaics
   download_gfm.py          GFM scene search (STAC), screening, clipped layers per unit
   download_discharge.py    GloFAS and EFAS requests to the EWDS (cdsapi), resume, upstream area files (Stage F)
@@ -129,16 +127,15 @@ processing/
   data_report.py           compact report of inputs, outputs and logs into reports/<country>/ (pixi run report)
   prepare_dtm.py           DTM inspection, footprint, benchmark, estimates, optional conversion
   build_units.py           river corridor, processing units, memory estimate
-  osm_hydraulics.py        water sources (closed streams), pumping stations
-  compartments.py          per-unit compartments in parallel, checkpoints, merging
-  rp_index.py              exposure, score, RP per compartment
+  protected_areas.py          per-unit protected areas in parallel, checkpoints, merging
+  rp_index.py              exposure, score, RP per protected area
   HAND_YZ.py               land cover exposure (WorldCover, Urban Atlas) supplementing GHSL
   context_zones.py         industrial / dense urban / urban / rural zones of the corridor (Stage D)
   snap_rivers.py           river lines snapped to the thalweg, river points with chainage (Stage E1)
   implied_segments.py      bank subsegments: envelope, nearest river point, side, chainage bins (Stage E2)
-  implied_protection.py    built-up fraction, HAND curves and levels per subsegment (E3), implied compartments (E4)
-  implied_evaluate.py      sensitivity grid, recall of built area and wet built area inside implied compartments (E5)
-  gfm_evidence.py          held / flooded tests per compartment and scene; missing-barrier hints
+  implied_protection.py    built-up fraction, HAND curves and levels per subsegment (E3), implied protected areas (E4)
+  implied_evaluate.py      sensitivity grid, recall of built area and wet built area inside implied protected areas (E5)
+  gfm_evidence.py          held / flooded tests per protected area and scene; missing-barrier hints
   discharge_prepare.py     daily series per river cell, annual maxima, Gumbel fits (Stage F)
   rp_bounds.py             matching to discharge cells, event return periods, source combination, bounds
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
@@ -168,7 +165,7 @@ function was modified. The only change to existing lines is the import block.
 | `Raster` | `array_to_mem`, `write_array`, `best_compression` | Array ↔ GDAL; tiled compressed GeoTIFF; ZSTD → DEFLATE fallback |
 | `Raster` | `rasterize_geometries`, `polygonize_labels`, `fill_nodata_cells`, `footprint` | Burn geometries; label raster → polygons; `gdal.FillNodata` on selected cells; valid-data footprint |
 | `Raster` | `benchmark_reads(info, polygon, …)`, `map_codes(values, mapping)` | Read benchmark of one raster, shared by DTM and DSM; raster values → codes through a lookup (CORINE legend) |
-| `Vector` | `check_single_layer`, `read_merged`, `write_gpkg`, `length_near_boundary` | Single-layer inputs; merged reads with `source`; single-layer GeoPackage output; levee length near compartment boundaries |
+| `Vector` | `check_single_layer`, `read_merged`, `write_gpkg`, `length_near_boundary` | Single-layer inputs; merged reads with `source`; single-layer GeoPackage output; levee length near protected area boundaries |
 | `Vector` | `layer_names`, `single_layer_copy(path, layer, out_path)` | Layers of a vector source; one layer of a multi-layer source copied to its own GeoPackage with `gdal.VectorTranslate` |
 | `Vector` | `zones_to_grid(zones, order, shape, geotransform, wkt)` | Context of every cell of a unit grid (position in `context.order`, 0 = none) |
 | `Hydro` | `breach_to_streams(dem, stream, burn, burn_buffer_cells)` | River cell reached downstream (numba) |
@@ -181,12 +178,12 @@ function was modified. The only change to existing lines is the import block.
 | `Stats` | `percentile_rank`, `quantile_classes` | Ranks and quantile mapping for the RP score |
 | `Stats` | `gumbel_lmoments(sample)`, `gumbel_rp(q, xi, alpha)` | Gumbel fit by L-moments; return period of a discharge |
 | `Hydro` | `least_cost_path(cost, start, end)` | Dijkstra on an 8-connected grid (numba), NaN impassable; thalweg snapping |
-| `Hydro` | `hand_above_streams(dem, stream, burn, burn_buffer_cells, valid)` | HAND code path of `compartments.py`, moved here so that Stage E recomputes HAND the same way |
+| `Hydro` | `hand_above_streams(dem, stream, burn, burn_buffer_cells, valid)` | HAND code path of `protected_areas.py`, moved here so that Stage E recomputes HAND the same way |
 | `Vector` | `chaikin(line, iterations, max_shift)`, `interpolate_xy(line, distances)` | Chaikin smoothing that keeps vertices which would move more than `max_shift`; points along a line in one numpy pass |
 | `Raster` | `hillshade(array, geotransform, wkt)` | Hillshade with `gdal.DEMProcessing` to MEM (plots) |
 | `Stats` | `binned_quantiles(area, edges, quantiles)`, `onset(share, smooth_bins, fraction, persist_bins)`, `sharpness(smoothed, onset_bin, window_bins)` | Area-weighted quantiles within bins; onset and sharpness of a built-share curve (Stage E) |
 | `Stats` | `merge_levels(k, eligible, level, max_dlevel, max_gap)` | Groups of subsegments along a river side, short gaps bridged (Stage E) |
-| `Evidence` | `scene_masks`, `comparison_zones`, `outcome`, `test_regions` | GFM tests of regions, moved from `gfm_evidence.py`; Stage E tests implied compartments with them |
+| `Evidence` | `scene_masks`, `comparison_zones`, `outcome`, `test_regions` | GFM tests of regions, moved from `gfm_evidence.py`; Stage E tests implied protected areas with them |
 | `Discharge` | `band_times(ds)`, `period_days(valid_seconds, marks)` | Valid time of every GRIB or NetCDF band (an ambiguous NetCDF layout stops); day of the averaging period for end or start marks (Stage F) |
 | `Discharge` | `aggregate_daily(days, values, how, steps_per_day)`, `annual_maxima(days, values, start_month)`, `gumbel_fits(maxima, min_years)` | Daily mean or maximum of sub-daily steps (incomplete days NaN); maxima of complete hydrological years; Gumbel fits with the RMSE at Gringorten positions |
 | `Discharge` | `match(lon, lat, river_area_km2, cell_lon, cell_lat, cell_area_km2, radius_km, ratio_min, ratio_max, same_river)` | Discharge cell of a river location: radius and ratio, same river first, then ratio, then distance |
@@ -200,7 +197,7 @@ All scripts and tests name their variables by one scheme:
 - **Spatial joins:** `gdf_sjoin_<a>_<b>`, for example `gdf_sjoin_src_rn` (river sources joined to the rivers).
 - **Short abbreviations:**
   - `rn` rivers, `lv` levees, `bl` barrier lines, `br` bridges, `bar` barriers with crest heights;
-  - `comp` compartments, `fp` footprints, `poly` polygons, `win` and `core` unit windows and cores;
+  - `pa` protected areas, `fp` footprints, `poly` polygons, `win` and `core` unit windows and cores;
   - `ua` Urban Atlas, `ev` GFM evidence, `ovr` overrides.
 
 In `gis.py` the scheme applies to the local variables of the functions added for this package. The original
@@ -212,7 +209,7 @@ The configuration has two files:
 - **`config/defenses.toml`** holds only what you set:
   - the country of the runs (`[general] country`), the folders and the number of workers;
   - the input paths of the country (`[countries.<code>]`): DTM, levees, rivers, the
-    upstream area column, the OSM extract;
+    upstream area column, optional guide lines for the rivers;
   - the damage tables.
 - **`config/advanced.toml`** holds every other key with its default value and normally
   stays unchanged.
@@ -229,7 +226,7 @@ The configuration has two files:
   keys of every core and optional script and opens the inputs:
   - DTM size, resolution and CRS;
   - one layer per vector file, CRS, the upstream area column;
-  - the OSM extract, the damage tables, write access to the folders.
+  - the guide lines, the damage tables, write access to the folders.
 
   It prints OK or PROBLEM per item and exits with 1 when a core step is blocked.
 - **Report after a run.** `pixi run report` (`processing/data_report.py`) writes a summary
@@ -240,7 +237,7 @@ The configuration has two files:
     - levees and rivers inside the DTM footprint (counts, lengths, columns);
     - every output layer and table (counts, areas, percentiles, the largest features);
     - the newest log of every script (distinct warnings and errors, last lines);
-  - **`overview.png`:** the footprint, the levees and the compartments.
+  - **`overview.png`:** the footprint, the levees and the protected areas.
 
   It reads samples and summaries only and never copies data.
 
@@ -248,7 +245,9 @@ The tables of `advanced.toml`:
 - `[general]`: directories, workers, memory limits, GDAL cache and threads.
 - `[benchmark]`: benchmark windows.
 - `[country_defaults]` (in `defenses.toml`: `[countries.<code>]`): inputs, resolutions,
-  units, conversion and OSM region, with sub-tables `compartments` and `rp`.
+  units and conversion, with sub-tables `protected_areas` and `rp`. Old configurations with
+  the sub-table `compartments` are read as `protected_areas`, with a warning.
+- `[river_snap]`: snapping of the rivers into their channel (§8).
 - `[sources]`: download templates, tag lists, retries.
 - `[evidence]`: Stage C.
 - `[implied]`: Stage E (§18).
@@ -262,7 +261,6 @@ before doing any work:
 - **consistency between keys:**
   - share sums and list lengths;
   - `distribution_classes`, `cap_rp` and `max_rp` must be values of `classes`;
-  - the closing and pumping tags must be part of the hydraulic tags;
   - `unit_halo_m ≥ corridor_buffer_m` (reason in §6.4).
 
 All problems are listed in one message and the script stops.
@@ -298,19 +296,17 @@ Keys beyond the original schema, with the reason for each:
 | `general.gdal_threads_per_worker` | Avoid oversubscription: n workers × GDAL threads ≤ cores |
 | `benchmark.*` | Window count, size and seed of the benchmark (reproducible positions) |
 | `country.dtm_conversion`, `dtm_compress`, `footprint_resolution_m` | DTM conversion (§6.3) and footprint |
-| `country.bytes_per_cell` | Memory model for unit sizing; replace with the value logged by `compartments.py` |
+| `country.bytes_per_cell` | Memory model for unit sizing; replace with the value logged by `protected_areas.py` |
 | `country.crest_box_size_m` | Size of the boxes read at native resolution around levees |
 | `country.merge_overlap_ratio`, `drop_contradicted_truncated`, `contradiction_ratio`, `id_rounding_m` | Merging of units and ids (§7.3) |
 | `country.keep_intermediate` | Write DTM, spill, margin, barrier and crest rasters per unit |
-| `country.geofabrik_region`, `osm_pbf`, `endpoint_elevation_radius_m` | OSM extract and downstream-end detection (§8) |
-| `compartments.touch_tolerance_m`, `self_close_min_length_factor` | Former code constants of the bridging |
-| `compartments.gated_crossings`, `fill_nodata_holes` | Former command-line switches |
-| `compartments.stream_burn_m`, `stream_burn_buffer_m` | B1 fix (§15.1) |
-| `compartments.preserve_river_cells` | B2 fix |
-| `compartments.cap_river_holes`, `max_fill_distance_m` | Gap filling for water surfaces (§5.5) |
+| `protected areas.touch_tolerance_m`, `self_close_min_length_factor` | Former code constants of the bridging |
+| `protected areas.gated_crossings`, `fill_nodata_holes` | Former command-line switches |
+| `protected areas.stream_burn_m`, `stream_burn_buffer_m` | B1 fix (§15.1) |
+| `protected areas.preserve_river_cells` | B2 fix |
+| `protected areas.cap_river_holes`, `max_fill_distance_m` | Gap filling for water surfaces (§5.5) |
 | `rp.value_total_tolerance` | Tolerance of the value-warp totals check (spec: 1 %) |
 | `sources.request_pause_s`, `max_retries` | Polite downloads with backoff |
-| `sources.osm_tags_closing`, `osm_tags_pumping` | Which hydraulic structures close a river or pump water |
 | `sources.ghsl_url_templates` (table `total`, `non_residential`), `ghsl_tile_schema`, `ghsl_tile_field`, `ghsl_nodata_as_zero` | GHSL tiles; a table instead of the list in the original schema, so that products cannot be swapped |
 | `country.validation_extent` | Optional area where the reference is complete; recall and precision outside it are meaningless |
 | `sources.gfm_collection`, `gfm_assets` (table `flood`, `exclusion`, `reference_water`, `likelihood`), `gfm_page_limit`, `gfm_token_env` | STAC collection, asset keys per role, page size, name of the environment variable holding an access token (never the token itself) |
@@ -324,7 +320,6 @@ Keys beyond the original schema, with the reason for each:
 | `sources.worldcover_url_template`, `worldcover_grid_url`, `worldcover_tile_field`, `worldcover_version`, `worldcover_year` | ESA WorldCover tiles (§9.3); verified |
 | Stage D tables (`[countries.XX.context]`, `[countries.XX.context.params.<context>]`, `[crest_lines]`, `[barriers]`, `[coarse]`, `[review]`) and inputs (`dsm`, `building_footprints`, `manual_barriers`, `industrial_registry`, `ems_flood_extents`, `water_polygons`) | As specified for Stage D (§17) |
 | `country.corine`, `corine_legend`, `corine_legend_index_field`, `corine_legend_code_field`, `corine_check` | CORINE from local files: the legend maps class indices to codes, verified on known pixels |
-| `sources.osm_tags_water`, `barriers.osm_wall_candidates` | OSM water polygons; wall tags counted in the extract to choose `osm_tags_walls` (taginfo was not reachable) |
 | `sources.ghsl_url_templates.smod`, `.pop` | Optional GHSL settlement model and population (Stage D) |
 
 ## 4. Run order and outputs
@@ -334,36 +329,33 @@ Keys beyond the original schema, with the reason for each:
 | 1 | `prepare_dtm.py` | `dtm_inspection.csv`, `dtm_footprint.gpkg`, `dtm_benchmark.csv`, `dtm_estimates.json`, `work/<c>/dtm/dtm.vrt` |
 | 2 | `build_units.py` | `corridor.gpkg`, `units_core.gpkg`, `units_window.gpkg`, `units.csv`, `work/<c>/units_domain.gpkg` |
 | 3 (optional) | `prepare_dtm.py` with `convert_dtm = true` | tiled copies in `work/<c>/dtm/`; `dtm.vrt` repointed to them |
-| 4 | `download_osm.py` | `osm_hydraulic_points.gpkg`, `osm_drains.gpkg` |
-| 5 | `osm_hydraulics.py` | `rivers_sources.gpkg`, `osm_pumping.gpkg` |
-| 6 | `compartments.py` (first two units, then all) | per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `compartments.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `compartments.gpkg`, `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
+| 6 | `protected_areas.py` (first two units, then all) | per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `protected_areas.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `protected_areas.gpkg`, `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
 | 7 | `download_ghsl.py` | `ghsl_total.vrt`, `ghsl_non_residential.vrt`, `ghsl_sources.json` |
-| D1 (Stage D) | `prepare_dtm.py` with `dsm`; `download_osm.py`; `download_ghsl.py` with `smod`, `pop` | `dsm_inspection.csv`, `dsm_benchmark.csv`, `dsm_footprint.gpkg`; `osm_buildings.gpkg`, `osm_water.gpkg`, `osm_crossings.gpkg`, `osm_walls.gpkg`, `osm_industrial.gpkg`; `ghsl_smod.vrt`, `ghsl_pop.vrt` |
+| D1 (Stage D) | `prepare_dtm.py` with `dsm`; `download_ghsl.py` with `smod`, `pop` | `dsm_inspection.csv`, `dsm_benchmark.csv`, `dsm_footprint.gpkg`; `ghsl_smod.vrt`, `ghsl_pop.vrt` |
 | D1 (Stage D) | `download_clms.py`, then `context_zones.py` | `corine_codes.tif`, `urban_atlas.gpkg`, `clms_sources.json`; `zones.gpkg` |
 | 7a (optional) | `download_worldcover.py` | `worldcover.vrt`, `worldcover_sources.json`; tiles in `work/<c>/worldcover/` |
 | 7b (optional) | `HAND_YZ.py` | per unit `hand_yz.csv`, `hand_yz.json`; merged `exposure_lulc.csv` |
-| 8 | `rp_index.py` | per unit `rp_index.csv`, `rp_index.json`; merged `compartments_rp.gpkg` (with `value_ghsl`, `value_lulc`) |
+| 8 | `rp_index.py` | per unit `rp_index.csv`, `rp_index.json`; merged `protected_areas_rp.gpkg` (with `value_ghsl`, `value_lulc`) |
 | 9 | `download_gfm.py` | `work/<c>/gfm/screening.csv` (checkpoint), clipped layers in `work/<c>/gfm/<unit>/`, `gfm_index.csv` |
 | 10 | `gfm_evidence.py` | per unit `gfm_evidence.csv` (and `missing_barrier_hints.gpkg`); merged `gfm_evidence.csv`, `gfm_evidence.gpkg`, `missing_barrier_hints.gpkg` |
 | 11 | `download_discharge.py` | raw files in `work/<c>/discharge/raw/<source>/`, `download_log.csv`, `discharge_sources.json` |
 | 12 | `discharge_prepare.py` | `discharge_<source>.npz`, `discharge_cells_<source>.gpkg`, `plots/discharge/prepare/` |
-| 13 | `rp_bounds.py` | `event_rp.csv`, `event_rp_combined.csv`, `discharge_matches.gpkg`; `compartments_rp.gpkg` updated: matches per source, observed bounds, combined `rp`, `*_prior` model values; `plots/discharge/<RUN_ID>/` |
+| 13 | `rp_bounds.py` | `event_rp.csv`, `event_rp_combined.csv`, `discharge_matches.gpkg`; `protected_areas_rp.gpkg` updated: matches per source, observed bounds, combined `rp`, `*_prior` model values; `plots/discharge/<RUN_ID>/` |
 | 14 | `validate.py` | `validation.json`, `validation_coverage.gpkg`, `validation_rp_confusion.csv` |
 
 Run logs go to `output_dir/<country>/logs/<script>_<timestamp>.log`.
 
 **Notes on the order:**
-- `compartments.py` uses `rivers_sources.gpkg` (`is_source = True` only) and
-  `osm_pumping.gpkg` when they exist; without them every river feature is a source and
-  `has_pumping` is False.
-- **`compartments.gpkg` columns:** `compartment_id`, `area_m2`, `protection_level_m`,
+- `protected_areas.py` snaps the rivers into their channel once per country
+  (`rivers_channel.gpkg`, §8) and uses them as water sources.
+- **`protected_areas.gpkg` columns:** `protected_area_id`, `area_m2`, `protection_level_m`,
   `margin_median_m`, `margin_max_m`, `river_ref_median_m`, `entry_x`, `entry_y`,
   `source_x`, `source_y`, `truncated`, `touches_corridor_edge`, `touches_dtm_edge`,
-  `has_pumping`, `no_levee`, `unit_id`, `unit_label`, geometry.
+  `no_levee`, `unit_id`, `unit_label`, geometry.
 - **Added columns:** `touches_dtm_edge` (B3) and `unit_label`, which points to the
-  compartment's cells in the unit's `labels.tif`.
+  protected area's cells in the unit's `labels.tif`.
 
-## 5. Method: from levee lines to protected compartments
+## 5. Method: from levee lines to protected areas
 
 ### 5.1 Principle
 
@@ -384,14 +376,14 @@ height-above-river surface:
   `max(crest − river_ref, hand_undef)`.
 * `margin = spill_def − spill_undef ≥ 0`. A cell is **protected** if
   `margin ≥ min_margin_m` and `spill_undef ≤ max_level_m`.
-* 4-connected protected regions are compartments; regions smaller than `min_area_m2` are
-  dropped. **`protection_level_m`** is the minimum `spill_def` in the compartment: the
+* 4-connected protected regions are protected areas; regions smaller than `min_area_m2` are
+  dropped. **`protection_level_m`** is the minimum `spill_def` in the protected area: the
   level above the river at which water first enters.
 
 Consequences that look odd at first but are correct:
 - **Upslope parts are not protected.** Parts of a ring that lie higher than its lowest
   crest are not protected, because water would reach them at their own height anyway.
-- **Nested rings.** The inner compartment of nested rings has the higher of the two
+- **Nested rings.** The inner protected area of nested rings has the higher of the two
   crests as its protection level (tested in both orders).
 
 ### 5.2 Barriers
@@ -423,8 +415,7 @@ Consequences that look odd at first but are correct:
 5. **Bridged cells** get crests interpolated linearly along the bridge between the crests
    at its ends.
 6. **Rivers crossing barriers.** By default the river wins: crossing cells are not
-   barrier. With `gated_crossings = true` crossings stay closed. Since Stage B, closures
-   are decided per river feature from OSM (§8), which replaces this blanket switch.
+   barrier. With `gated_crossings = true` crossings stay closed (§8.2).
 
 ### 5.3 Undefended DTM
 
@@ -462,11 +453,11 @@ Lidar DTMs often have nodata on water surfaces. The two kinds of nodata must be 
 differently:
 
 * **Missing coverage** (beyond the survey area) is unknown terrain. It stays nodata and
-  acts as a wall. Compartments next to it are kept (recall) and flagged
+  acts as a wall. Protected areas next to it are kept (recall) and flagged
   **`touches_dtm_edge`** (B3).
 * **Gaps inside the coverage** (water surfaces, data gaps) are interpolated. Otherwise a
   river surveyed as nodata would have no river cells, no water sources and therefore no
-  compartments at all.
+  protected areas at all.
 
 **Telling them apart.** The coverage is the **morphological closing** of the valid DTM
 cells with radius `max_fill_distance_m`, computed with two chamfer distance passes, so
@@ -484,7 +475,7 @@ the cost does not depend on the radius:
 - **Where no river cell is valid in the window** (the whole river is nodata), and for the
   other cells of such gaps, the fill is capped at the lowest valid cell within reach:
   the waterline. Interpolation from the banks alone would lie above the water level;
-  in a test this raised `river_ref` by about 1 m and produced a spurious compartment.
+  in a test this raised `river_ref` by about 1 m and produced a spurious protected area.
 
 Test T3 makes the whole river nodata and checks that the result equals the one with a
 complete DTM.
@@ -495,8 +486,8 @@ The priority flood also returns, for every cell:
 - **the seed** (river cell) where its minimal spill path starts,
 - **the order** in which cells were reached.
 
-For each compartment:
-- **`entry_x`, `entry_y`:** the compartment cell reached first by the defended flood,
+For each protected area:
+- **`entry_x`, `entry_y`:** the protected area cell reached first by the defended flood,
   i.e. where water enters. Taking the cell with the minimal `spill_def` would be
   ambiguous, because every cell below the crest has the same spill level; the reach
   order resolves this.
@@ -510,7 +501,6 @@ For each compartment:
 | `truncated` | Touches the edge of the unit window, where it may continue (§7.3) |
 | `touches_corridor_edge` | Adjacent to cells outside the processing domain (corridor + halo) |
 | `touches_dtm_edge` | Adjacent to missing DTM coverage, which closes it as a wall |
-| `has_pumping` | A pumping station from `osm_pumping.gpkg` lies inside or within `levee_adjacent_distance_m` |
 | `no_levee` | No barrier line within `levee_adjacent_distance_m` of its boundary |
 
 ## 6. Large DTMs: corridors, storage layout, units
@@ -531,7 +521,7 @@ DTM in strip layout this took 0.1 s per file.
 ### 6.2 Corridor
 
 Corridor = rivers buffered by `corridor_buffer_m`, intersected with the footprint.
-Compartments far from the modelled rivers cannot be flooded by them.
+Protected areas far from the modelled rivers cannot be flooded by them.
 
 ### 6.3 Storage layout and conversion
 
@@ -588,7 +578,7 @@ It also checks the free disk space and stops if it is insufficient.
 **Memory model.** RAM per unit ≈ window cells × `bytes_per_cell`.
 - **Check:** `build_units.py` stops if the largest window would exceed
   `max_ram_gb_per_worker` and prints the largest core size that fits.
-- **Measured value:** `compartments.py` logs the measured bytes per window cell, now
+- **Measured value:** `protected_areas.py` logs the measured bytes per window cell, now
   **93–95 B**.
 
 ## 7. Parallel processing, checkpoints, merging
@@ -611,7 +601,7 @@ It also checks the free disk space and stops if it is insufficient.
 
 ### 7.2 Checkpoints
 
-- **`compartments.py`:** each unit writes to `work_dir/<country>/units/<unit_id>/` and
+- **`protected_areas.py`:** each unit writes to `work_dir/<country>/units/<unit_id>/` and
   finishes with `done.json` (timings, peak RSS, counts), written atomically through a
   temporary file and a rename.
 - **`rp_index.py`:** writes `rp_index.json` per unit and recomputes it when the unit's
@@ -622,7 +612,7 @@ It also checks the free disk space and stops if it is insufficient.
 
 ### 7.3 Merging
 
-The same compartment can be found by several units, because windows overlap by twice the
+The same protected area can be found by several units, because windows overlap by twice the
 halo.
 
 1. **Grouping.** Candidates from different units that overlap by at least
@@ -630,68 +620,82 @@ halo.
 2. **Groups with a complete candidate.** Keep the complete (not truncated) candidate
    whose representative point lies in its own unit's core; if several qualify, keep the
    one farthest from its window edge. A ring across a core boundary is kept exactly once.
-3. **Groups truncated in every window** (compartments longer than a window):
+3. **Groups truncated in every window** (protected areas longer than a window):
    - the pieces are **united** (recall);
    - level, entry and source come from the piece with the **lowest** protection level. A
      window edge can only overestimate protection, because it acts as a wall.
 4. **Contradiction rule** (`drop_contradicted_truncated`):
    - **What it catches:** window edges can create artificial protection, for example an
      area behind a long levee that looks enclosed because the window edges close it.
-   - **Rule:** a compartment truncated in every window is dropped when finished units
+   - **Rule:** a protected area truncated in every window is dropped when finished units
      whose windows cover at least `contradiction_ratio` of it found nothing there. Those
      units see more of the levee.
-5. **Identifiers.** `compartment_id = <country>_<x>_<y>`, from the representative point
+5. **Identifiers.** `protected_area_id = <country>_<x>_<y>`, from the representative point
    rounded to `id_rounding_m`, stable between runs. Duplicates get a suffix.
 
 Barrier crest statistics in `barriers.gpkg` are sampled inside each unit's **core** only
 and combined as the minimum.
 
-## 8. Water sources and pumping stations from OpenStreetMap
+## 8. River lines and water sources
 
-### 8.1 Extraction (`download_osm.py`)
+### 8.1 Snapping the rivers into their channel (always)
 
-1. **Download.** The country `.osm.pbf` is downloaded from the URL template
-   (`{region}` = `geofabrik_region`). It is skipped when the local file has the size the
-   server reports. Alternatively a local extract can be set in `osm_pbf`.
-2. **Custom `osmconf.ini`.** `config/osmconf.ini` (GDAL's default plus the tag keys used)
-   exposes `waterway`, `man_made` and related keys as columns in the points, lines and
-   multipolygons layers. The script checks that every key of the configured tag lists is
-   exposed.
-3. **Extraction.** One `gdal.VectorTranslate` call per output, each writing a single-layer
-   GeoPackage:
-   - **`osm_hydraulic_points.gpkg`:** SpatiaLite SQL over the three OSM layers
-     (`UNION ALL`). Ways and areas become representative points (`ST_PointOnSurface`);
-     `osm_id` and the tag columns are kept, and `osm_element` says node, way or area.
-   - **`osm_drains.gpkg`:** the drain lines.
-   - **Spatial filter:** the DTM footprint's bounding box in WGS 84. GDAL does not accept
-     a filter CRS together with SQL, so the box is transformed first.
-4. **Counts per tag value** are logged, to tune the tag lists.
+River networks such as MERIT come from coarse grids (about 90 m). Their lines run beside
+the real channel, cross levees where the river does not, and put water sources on the
+protected side. `protected_areas.py` therefore snaps the rivers once per country, before
+the units, and writes **`rivers_channel.gpkg`**. All units use these lines: they are
+rasterized as river cells and are the water sources.
 
-### 8.2 Water sources (`osm_hydraulics.py`)
+**Method.** `gis.Hydro.snap_to_channel` follows your MERIT snapping procedure:
+1. **Densify.** Vertices are densified to `densify_m`.
+2. **Guide lines** (optional input `country.river_guides`, e.g. waterway lines you
+   prepare): each vertex is projected onto the nearest guide line within
+   `guide_search_m`. The shift is capped at `guide_max_shift_m`.
+3. **DTM minimum.** Each vertex then moves to the lowest DTM cell within `window_m`.
+   - **Cap with a guide:** `max_shift_m`.
+   - **Cap without a guide:** `max_shift_without_guide_m`, default 0 as in your procedure.
+     Without guide lines the rivers therefore stay where they are unless you raise it.
+4. **Clean-up.** Interior vertices are removed:
+   - **sharp turns:** below `min_angle_deg`, `angle_passes` passes;
+   - **short spikes:** below `spike_angle_deg` on segments up to `spike_length_m`;
+   - **nearly straight short steps:** above `straight_angle_deg`, on segments up to
+     `straight_length_factor × spike_length_m`, `spike_passes` passes.
 
-A river feature is **not a water source** (`is_source = False`, with a `reason`) when:
-- **a closing structure** (`osm_tags_closing`, by default sluice and lock gates) lies
-  within `gap_tolerance_m` of one of its crossings with a levee line, or
-- **a pumping station** (`osm_tags_pumping`) lies within `gap_tolerance_m` of its
-  **downstream end**.
+**Departures from the procedure:**
+- **Chord check.** A nearly straight vertex is removed only within
+  `straight_max_deviation_m` of the chord of its neighbours. Without this check,
+  repeated passes collapsed a gently curved line to its two ends.
+- **Unmoved parts stay unchanged.** Parts in which no vertex moved keep their original
+  geometry.
+- **No stop on missing guides.** Rivers without a guide line are not an error: the share
+  of guided vertices is logged.
 
-**Downstream end.** It is taken from **DTM elevations**: the median of the native DTM
-within `endpoint_elevation_radius_m` at both line ends, and the lower end is downstream.
-The digitising direction of river lines is not reliable. The line direction is used only
-when the elevations are equal or missing, and `downstream_method` records which source
-decided.
+**Speed.** The DTM is read once, in bands of `band_rows` rows; the lowest cell of every
+window is found with numpy for all vertices of a band at once. Vertices at the same place
+move the same way, so connected lines stay connected.
 
-**Closed streams are excluded** both as water sources and from the drainage network for
-HAND. Otherwise HAND inside a compartment would refer to an internal drain instead of the
-main river. A tributary that leaves a levee ring through a gate therefore no longer
-floods the ring (test R1); without the OSM step it does, because the river wins.
+**Rerun.** The file is reused until you run with `FORCE`, which snaps again and recomputes
+all units.
 
-**`osm_pumping.gpkg`** holds the pumping stations within `levee_adjacent_distance_m` of a
-levee or river, with the flags `near_levee` and `near_river`.
+**Test.** A sine channel in a 2 m DTM with the river 60 m beside it:
+- with a guide line 3 m off, the snapped line lies a median of 2.8 m (at most 6.3 m) from
+  the channel axis;
+- without a guide it stays unchanged;
+- DTM-only snapping with an 80 m cap brings it to a median of 7.4 m.
 
-**Granularity.** The decision applies to the whole river feature as delivered. A feature
-that runs far beyond the levee is closed along its whole length, so river networks
-should be split at confluences.
+### 8.2 Water sources and closed streams
+
+- **Water sources.** Every river line is a water source; the OSM steps of Stage B (closures
+  from sluices and pumping stations, `rivers_sources.gpkg`) were removed in Stage G.
+- **`gated_crossings = false`** (default): a river crossing a barrier opens it ("river
+  wins").
+- **`gated_crossings = true`:**
+  - barriers stay closed at river crossings;
+  - streams enclosed by barriers are neither water sources nor outlets of the HAND drainage,
+    so HAND inside the enclosure refers to the outside rivers;
+  - a stream that passes a closed levee keeps its outer part as a water source, because it
+    is backwater of the river outside. Heights near it then refer to its bed. Rivers that
+    end at the levee avoid this (test R1 of Stage B).
 
 ## 9. Return period index
 
@@ -716,21 +720,21 @@ should be split at confluences.
      (reprojected window ∩ cell boxes).
    - **Measured:** within 0.03–0.05 %, which is about the scale distortion of the national
      grid. The configured tolerance is 1 %.
-4. **Only the bounding box of the unit's kept compartments** is valued: 2–5 s per unit
+4. **Only the bounding box of the unit's kept protected areas** is valued: 2–5 s per unit
    instead of 15 s.
 5. **Damage:**
    - depth per cell = max(0, `protection_level_m` − `hand_undef`);
    - damage fraction from `depth_damage_csv` (`depth_m`, `res`, `nonres`), interpolated
      linearly;
-   - `value_exposed` V = Σ value × fraction over the compartment.
+   - `value_exposed` V = Σ value × fraction over the protected area.
 
 ### 9.2 Score, classes, cap, interval (whole country)
 
 1. **L**, `levee_length_m`: length of barrier lines within `levee_adjacent_distance_m` of
-   the boundary. L = 0 sets `no_levee`; such compartments get no score.
+   the boundary. L = 0 sets `no_levee`; such protected areas get no score.
 2. **A**, `upstream_area_km2`: from `river_upstream_area_field` of the river feature
    nearest to the source cell, or from `upstream_area_raster` at the source cell.
-   Compartments without A get a score from the value term only, and they are counted in
+   Protected areas without A get a score from the value term only, and they are counted in
    the log.
 3. **Score** = `w_v` × percentile rank of log(V/L) + `w_a` × percentile rank of log(A),
    ranked within the country. `v_rel` = V/L. V = 0 ranks lowest.
@@ -745,13 +749,13 @@ should be split at confluences.
 6. **RP:** `rp = min(rp_model, rp_cap, max_rp)`.
    - `rp_source = "cap"` when the cap or `max_rp` lowered the model value, or when there
      is no model value (`no_levee`); otherwise `"model"`.
-   - A `no_levee` compartment without an applicable cap therefore gets `max_rp`, as the
+   - A `no_levee` protected area without an applicable cap therefore gets `max_rp`, as the
      specification says ("from the cap only"). See the open decisions (§15.4).
 7. **Interval:**
    - `rp_low` = the previous value in `classes` (the same value if `rp` is the lowest);
    - `rp_high` = the next value in `classes`, bounded by `rp_cap` and `max_rp`, never
      below `rp`.
-8. **Overrides.** A compartment containing a point of the overrides file gets its `rp`,
+8. **Overrides.** A protected area containing a point of the overrides file gets its `rp`,
    with `rp_low = rp_high = rp` and `rp_source = "override"`. If points disagree, the
    first is used and a warning is logged.
 9. **Stage C columns.** `obs_rp_low`, `obs_rp_high`, `n_held`, `n_flooded`,
@@ -784,14 +788,14 @@ the building value: it **supplements** GHSL and never replaces it.
    - a depth-damage curve (`lulc.depth_damage_csv`, `depth_m` + categories).
 3. **Damage.** Depth per cell is `max(0, protection_level_m − hand_undef)`, as in §9.1.
    Value = cell area × value per m² of the cell's category; damage = value × the
-   category's damage fraction at that depth. Sums per compartment and per category go to
+   category's damage fraction at that depth. Sums per protected area and per category go to
    `exposure_lulc.csv`: `value_lulc`, `lulc_exposed_area_m2`, `lulc_<category>`.
 4. **Grid.** WorldCover classes are read with nearest neighbour onto the working grid.
    Its pixels (about 6–9 m in Europe) are as large as or larger than the working cells
    (2–5 m). Urban Atlas polygons are rasterized by cell centre.
 5. **Combination in `rp_index.py`.** With `lulc.enabled = true`:
    `value_exposed = value_ghsl + value_lulc`. The score then uses this sum, and both
-   parts stay in `compartments_rp.gpkg`.
+   parts stay in `protected_areas_rp.gpkg`.
 6. **No double counting.** The values per m² must cover only what GHSL does not hold.
    - **WorldCover `built_up` class:** it contains buildings, so its value should cover
      roads, utilities and open-air assets only.
@@ -817,10 +821,10 @@ the building value: it **supplements** GHSL and never replaces it.
 ## 10. Observational evidence: Copernicus GFM
 
 The model RP of §9 is an *a priori* estimate built from exposure and topography. Stage C
-adds what was actually observed: whether a compartment stayed dry while its surroundings
+adds what was actually observed: whether a protected area stayed dry while its surroundings
 were flooded (Global Flood Monitoring, GFM, Sentinel-1 SAR flood extents since 2015), and
 how rare the discharge was on that day (GloFAS and EFAS, §11). Observations bound the RP; they never
-create, move or delete a compartment.
+create, move or delete a protected area.
 
 ### 10.1 Scene search and screening (`download_gfm.py`)
 
@@ -876,11 +880,11 @@ create, move or delete a compartment.
 8. **Index.** `gfm_index.csv` lists the kept pairs: `unit_id`, `item_id`, `datetime`,
    `flooded_pixels` and the layer paths.
 
-### 10.2 Tests per compartment and scene (`gfm_evidence.py`)
+### 10.2 Tests per protected area and scene (`gfm_evidence.py`)
 
-A dry compartment on a dry day proves nothing. Each scene therefore answers a comparative
-question: **was the compartment dry while the undefended floodplain at the same height next
-to it was wet?** Only that comparison, made within the same scene, turns a dry compartment
+A dry protected area on a dry day proves nothing. Each scene therefore answers a comparative
+question: **was the protected area dry while the undefended floodplain at the same height next
+to it was wet?** Only that comparison, made within the same scene, turns a dry protected area
 into evidence.
 
 1. **Reading.** The three layers are warped with nearest neighbour onto the unit's working
@@ -889,17 +893,17 @@ into evidence.
      declares none), is not excluded, is not reference (permanent) water, and has a HAND
      value.
    - **Wet cell:** valid and carrying one of the `gfm_flood_values`.
-2. **Inside:** the valid cells of the compartment (its `unit_label` in `labels.tif`), giving
+2. **Inside:** the valid cells of the protected area (its `unit_label` in `labels.tif`), giving
    `inside_valid_px` and `inside_wet_frac`.
 3. **Comparison zone,** giving `comp_valid_px` and `comp_wet_frac`. It holds valid cells that
    meet all of these:
-   - outside all compartments;
-   - within `comparison_distance_m` (chamfer distance from the compartment);
-   - `hand_undef` at most the median `hand_undef` inside the compartment;
+   - outside all protected areas;
+   - within `comparison_distance_m` (chamfer distance from the protected area);
+   - `hand_undef` at most the median `hand_undef` inside the protected area;
    - `hand_undef` at most `max_level_m`.
 
    **Why the HAND condition.** It restricts the comparison to terrain that an undefended
-   flood up to the compartment's median level would also reach. If those cells are wet,
+   flood up to the protected area's median level would also reach. If those cells are wet,
    water stood at least that high next to the levee.
 4. **Outcome:**
    - `no_test` unless both pixel counts reach `min_valid_pixels` and
@@ -909,13 +913,13 @@ into evidence.
    - otherwise `inconclusive`.
 5. **Efficiency.**
    - **Read extent.** Without hints, each scene is read only over the bounding box of the
-     unit's kept compartments plus the comparison distance.
-   - **Zones.** Each compartment's zone is computed once, in its own bounding box, and
+     unit's kept protected areas plus the comparison distance.
+   - **Zones.** Each protected area's zone is computed once, in its own bounding box, and
      reused for every scene.
-   - **Parallelism.** Units run in parallel with the same pool as `compartments.py`.
+   - **Parallelism.** Units run in parallel with the same pool as `protected_areas.py`.
 6. **Outputs:**
-   - **`gfm_evidence.csv`:** one row per compartment and scene.
-   - **`gfm_evidence.gpkg`:** the same rows with the compartment polygon, for QGIS. Filter
+   - **`gfm_evidence.csv`:** one row per protected area and scene.
+   - **`gfm_evidence.gpkg`:** the same rows with the protected area polygon, for QGIS. Filter
      by `item_id` or `datetime` and symbolise by `outcome`.
 7. **Checking a named flood event.** Restrict the run to the event's dates:
 
@@ -927,8 +931,8 @@ into evidence.
    The result is the event's evidence table plus a GeoPackage for visual inspection.
    Without the filter, all scenes in the index are tested.
 8. **Consistency.**
-   - The unit rasters must come from the same `compartments.py` run as `compartments.gpkg`,
-     because `unit_label` points into them. After rerunning `compartments.py`, rerun this
+   - The unit rasters must come from the same `protected_areas.py` run as `protected_areas.gpkg`,
+     because `unit_label` points into them. After rerunning `protected_areas.py`, rerun this
      script.
    - Thresholds `f_*` are placeholders. With 0.05 and 0.3, "dry" tolerates 5 % wet cells
      (SAR noise, local ponding), and "flooded" requires 30 % of the valid area to be wet.
@@ -942,8 +946,8 @@ into evidence.
    - **Why reference water counts.** The river is permanent water and never "wet" in the
      flood layer. Labelling wet cells alone would cut the flood off from its own river.
 2. **Tested cells.** A cell is tested if it meets all of these:
-   - valid and outside compartments;
-   - at least `hint_exclusion_m` from barrier lines and compartments;
+   - valid and outside protected areas;
+   - at least `hint_exclusion_m` from barrier lines and protected areas;
    - `hand_undef < level − hint_margin_m`.
 
    Each scene adds to the cell's `test_count`, and also to its `dry_count` where the cell
@@ -954,7 +958,7 @@ into evidence.
    - **Clusters:** the selected cells are clustered, clusters of at least `min_area_m2`
      are kept, and they are polygonised into `missing_barrier_hints.gpkg` with `area_m2`,
      `scenes_tested_mean` and `dry_share_mean`.
-   - **Units:** as with compartments, each hint is taken from the unit whose core holds its
+   - **Units:** as with protected areas, each hint is taken from the unit whose core holds its
      representative point.
 4. **`hint_exclusion_m` (an addition to the specification).** A levee that holds is itself
    dry, and so are its toes and the 20 m GFM pixels that mix the levee with the floodplain.
@@ -969,16 +973,16 @@ into evidence.
      tributary have low HAND relative to the tributary, while the main river sets the
      flood level. Such cells can stay dry legitimately and still appear as hints.
    - **Consequence.** Hints are candidates for inspection, not results, and they change no
-     compartment.
+     protected area.
    - **Better level, not implemented.** A level per drainage target would need the
-     `breach_to_streams` target index stored per unit, which `compartments.py` does not keep.
+     `breach_to_streams` target index stored per unit, which `protected_areas.py` does not keep.
 
 ## 11. Observed bounds of the return period: GloFAS and EFAS (Stage F)
 
 Stage F replaces the GloFAS part of Stage C:
 - **Removed and replaced.** `download_glofas.py` is gone. The old keys are migrated (§3).
 - **Two discharge sources.** GloFAS and EFAS both turn the outcome of a GFM test into a
-  return period. Discharge never delineates a compartment and is never used as a hazard.
+  return period. Discharge never delineates a protected area and is never used as a hazard.
 - **Chain:**
   1. `download_discharge.py` downloads the raw files;
   2. `discharge_prepare.py` builds the daily series and the Gumbel fits;
@@ -1158,8 +1162,8 @@ record length; regional pooling of cells would be the next step.
 ### 11.5 Matching sites to discharge cells (`rp_bounds.py`)
 
 1. **Sites:**
-   - every explicit compartment, at its source river cell (`source_x`, `source_y`);
-   - the implied compartments of the Stage E run `IMPLIED_RUN`, at their nearest river point.
+   - every explicit protected area, at its source river cell (`source_x`, `source_y`);
+   - the implied protected areas of the Stage E run `IMPLIED_RUN`, at their nearest river point.
 2. **Upstream area of the river.** From `river_upstream_area_field` (nearest river
    feature), otherwise from `upstream_area_raster`. Without either, the matching is skipped
    and no observed bounds are written. A site without a value gets no match.
@@ -1173,7 +1177,10 @@ record length; regional pooling of cells would be the next step.
    3000 m for GloFAS (about half a 0.05° cell diagonal) and 500 m for EFAS (1 arcmin
    cells). An older configuration with one `discharge.match_river_distance_m` is read for
    both sources, with a warning. The lines come from
-   `rivers_snapped.gpkg` (Stage E1) if it exists, otherwise from `rivers_sources.gpkg`.
+   `rivers_snapped.gpkg` (Stage E1) if it exists, otherwise from `rivers_channel.gpkg` (§8).
+   - **Confluences.** A river cell can lie nearest to a tributary. Among the lines within
+     one working cell of the nearest, the one with the largest upstream area is the river
+     of the site (`gis.Vector.dominant_nearby`), and its area is the site's area.
 5. **Choice:**
    1. same-river candidates first;
    2. then the smallest |log ratio|;
@@ -1203,7 +1210,7 @@ is a choice.
      passed before the overpass.
 2. **RP** from the Gumbel fit of the matched cell, capped at `max_rp_extrapolation`. A
    capped value is flagged `extrapolated`.
-3. **`event_rp.csv`:** `compartment_id`, `item_id`, `datetime`, `outcome`, `source`,
+3. **`event_rp.csv`:** `protected_area_id`, `item_id`, `datetime`, `outcome`, `source`,
    `cell_id`, `q_event`, `rp_event`, `extrapolated`.
 4. **One RP per test (`source_mode`; written to `event_rp_combined.csv`):**
    - **`prefer_efas` / `prefer_glofas`:** the preferred source, unless only its match is
@@ -1213,11 +1220,11 @@ is a choice.
      resting on the more favourable source.
    - **`source_disagreement`:** the two RPs of a test differ by more than the factor
      `rp_disagreement_ratio`.
-   - **Stage E** reads these combined values for the implied compartments
+   - **Stage E** reads these combined values for the implied protected areas
      (`implied_protection.py` caps, `implied_evaluate.py` errors), so `source_mode` applies
      there too. Taking `event_rp.csv` directly would mean the minimum over the sources,
      against `conservative_both` for flooded tests.
-5. **Per explicit compartment:**
+5. **Per explicit protected area:**
    - `n_held`, `n_flooded`;
    - `obs_rp_low` = maximum over held tests and `obs_rp_high` = minimum over flooded tests;
    - the same per source: `rp_obs_low_<source>`, `rp_obs_high_<source>`;
@@ -1225,7 +1232,7 @@ is a choice.
    - `source_disagreement` if any of its tests disagrees;
    - `obs_conflict` if `obs_rp_low > obs_rp_high`.
 
-The SAR image says *whether* the compartment was wet. The matched discharge series says
+The SAR image says *whether* the protected area was wet. The matched discharge series says
 *how rare* the day was at the same river reach.
 
 ### 11.7 Combination with the model interval
@@ -1234,7 +1241,7 @@ Unchanged from Stage C:
 
 | Case | Condition | Result |
 |---|---|---|
-| `override_kept` | the compartment has an override | observations counted; RP unchanged |
+| `override_kept` | the protected area has an override | observations counted; RP unchanged |
 | `obs_conflict` | `obs_rp_low > obs_rp_high` | flag only; RP unchanged |
 | `combined` | low = max(`rp_low`, `obs_rp_low`) ≤ high = min(`rp_high`, `obs_rp_high`) | `rp` clamped into [low, high], then snapped to the class inside [low, high] closest to it (log scale) |
 | `model_obs_conflict` | low > high: the observations contradict the model interval | the observed interval alone is used; `rp` = the class inside it closest to the model value |
@@ -1266,7 +1273,7 @@ Plots go to `plots/discharge/<RUN_ID>/`, with an `index.html`. They follow the b
 | `fit` | Annual maxima at Gringorten positions and the Gumbel curves of the matched cells |
 | `event` | ±15 days around the acquisition, one panel per source with the RP 2/10/50/100 thresholds of its fit, the flooded window and the discharge the event RP comes from |
 | `source_comparison` | Event RP of GloFAS against EFAS per test, held and flooded, with the disagreement ratio |
-| `summary` | Matches by quality and source, event RP distribution per source, compartment flags |
+| `summary` | Matches by quality and source, event RP distribution per source, protected area flags |
 
 `discharge_prepare.py` writes `fit_<source>` plots per cell to `plots/discharge/prepare/`.
 Selection priority: weak matches, disagreeing tests, the worst fits and short records.
@@ -1289,7 +1296,7 @@ The inventory of replaced code and keys is in §3 and §14.
 
 ## 12. Validation
 
-`validate.py` compares the compartments with reference protected areas.
+`validate.py` compares the protected areas with reference protected areas.
 
 1. **Areas,** as in the original script:
    - recall = |result ∩ reference| / |reference| and precision = |result ∩ reference| /
@@ -1299,13 +1306,13 @@ The inventory of replaced code and keys is in §3 and §14.
    - `validation_extent` optionally restricts both layers to an area where the reference
      is complete.
 2. **Return periods,** when `reference_rp_field` is set:
-   - **Pairing.** Each compartment is compared with the reference polygon it overlaps most.
+   - **Pairing.** Each protected area is compared with the reference polygon it overlaps most.
      Reference RPs are snapped to the classes on a log scale.
    - **Confusion matrix:** `validation_rp_confusion.csv`, reference class × assigned class.
-   - **Interval share:** compartments whose reference RP lies within `rp_low`…`rp_high`.
-   - **Class share:** compartments with the same class.
-3. **Inputs and report.** `compartments_rp.gpkg` is used when it exists, otherwise
-   `compartments.gpkg`. All numbers go to `validation.json`.
+   - **Interval share:** protected areas whose reference RP lies within `rp_low`…`rp_high`.
+   - **Class share:** protected areas with the same class.
+3. **Inputs and report.** `protected_areas_rp.gpkg` is used when it exists, otherwise
+   `protected_areas.gpkg`. All numbers go to `validation.json`.
 
 ## 13. Measured performance
 
@@ -1348,7 +1355,7 @@ Remaining potential:
 - **Radix heap.** A radix heap could save part of the remaining ~6 s per flood; it is
   not implemented.
 
-### 13.4 `compartments.py` per unit (30.25 M window cells, 24.4 M domain cells, cold cache, option A source)
+### 13.4 `protected_areas.py` per unit (30.25 M window cells, 24.4 M domain cells, cold cache, option A source)
 
 | Step | Stage A | Now |
 |---|---|---|
@@ -1357,12 +1364,12 @@ Remaining potential:
 | Crest boxes (6–13 boxes) | 0.6–1.1 s | 1.3–1.5 s |
 | HAND | 31–33 s | 15.9–16.6 s |
 | Two floods | 28–33 s | 21.9–26.6 s |
-| Compartment statistics | 2–3 s | 2.1–4.2 s |
+| Protected area statistics | 2–3 s | 2.1–4.2 s |
 | **Total** | **76–81 s** | **56–61 s** |
 | Peak RSS | 3.0 GB (106–108 B/cell) | **2.6–2.7 GB (93–95 B/cell)** |
 
 Worker time is **2.4 µs per domain cell**. At 5 m, 1000 km² of domain (40 M cells) takes
-about 1.6 worker-minutes. `compartments.py` logs the extrapolation from your own test
+about 1.6 worker-minutes. `protected_areas.py` logs the extrapolation from your own test
 units (`performance.json`).
 
 ### 13.5 `rp_index.py` per unit
@@ -1374,7 +1381,7 @@ Warped and source volume agree within 0.05 %.
 
 **`gfm_evidence.py`** was measured on a synthetic unit of production size:
 - 6000 × 5000 = 30 M cells at 5 m;
-- 32 compartments;
+- 32 protected areas;
 - GFM scenes at 20 m in EPSG:3035, warped onto the unit grid.
 
 | Run | Time | Peak RSS |
@@ -1390,7 +1397,7 @@ Warped and source volume agree within 0.05 %.
 - **With hints:** about 18 s plus 1.6 s per scene, since each scene is read over the whole
   window. 300 units with 20 scenes take about 4 worker-hours.
 - **Memory.** With hints, a worker needs about as much memory per cell as
-  `compartments.py`; without hints, half. The worker count chosen for `compartments.py`
+  `protected_areas.py`; without hints, half. The worker count chosen for `protected_areas.py`
   therefore fits.
 
 **`download_gfm.py`** depends on the service, which was not reachable from this environment.
@@ -1413,35 +1420,35 @@ Its cost is one screening read per scene plus the copies of the kept unit window
 - **Downloads.** The EWDS queue, not the reading, sets the pace (§11.2).
 
 **`rp_bounds.py` and `validate.py`** take about 1 s on the test country. Their loops run
-over compartments and tests (KD-tree queries, one Gumbel fit per matched cell), so 10 000
-compartments take seconds.
+over protected areas and tests (KD-tree queries, one Gumbel fit per matched cell), so 10 000
+protected areas take seconds.
 
 ## 14. Tests
 
-- **`pixi run test-kernels`, 16 checks:**
+- **`pixi run test-kernels`, 17 checks:**
   - closed ring, gap, diagonal barrier;
   - nested rings in both crest orders;
   - seed and order propagation, entry cell;
   - breaching and nodata;
-  - B1 reproduced without burning and fixed with it.
+  - B1 reproduced without burning and fixed with it;
+  - river snapping into a channel, with and without a guide line (§8.1).
 - **`pixi run test-pipeline`, 40 checks:** synthetic countries in two strip-layout files.
   - **Pipeline mechanics:** inspection, footprint, benchmark; conversions A and B;
     units; unit selection and checkpoints.
-  - **Compartments and merging:** a seam ring kept once; bridged and wide gaps;
-    staircase levee; nested rings to 0.01 m; a compartment longer than any window,
+  - **Protected areas and merging:** a seam ring kept once; bridged and wide gaps;
+    staircase levee; nested rings to 0.01 m; a protected area longer than any window,
     merged, and the dropped window-edge artifact; unique ids; entry and source cells.
   - **Bug fixes:** B2, a levee on the river bank; B3, a U-shaped levee closed by missing
     coverage, kept and flagged; B4 in T2, a gated tributary entering from missing
     coverage.
   - **Gaps:** a river gap (river profile, no artifact); T3, the whole river without DTM
-    data, giving the same compartments.
+    data, giving the same protected areas.
   - **T0, empty levees:** margin exactly 0.
-- **`pixi run test-stage-b`, 20 checks:**
-  - **OSM extraction:** from a `file://` template; nodes and ways as points; counts per
-    tag.
-  - **Water sources:** a gate at a levee crossing and a pumping station at a downstream
-    end found from the DTM, so the rings are protected only after the OSM step;
-    `has_pumping`; selection of pumping stations.
+- **`pixi run test-stage-b`, 15 checks:**
+  - **Water sources:** with `gated_crossings = false` the streams inside rings 1 and 2 are
+    water sources, so only ring 3 is protected; with `true` all three rings are protected.
+  - **Snapping:** `rivers_channel.gpkg` is written once per country; without guide lines
+    the lines stay unchanged.
   - **GHSL:** zipped tiles and schema; latest-epoch probing.
   - **Value warp** totals within 1 %.
   - **RP:** exposure inside and outside a town; cap, `min` rule and class values;
@@ -1450,17 +1457,15 @@ compartments take seconds.
 - **`pixi run test-hand-yz`, 7 checks,** on the Stage B country:
   - **`download_worldcover`:** tiles chosen from the grid (the corridor crosses 15° E,
     so two tiles), VRT, licence;
-  - **land cover value** per compartment equal to an independent computation from the
+  - **land cover value** per protected area equal to an independent computation from the
     unit rasters;
   - **Urban Atlas:** from a two-layer file; takes precedence (tree cover valued as
     transport, an unvalued class over half of ring 2);
   - **checkpoint hash:** an unchanged rerun skips every unit, doubled values recompute
     them;
   - **`rp_index`:** `value_exposed = value_ghsl + value_lulc`.
-- **`pixi run test-stage-d`** (step D1: 10 checks), on the Stage B country under the code T4D:
+- **`pixi run test-stage-d`** (step D1: 8 checks), on the Stage B country under the code T4D:
   - **DSM:** inspected and benchmarked like the DTM;
-  - **OSM:** buildings, water, crossings (a footway is excluded), walls, industrial areas (a
-    closed `man_made=works` way counts as an area), candidate wall tag counts;
   - **GHSL:** SMOD and population of the probed epoch;
   - **CORINE:** the legend mapping is verified on a known pixel, and a wrong code stops the
     script;
@@ -1498,23 +1503,23 @@ compartments take seconds.
     - `merge_levels`: three similar subsegments around one gap form one group, the gap bridged with the mean
       level; a gap of two and a level step start new groups;
     - sharpness: a sharp step above and a gradual rise below `sharp_high`;
-    - the town forms one implied compartment over the park subsegment (`n_bridged` = 1);
+    - the town forms one implied protected area over the park subsegment (`n_bridged` = 1);
     - precedence: ring A (3 m) clips the town, overlap share 0.08, nothing left inside the ring; ring B (10 m)
       protects the whole envelope of the second reach, which is dropped (share 0.98 > 0.8);
     - temporal signal from GHSL 1990/2020: onset unchanged, growth below the onset 1.5 %, `historic_low_core`;
     - RP: uncorroborated and historic, so rp 20 (the class above `regional_sop_rp`), `rp_low` 10, confidence low;
-    - `longitudinal`, `temporal` and `compartment_map` figures in `index.html` with their metrics.
+    - `longitudinal`, `temporal` and `protected_area_map` figures in `index.html` with their metrics.
   - **E5:**
     - three GFM scenes wet part of the town:
-      - scene A with event RP 10, at most the compartment RP 20: an error;
+      - scene A with event RP 10, at most the protected area RP 20: an error;
       - scene B with event RP 50: not an error;
       - scene C without an event RP: potential;
       - so `wrongly_protected_share` is 1/3;
-    - `recall_built` with implied compartments above the explicit-only value (`implied_gain` > 0);
-    - 16 sensitivity runs, the aggregated 1000 m runs with compartments; the sensitivity plot;
+    - `recall_built` with implied protected areas above the explicit-only value (`implied_gain` > 0);
+    - 16 sensitivity runs, the aggregated 1000 m runs with protected areas; the sensitivity plot;
     - `include_implied`: `defenses_clip.gpkg` features unchanged, implied parts added outside them only;
     - `include_in_review`: `review_implied.gpkg` with reasons;
-    - `use_snapped_rivers`: `compartments.py` recomputes all units (with `FORCE`) from `rivers_snapped.gpkg`.
+    - `FORCE`: `protected_areas.py` snaps the rivers again (`rivers_channel.gpkg`) and recomputes all units.
 - **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
@@ -1554,7 +1559,7 @@ compartments take seconds.
   - **Validation:** recall and precision against an independent computation; the
     confusion matrix and both shares.
 - **`pixi run test-stage-f`, 16 checks,** on its own synthetic country T6.
-  - **Setup.** T6 is a 20 km box with one river (5000 km²) and two compartments. GloFAS
+  - **Setup.** T6 is a 20 km box with one river (5000 km²) and two protected areas. GloFAS
     (0.05°, daily, one file per year) and EFAS (1 arcmin, 6-hourly, one file per month)
     cover 2001–2020. The files are served from a local EWDS folder. EFAS is 30 % higher on
     the event days.
@@ -1591,9 +1596,9 @@ compartments take seconds.
       - match qualities match the cell geometry;
     - **one source only:** C2 has no EFAS cell within 2 km and takes its bounds from GloFAS
       alone;
-    - **implied compartment (Stage E):** a flooded test gets the higher RP of the two
-      sources in `event_rp_combined.csv`; `compartments_rp.gpkg` keeps the explicit
-      compartments only;
+    - **implied protected area (Stage E):** a flooded test gets the higher RP of the two
+      sources in `event_rp_combined.csv`; `protected_areas_rp.gpkg` keeps the explicit
+      protected areas only;
     - **outputs:**
       - `discharge_matches.gpkg` has three lines from the explicit sites and two from the
         implied site;
@@ -1616,7 +1621,7 @@ compartments take seconds.
   (`preserve_river_cells`).
 
 **B3. Missing DTM coverage acts as a wall.**
-- **Fix.** Compartments closed by it are kept (recall) and flagged `touches_dtm_edge`.
+- **Fix.** Protected areas closed by it are kept (recall) and flagged `touches_dtm_edge`.
 
 **B4. In gated mode, rivers entering from missing coverage were not treated as entering
 from outside.**
@@ -1663,30 +1668,30 @@ from outside.**
   protected against the main river; T2 shows one such area next to a coverage edge. This
   is inherent to HAND. A per-origin reference was tested in an earlier session and
   created false protection downstream of floodplain obstacles.
-- **L3. Truncated compartments** not contradicted by a neighbouring window may still be
+- **L3. Truncated protected areas** not contradicted by a neighbouring window may still be
   artificially closed by window edges. They are flagged; their share is reported.
 - **L4. Crests from the DTM.** Floodwalls narrower than the DTM resolution are
   underestimated. The crest search can extend up to one cell beyond the configured
   radius.
 - **L5. Platform coverage.** Everything was tested on Linux. On Windows, the spawn pool,
-  `peak_rss_mb` (Windows API) and the OSM SQL extraction (needs SpatiaLite in the GDAL
-  build) are written but untested.
-- **L6. River features are closed as a whole** (§8.2).
+  and `peak_rss_mb` (Windows API) are written but untested.
+- **L6. Closed streams.** Without OSM closures, only `gated_crossings` decides; a stream
+  passing a closed levee stays a water source outside it (§8.2).
 - **L7. GHSL resolution.** At 100 m, buildings are spread over the cell, so exposure
-  inside small compartments is approximate.
+  inside small protected areas is approximate.
 - **L8. What SAR sees.**
   - **Hidden water.** Water under dense vegetation and in built-up areas is hard to detect.
-    GFM's exclusion mask removes such cells from the tests, so compartments in towns are
+    GFM's exclusion mask removes such cells from the tests, so protected areas in towns are
     tested less often.
-  - **Wet but not failed.** Water inside a compartment can come from rain, seepage or
+  - **Wet but not failed.** Water inside a protected area can come from rain, seepage or
     ponding behind a levee that held. `flooded` then overstates failure. The thresholds
     `f_*` are placeholders.
 - **L9. Hints use one HAND level per scene** (§10.3). Backwater into tributary valleys can
   create false hints.
 - **L10. GloFAS resolution.** At 0.05°, rivers with catchments below a few hundred km² are
-  poorly resolved. Their compartments often stay unmatched by GloFAS
+  poorly resolved. Their protected areas often stay unmatched by GloFAS
   (`glofas_cell_id = −1`). Where EFAS is available, its 1 arcmin grid resolves smaller
-  rivers; otherwise these compartments keep the model RP.
+  rivers; otherwise these protected areas keep the model RP.
 - **L11. Discharge is not water level.**
   - **Stage.** Overtopping depends on stage. Backwater from confluences, ice jams, changes
     of the channel and hysteresis break the link between discharge RP and stage RP.
@@ -1701,13 +1706,13 @@ from outside.**
 
 ### 15.4 Open decisions (assumptions taken, please confirm)
 
-1. **Download URLs.** The Geofabrik template, GHSL tile templates and GHSL tiling schema
+1. **Download URLs.** The GHSL tile templates and GHSL tiling schema
    are **not verified**: this session's network blocked the official hosts and the web
    search found only third-party descriptions. The config entries are empty; the
    scripts stop with a clear message and accept local files.
 2. **GHSL epoch.** `0` = the latest epoch not after the current year (e.g. 2025, which is
    modelled), or set 2020 (the last epoch built from observations).
-3. **`no_levee` compartments** without an applicable cap get `max_rp`, following "RP from
+3. **`no_levee` protected areas** without an applicable cap get `max_rp`, following "RP from
    the cap only". An alternative is the lowest class.
 4. **`rp_source`.** `"cap"` covers both `rp_cap` and `max_rp` lowering the model value.
 5. **Maximum damage table format:** columns `country`, `residential`,
@@ -1735,7 +1740,7 @@ from outside.**
      - EFAS stays 6-hourly, as in the specification: it keeps `daily_max` available, and
        the 24-hourly variable can still be requested later with `step_hours = 24`;
      - Stage E reads the combined event RP per test (§11.6), so `source_mode` applies to
-       implied compartments as to explicit ones.
+       implied protected areas as to explicit ones.
    - **`prefer_*` reading:** the preferred source unless only its match is weak and the
      other one is good.
 9. **Combination rules** (§11.5). The specification leaves these open; the following
@@ -1775,7 +1780,6 @@ from outside.**
 
 | Data | Use | Source (to be verified) | Licence |
 |---|---|---|---|
-| OpenStreetMap | Gates, weirs, pumping stations, drains | Geofabrik country extracts (`.osm.pbf`) | ODbL 1.0; © OpenStreetMap contributors |
 | GHSL built-up volume, total and non-residential, R2023A, 100 m | Exposure value | JRC GHSL data package 2023 | to be confirmed from the data package |
 | JRC global depth-damage functions | Maximum damage and damage curves | provided by the user as CSV | per the JRC publication |
 | Copernicus Emergency Management Service, Global Flood Monitoring (GFM) | held / flooded tests, missing-barrier hints | STAC API, endpoint to be confirmed (§15.4) | Copernicus data policy (free and open); confirm the attribution text on the product page |
@@ -1802,18 +1806,6 @@ follow.
   - **Outputs:** `dsm_inspection.csv`, `dsm_benchmark.csv`, `dsm_footprint.gpkg` and
     `work/<c>/dsm/dsm.vrt`.
   - **CRS:** the DSM must share the DTM CRS; the script stops otherwise.
-- **OSM (`download_osm.py`).**
-  - **Outputs:**
-    - `osm_buildings.gpkg`, only without `building_footprints`;
-    - `osm_water.gpkg`, only without `water_polygons` (tags `osm_tags_water`);
-    - `osm_crossings.gpkg` (`barriers.osm_tags_crossings`);
-    - `osm_walls.gpkg`, only when `barriers.osm_tags_walls` is set;
-    - `osm_industrial.gpkg` (`context.osm_industrial`).
-  - **Areas.** Closed ways tagged `man_made=works` or `waterway=riverbank` count as areas
-    (`config/osmconf.ini`).
-  - **Choosing the wall tags.** taginfo was not reachable, so the script counts the tags of
-    `barriers.osm_wall_candidates` in the country extract and logs the counts; fill
-    `osm_tags_walls` from them.
 - **GHSL (`download_ghsl.py`).** With templates for `smod` and `pop`, it also mosaics the
   settlement model and population of the same epoch (`ghsl_smod.vrt`, `ghsl_pop.vrt`).
   - **SMOD class codes:** 10 water, 11 very low density rural, 12 low density rural,
@@ -1834,8 +1826,7 @@ follow.
 ### 17.2 Context zones (`context_zones.py`)
 
 1. **Sources per context:**
-   - `industrial`: CORINE industrial codes, Urban Atlas industrial codes, OSM industrial
-     areas;
+   - `industrial`: CORINE industrial codes, Urban Atlas industrial codes;
    - `dense_urban`: CORINE dense codes, Urban Atlas dense codes, SMOD dense classes;
    - `urban`: SMOD urban classes;
    - `rural`: the rest of the corridor; it must be last in `context.order`.
@@ -1850,7 +1841,7 @@ follow.
 4. **Use in later steps.** `gis.Vector.zones_to_grid` rasterizes the zones onto a unit grid
    for the steps that follow.
 5. **Measured.** 7.3 s on a synthetic corridor of 2829 km² with 50 000 Urban Atlas
-   polygons, 5000 OSM areas, 2 M CORINE pixels and SMOD at 1 km.
+   polygons, 5000 further areas (then from OSM), 2 M CORINE pixels and SMOD at 1 km.
 
 ## 18. Stage E (experimental): implied protection in dense built-up reaches
 
@@ -1862,7 +1853,7 @@ Plan and measured estimates: [docs/stage_e_plan.md](docs/stage_e_plan.md). Outpu
 Snaps the river lines to the thalweg of the DTM. HAND and the bank subsegments of the next steps use the result.
 
 1. **Rivers.**
-   - **Source:** `rivers_sources.gpkg` features with `is_source = true` (Stage B), else the rivers input.
+   - **Source:** `rivers_channel.gpkg` of `protected_areas.py` (§8), else the rivers input.
    - **Merging:** features joined end to end are merged into one line; confluences and crossings stay breaks.
    - **Pilot units:** with `implied.units`, the lines are clipped to the unit windows, and chainage starts at
      the clipped ends.
@@ -1929,7 +1920,7 @@ input times; `FORCE = True` recomputes).
 
 1. **HAND.** `hand_undef.tif` of stage A. With `recompute_hand = true`, HAND is recomputed with the snapped
    rivers as streams on the undefended DTM of stage A (`dtm_undefended.tif`, kept with `keep_intermediate =
-   true`). It uses `gis.Hydro.hand_above_streams`, the code path that `compartments.py` now calls as well, and
+   true`). It uses `gis.Hydro.hand_above_streams`, the code path that `protected_areas.py` now calls as well, and
    writes `hand_undef_snapped.tif`.
 2. **Envelope.** Cells with HAND ≤ `envelope_hand_m`, 4-connected to the cells of the snapped rivers.
 3. **Allocation.** River points are rasterized onto the unit grid. An EDT with indices over the whole window
@@ -1957,8 +1948,7 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
 
 1. **Built-up fraction per unit cell** (pass 1, per unit in the process pool), saved as `implied_built.tif`:
    - **footprints:**
-     - sources: the national footprints (`building_footprints`) and the OSM buildings (`osm_buildings.gpkg`,
-       now always extracted by `download_osm.py`, with `building` and `man_made`);
+     - source: the building footprints you prepare (`building_footprints`);
      - features matching `exclude_building_tags` are dropped, with counts logged per tag;
      - rasterized at a quarter of the working cell without all-touched, in tiles of 4096² fine cells, and
        block-averaged.
@@ -1994,7 +1984,7 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
    buildings per core: about 5 s per unit (reads 1.1 s, rasterization of the footprints at 0.5 m 3.7 s, curves
    0.3 s). Peak RAM 1.05 GB per worker; figures 0.28 s each.
 
-### 18.4 Implied compartments (`implied_protection.py`, parts C–F, step E4)
+### 18.4 Implied protected areas (`implied_protection.py`, parts C–F, step E4)
 
 1. **Merging** (`gis.Stats.merge_levels`), per river and side along `k`:
    - consecutive eligible subsegments whose primary levels differ by at most `merge_max_dlevel_m` form a group;
@@ -2005,7 +1995,7 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
    a group. Components are 4-connected within one group and joined across units. Joined parts with less than
    `component_built_min_m2` of built area are dropped.
 3. **Precedence.**
-   - **Explicit compartments:** `compartments_rp.gpkg`, or `compartments.gpkg` of stage A when it is missing.
+   - **Explicit protected areas:** `protected_areas_rp.gpkg`, or `protected_areas.gpkg` of stage A when it is missing.
    - **Effect:** their cells are subtracted, and `explicit_overlap_share` is stored.
    - **Drop:** above `explicit_overlap_max`; the reason goes to `implied_dropped.csv`.
 4. **Temporal signal**, from the GHSL epochs and only for subsegments with at least `min_cells_temporal` GHSL
@@ -2021,14 +2011,14 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
      `crest_lines.gpkg`. Until D2 exists, the stage A barrier lines (`barriers.gpkg`) are used, which is logged.
    - **`closure_support`:** barriers with `closure_gap` = true near the edge; this needs `barriers_all.gpkg` of D2.
    - **GFM:** the logic of Stage C, now in `gis.Evidence` and shared, with the comparison zone outside both the
-     implied and the explicit compartments. Counts are summed over units per group and scene; tests go to
+     implied and the explicit protected areas. Counts are summed over units per group and scene; tests go to
      `implied_gfm_evidence.csv`, and the result to `gfm_held`, `gfm_flooded`, `gfm_no_test`.
    - **`corroborated`** = crest support ≥ `corroboration_min`, or a closure barrier, or a held GFM test.
 6. **RP, stratum "implied".**
    - **Inputs:**
      - V: GHSL building volume × max damage per m² ÷ storey height, as in stage B but without depth weighting;
      - P: `ghsl_pop.vrt`; `L_front` = chainage span of the group;
-     - V and P are summed outside explicit compartments.
+     - V and P are summed outside explicit protected areas.
    - **Score:** weighted mean of the percentile ranks of V/`L_front`, P/`L_front` and upstream area, with the
      weights of the context (`none` takes `rural`). A missing term drops out of the mean.
    - **Classes:** quantile mapping to `rp_distribution_classes` / `rp_distribution_shares`.
@@ -2040,17 +2030,17 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
      - `rp_low` = max(`regional_sop_rp`, class below); `rp_high` = class above within the caps;
      - confidence high / medium / low as specified;
      - `rp_source` = "implied".
-7. **Outputs** in `implied/<RUN_ID>/`: `implied_compartments.gpkg`, `implied_dropped.csv`,
+7. **Outputs** in `implied/<RUN_ID>/`: `implied_protected_areas.gpkg`, `implied_dropped.csv`,
    `implied_gfm_evidence.csv`.
 8. **Plots:**
    - **`longitudinal`** per river: levels along chainage per bank, eligible / not eligible, groups shaded,
      bridged subsegments marked.
-   - **`temporal`** per compartment: onset level per GHSL epoch.
-   - **`compartment_map`:** hillshade, built fraction, implied and explicit outlines, barrier lines, rivers, and
+   - **`temporal`** per protected area: onset level per GHSL epoch.
+   - **`protected_area_map`:** hillshade, built fraction, implied and explicit outlines, barrier lines, rivers, and
      edge cells marked supported or not, by marker shape and colour.
-   - **`summary`:** its fourth panel now counts compartments per context and confidence.
+   - **`summary`:** its fourth panel now counts protected areas per context and confidence.
 9. **Measured** on the two pilot units of the benchmark world (30.25 M cells each, 100 000 synthetic buildings
-   per core, 11 implied compartments, 32.9 km²):
+   per core, 11 implied protected areas, 32.9 km²):
    - **Pass 2:** 9.5 s per unit, peak 1.8 GB per worker. Counts run over implied cells only, and the distance
      to barrier lines uses the chamfer distance in a window around the edge cells.
    - **Plots:** 92 figures in 53 s.
@@ -2068,13 +2058,13 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
      - `PLOTS = False`.
    - **Recomputed per run:** only levels, merging, corroboration and RP.
 2. **Positive metric** (needs `reference_protected_areas`):
-   - `recall_built` = built area inside the reference areas covered by explicit plus implied compartments ÷
+   - `recall_built` = built area inside the reference areas covered by explicit plus implied protected areas ÷
      built area inside the reference areas;
-   - `implied_gain` = its increase over explicit compartments alone;
+   - `implied_gain` = its increase over explicit protected areas alone;
    - core cells of the units only.
-3. **Negative metric** (needs GFM scenes, `gfm_index.csv`): wet built area inside the implied compartments of
+3. **Negative metric** (needs GFM scenes, `gfm_index.csv`): wet built area inside the implied protected areas of
    every run.
-   - **Error:** the event RP of the scene is at most the compartment's `rp`.
+   - **Error:** the event RP of the scene is at most the protected area's `rp`.
    - **Potential:** the event RP is unknown.
    - **Event RP source:** `event_rp_combined.csv` of Stage F (one RP per test, combined by `source_mode`), by implied
      id and scene, else by river and scene.
@@ -2083,7 +2073,7 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
 4. **Also reported:** `potential_share`, implied area flagged `historic_low_core`, counts by confidence and
    context.
 5. **Outputs:**
-   - `sensitivity.csv` (run, parameters, metrics) and `sensitivity_tests.csv` (status per run, compartment
+   - `sensitivity.csv` (run, parameters, metrics) and `sensitivity_tests.csv` (status per run, protected area
      and scene);
    - plot `sensitivity`: `recall_built` against `wrongly_protected_share` per run, coloured by level method,
      labelled with `built_share_min`, small multiples by subsegment length.
@@ -2094,11 +2084,9 @@ Results go to `implied/<RUN_ID>/` (with `run_config.toml`, a copy of the configu
      output; without it nothing is written, and this is logged.
    - **`include_in_review = true`:** `review_implied.gpkg` with the reasons uncorroborated, historic low core
      and low sharpness, for `review_queue.py` of D4 to merge.
-   - **`[countries.XX.compartments] use_snapped_rivers`** (default false; a missing key takes the default, so
-     older configurations stay valid): `compartments.py` takes `rivers_snapped.gpkg` as water sources.
-     Finished units keep their results until `FORCE = True`, and a warning says so. Stage A results are
-     unchanged by default (pipeline tests).
-7. **Measured** on T5 (8 units of 0.25 M cells, 4 implied compartments per run at most): 16 runs in 145 s
+   - **Water sources** are always the rivers snapped into their channel by `protected_areas.py` (§8); the
+     former switch `use_snapped_rivers` was removed in Stage G.
+7. **Measured** on T5 (8 units of 0.25 M cells, 4 implied protected areas per run at most): 16 runs in 145 s
    (9 s each, pass 1 skipped), evaluation of all runs 7.8 s.
    - **Per pilot run:** the time of passes C–F, about 10 s per 30 M-cell unit (§18.4).
    - **Full grid of 36 runs on two such units:** about 36 × 20 s = 12 min with 2 workers. This is an estimate

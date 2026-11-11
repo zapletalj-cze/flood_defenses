@@ -2478,7 +2478,7 @@ class Hydro:
     def hand_above_streams(dem, stream, burn, burn_buffer_cells, valid=None):
         """
         Height above the stream cell each cell drains to (HAND), the code path of
-        compartments.py: breach_to_streams routing; cells that reach no stream cell take
+        protected_areas.py: breach_to_streams routing; cells that reach no stream cell take
         the nearest one
         :param dem: 2D float array, NaN = nodata (for HAND: the undefended DTM)
         :param stream: 2D bool array of stream cells
@@ -3972,21 +3972,21 @@ class Config:
         "country.contradiction_ratio": "float",
         "country.id_rounding_m": "float",
         "country.keep_intermediate": "bool",
-        "country.compartments.gap_tolerance_m": "float",
-        "country.compartments.touch_tolerance_m": "float",
-        "country.compartments.self_close_min_length_factor": "float",
-        "country.compartments.crest_search_radius_m": "float",
-        "country.compartments.barrier_removal_width_m": "float",
-        "country.compartments.min_margin_m": "float",
-        "country.compartments.max_level_m": "float",
-        "country.compartments.min_area_m2": "float",
-        "country.compartments.gated_crossings": "bool",
-        "country.compartments.fill_nodata_holes": "bool",
-        "country.compartments.stream_burn_m": "float",
-        "country.compartments.stream_burn_buffer_m": "float",
-        "country.compartments.preserve_river_cells": "bool",
-        "country.compartments.cap_river_holes": "bool",
-        "country.compartments.max_fill_distance_m": "float",
+        "country.protected_areas.gap_tolerance_m": "float",
+        "country.protected_areas.touch_tolerance_m": "float",
+        "country.protected_areas.self_close_min_length_factor": "float",
+        "country.protected_areas.crest_search_radius_m": "float",
+        "country.protected_areas.barrier_removal_width_m": "float",
+        "country.protected_areas.min_margin_m": "float",
+        "country.protected_areas.max_level_m": "float",
+        "country.protected_areas.min_area_m2": "float",
+        "country.protected_areas.gated_crossings": "bool",
+        "country.protected_areas.fill_nodata_holes": "bool",
+        "country.protected_areas.stream_burn_m": "float",
+        "country.protected_areas.stream_burn_buffer_m": "float",
+        "country.protected_areas.preserve_river_cells": "bool",
+        "country.protected_areas.cap_river_holes": "bool",
+        "country.protected_areas.max_fill_distance_m": "float",
         "country.rp.classes": "int_list",
         "country.rp.distribution_classes": "int_list",
         "country.rp.distribution_shares": "float_list",
@@ -4424,6 +4424,31 @@ class Config:
                 out[k] = v
         return out
 
+    # country sub-tables renamed since a stage was done: old name -> new name (read with a warning)
+    RENAMED_TABLES = {"compartments": "protected_areas"}
+
+    @staticmethod
+    def rename_tables(raw, path):
+        """
+        Moves renamed country sub-tables (RENAMED_TABLES) to their new name, in every
+        [countries.<code>] table and in [country_defaults]; logs a warning for each
+        :param raw: configuration dict as read
+        :param path: file name for the warning
+        """
+        tables = list(raw.get("countries", {}).values())
+        if isinstance(raw.get("country_defaults"), dict):
+            tables.append(raw["country_defaults"])
+        for table in tables:
+            for old, new in Config.RENAMED_TABLES.items():
+                if isinstance(table, dict) and old in table and new not in table:
+                    table[new] = table.pop(old)
+                    log.warning(
+                        "%s: table %s renamed to %s; update the configuration.",
+                        path,
+                        old,
+                        new,
+                    )
+
     @staticmethod
     def read_merged(path):
         """
@@ -4437,6 +4462,7 @@ class Config:
             raise SystemExit(f"Configuration file not found: {path}")
         with open(str(path), "rb") as f:
             raw = tomllib.load(f)
+        Config.rename_tables(raw, str(path))
         name = raw.pop("advanced", "advanced.toml")
         base_path = (
             join(os.path.dirname(os.path.abspath(str(path))), name) if name else ""
@@ -4449,6 +4475,7 @@ class Config:
             return raw
         with open(base_path, "rb") as f:
             base = tomllib.load(f)
+        Config.rename_tables(base, base_path)
         placeholders = list(
             dict.fromkeys(base.get("placeholders", []) + raw.get("placeholders", []))
         )

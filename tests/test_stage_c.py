@@ -59,7 +59,7 @@ out = root / "output" / "T4"
 data = root / "data_c"
 data.mkdir(parents=True, exist_ok=True)
 print(f"Test folder: {root}")
-if not (out / "compartments_rp.gpkg").exists():
+if not (out / "protected_areas_rp.gpkg").exists():
     print("Stage B outputs missing: running tests.test_stage_b in the same folder.")
     proc = subprocess.run(
         [sys.executable, "-m", "tests.test_stage_b"],
@@ -72,11 +72,11 @@ if not (out / "compartments_rp.gpkg").exists():
     if proc.returncode != 0:
         print(proc.stdout[-3000:])
         sys.exit("The Stage B test failed; Stage C needs its outputs.")
-# rp_bounds.py rewrites compartments_rp.gpkg: every run starts from the Stage B result.
-stage_b = root / "compartments_rp_stage_b.gpkg"
+# rp_bounds.py rewrites protected_areas_rp.gpkg: every run starts from the Stage B result.
+stage_b = root / "protected_areas_rp_stage_b.gpkg"
 if not stage_b.exists():
-    shutil.copy(out / "compartments_rp.gpkg", stage_b)
-shutil.copy(stage_b, out / "compartments_rp.gpkg")
+    shutil.copy(out / "protected_areas_rp.gpkg", stage_b)
+shutil.copy(stage_b, out / "protected_areas_rp.gpkg")
 gdf_model = gpd.read_file(stage_b)
 
 
@@ -88,7 +88,7 @@ def covering(frame, label):
     return frame[frame.covers(world(Point(*probes[label])))]
 
 
-ids = {k: covering(gdf_model, k).compartment_id.iloc[0] for k in probes}
+ids = {k: covering(gdf_model, k).protected_area_id.iloc[0] for k in probes}
 before = {k: covering(gdf_model, k).iloc[0] for k in probes}
 
 # --- GFM scenes: 20 m grid in EPSG:3035, flood extent from the undefended HAND of the Stage A units ---
@@ -402,7 +402,7 @@ for year in (2019, 2020, 2021):
     )
     mem = None
 
-# --- Reference protected areas for validate.py: ring interiors with reference RP, one area without compartment ---
+# --- Reference protected areas for validate.py: ring interiors with reference RP, one area without protected area ---
 gdf_ref = gpd.GeoDataFrame(
     {"rp_ref": [300.0, 20.0, 100.0, 50.0]},
     geometry=[world(box(*interiors[k])) for k in ["R1", "R2", "R3"]]
@@ -567,7 +567,7 @@ def run(module, label, config="test_c.toml", **variables):
 
 def outcome(table, scene, label):
     df_rows = table[
-        (table.item_id == f"GFM_TEST_{scene}") & (table.compartment_id == ids[label])
+        (table.item_id == f"GFM_TEST_{scene}") & (table.protected_area_id == ids[label])
     ]
     return set(df_rows.outcome)
 
@@ -666,7 +666,7 @@ if len(df_ev):
         )
     )
     r2_b = df_ev[
-        (df_ev.item_id == "GFM_TEST_B") & (df_ev.compartment_id == ids["R2"])
+        (df_ev.item_id == "GFM_TEST_B") & (df_ev.protected_area_id == ids["R2"])
     ].iloc[0]
     list_res.append(
         (
@@ -692,7 +692,7 @@ else:
 gdf_ev = gpd.read_file(out / "gfm_evidence.gpkg") if run1_ok else gpd.GeoDataFrame()
 list_res.append(
     (
-        "gfm_evidence.gpkg: one compartment polygon per test, for QGIS",
+        "gfm_evidence.gpkg: one protected area polygon per test, for QGIS",
         len(gdf_ev) == len(df_ev) > 0 and gdf_ev.crs.to_epsg() == EPSG,
     )
 )
@@ -806,7 +806,7 @@ list_res.append(("GloFAS GRIB (GRIB_VALID_TIME) equals the NetCDF series", grib_
 # --- rp_bounds.py, run 1 and an identical rerun ---
 proc = run("processing.rp_bounds", "rp_bounds_1")
 gdf_bnd = (
-    gpd.read_file(out / "compartments_rp.gpkg")
+    gpd.read_file(out / "protected_areas_rp.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
@@ -868,7 +868,7 @@ if len(gdf_bnd) and glofas is not None:
     list_col = ["rp", "rp_low", "rp_high", "rp_source", "obs_rp_low", "obs_rp_high"]
     proc = run("processing.rp_bounds", "rp_bounds_2")
     gdf_again = (
-        gpd.read_file(out / "compartments_rp.gpkg") if proc.returncode == 0 else None
+        gpd.read_file(out / "protected_areas_rp.gpkg") if proc.returncode == 0 else None
     )
     list_res.append(
         (
@@ -897,7 +897,7 @@ list_res.append(
 )
 proc = run("processing.rp_bounds", "rp_bounds_3")
 gdf_final = (
-    gpd.read_file(out / "compartments_rp.gpkg")
+    gpd.read_file(out / "protected_areas_rp.gpkg")
     if proc.returncode == 0
     else gpd.GeoDataFrame()
 )
@@ -943,9 +943,9 @@ if report:
     )
     list_res.append(
         (
-            "RP validation: 3 compartments compared, 2/3 within rp_low..rp_high and in the same class, "
+            "RP validation: 3 protected areas compared, 2/3 within rp_low..rp_high and in the same class, "
             "confusion matrix",
-            report["rp_compartments_compared"] == 3
+            report["rp_protected_areas_compared"] == 3
             and abs(report["rp_share_within_interval"] - 2 / 3) < 1e-9
             and abs(report["rp_share_same_class"] - 2 / 3) < 1e-9
             and list(df_cm.index) == CLASSES

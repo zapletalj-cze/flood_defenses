@@ -399,7 +399,7 @@ if __name__ == "__main__":
     wkt = gdal.Open(str(vrt_path)).GetProjection()
     res, off = snap["resolution_m"], snap["max_offset_m"]
 
-    # --- Rivers: snapped into their channel by compartments.py (rivers_channel.gpkg), else the rivers input ---
+    # --- Rivers: snapped into their channel by protected_areas.py (rivers_channel.gpkg), else the rivers input ---
     channel_path = out_dir / "rivers_channel.gpkg"
     if channel_path.exists():
         gdf_rn = gpd.read_file(channel_path).to_crs(wkt)

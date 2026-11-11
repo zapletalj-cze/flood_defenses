@@ -114,7 +114,7 @@ KEYS = [
 TILE = 1024  # working cells per side of a footprint tile (4096 fine cells at a quarter of the cell size)
 # Stage C keys, loaded only when GFM scenes exist (gfm_index.csv)
 GFM_KEYS = [
-    "country.compartments.max_level_m",
+    "country.protected_areas.max_level_m",
     "evidence.comparison_distance_m",
     "evidence.min_valid_pixels",
     "evidence.f_wet_comparison",
@@ -433,7 +433,7 @@ def implied_unit(task):
                 for c, j in pairs:
                     closures[c].append(str(ids[j - 1]))
                 del dist, ir, ic
-    # GFM tests: comparison zone outside both implied and explicit compartments.
+    # GFM tests: comparison zone outside both implied and explicit protected areas.
     list_gfm = []
     if task["scenes"] and n_comp > 1:
         p = task["gfm"]
@@ -492,7 +492,7 @@ def implied_unit(task):
         "unit_id": task["unit_id"],
         "summary": (
             f"unit {task['unit_id']}: {n_comp - 1} implied components, {int(inner.sum())} cells outside explicit "
-            f"compartments, {len(list_gfm)} GFM tests, {time.perf_counter() - start:.1f} s"
+            f"protected areas, {len(list_gfm)} GFM tests, {time.perf_counter() - start:.1f} s"
         ),
         "comps": comps,
         "gfm": list_gfm,
@@ -887,17 +887,17 @@ if __name__ == "__main__":
     )
 
     # --- Inputs of pass 2; optional ones switch features off ---
-    explicit_path = out_dir / "compartments_rp.gpkg"
+    explicit_path = out_dir / "protected_areas_rp.gpkg"
     if not explicit_path.exists():
-        explicit_path = out_dir / "compartments.gpkg"
+        explicit_path = out_dir / "protected_areas.gpkg"
         log.warning(
-            "compartments_rp.gpkg missing: precedence uses compartments.gpkg of stage A."
+            "protected_areas_rp.gpkg missing: precedence uses protected_areas.gpkg of stage A."
         )
     gdf_expl = (
         gpd.read_file(explicit_path).to_crs(wkt) if explicit_path.exists() else None
     )
     if gdf_expl is None:
-        log.warning("No explicit compartments: no precedence.")
+        log.warning("No explicit protected areas: no precedence.")
     list_line = []
     for name in ("barriers_all.gpkg", "crest_lines.gpkg"):
         if (out_dir / name).exists():
@@ -963,7 +963,7 @@ if __name__ == "__main__":
                     "f_wet_inside",
                 )
             },
-            "max_level_m": cfg_gfm["country"]["compartments"]["max_level_m"],
+            "max_level_m": cfg_gfm["country"]["protected_areas"]["max_level_m"],
             "flood_values": src["gfm_flood_values"],
             "exclusion_values": src["gfm_exclusion_values"],
             "reference_water_values": src["gfm_reference_water_values"],
@@ -1044,7 +1044,7 @@ if __name__ == "__main__":
     if list_fail:
         raise SystemExit(f"Failed units in pass 2: {list_fail}")
 
-    # --- Implied compartments: components joined across units, built-area filter, precedence ---
+    # --- Implied protected areas: components joined across units, built-area filter, precedence ---
     df_comp = pd.DataFrame([c for r in list_res2 for c in r["comps"]])
     df_gfm = pd.DataFrame(
         [{**g, "unit_id": r["unit_id"]} for r in list_res2 for g in r["gfm"]]
@@ -1099,7 +1099,9 @@ if __name__ == "__main__":
             continue
         geometry = shapely.union_all(parts[keep_part]) if keep_part.any() else None
         if geometry is None or geometry.is_empty:
-            list_drop.append({"group": g, "reason": "covered by explicit compartments"})
+            list_drop.append(
+                {"group": g, "reason": "covered by explicit protected areas"}
+            )
             continue
         members = np.asarray(seg_of[g])
         list_row.append(
@@ -1124,7 +1126,7 @@ if __name__ == "__main__":
             }
         )
     log.info(
-        "Implied compartments: %d kept, %d groups dropped (%s).",
+        "Implied protected areas: %d kept, %d groups dropped (%s).",
         len(list_row),
         len(list_drop),
         (
@@ -1256,7 +1258,7 @@ if __name__ == "__main__":
                 counts[outcome] += 1
                 list_test.append(
                     {
-                        "compartment_id": a["implied_id"],
+                        "protected_area_id": a["implied_id"],
                         "item_id": item,
                         "datetime": when,
                         "inside_valid_px": int(sums["inside_valid"]),
@@ -1283,7 +1285,7 @@ if __name__ == "__main__":
     pd.DataFrame(
         list_test,
         columns=[
-            "compartment_id",
+            "protected_area_id",
             "item_id",
             "datetime",
             "inside_valid_px",
@@ -1299,10 +1301,10 @@ if __name__ == "__main__":
     if (out_dir / "event_rp_combined.csv").exists():
         df_ev = pd.read_csv(out_dir / "event_rp_combined.csv")
         df_ev = df_ev[(df_ev["outcome"] == "flooded") & df_ev["rp_combined"].notna()]
-        event_rp = df_ev.groupby("compartment_id")["rp_combined"].min().to_dict()
+        event_rp = df_ev.groupby("protected_area_id")["rp_combined"].min().to_dict()
     else:
         log.info(
-            "event_rp_combined.csv missing: no event caps for flooded implied compartments."
+            "event_rp_combined.csv missing: no event caps for flooded implied protected areas."
         )
 
     # --- F. RP of the stratum "implied" ---
@@ -1423,7 +1425,7 @@ if __name__ == "__main__":
         gdf_imp = gpd.GeoDataFrame(
             {"implied_id": pd.Series(dtype=str)}, geometry=gpd.GeoSeries([], crs=wkt)
         )
-    gis.Vector.write_gpkg(gdf_imp, run_dir / "implied_compartments.gpkg")
+    gis.Vector.write_gpkg(gdf_imp, run_dir / "implied_protected_areas.gpkg")
     pd.DataFrame(list_drop, columns=["group", "reason"]).to_csv(
         run_dir / "implied_dropped.csv", index=False
     )
@@ -1450,7 +1452,7 @@ if __name__ == "__main__":
             ]
             outside = gpd.overlay(gdf_i, gdf_clip[["geometry"]], how="difference")
             outside["overlaps_explicit"] = False
-            # Where an implied compartment overlaps the clip layer with a higher rp, the overlap is added as well, so
+            # Where an implied protected area overlaps the clip layer with a higher rp, the overlap is added as well, so
             # every location carries the maximum rp; the clip features stay unchanged.
             rp_col = "rp" if "rp" in gdf_clip.columns else None
             inter = gpd.overlay(
@@ -1499,14 +1501,14 @@ if __name__ == "__main__":
         gdf_rev = gdf_rev[gdf_rev["reasons"] != ""]
         gis.Vector.write_gpkg(gdf_rev, run_dir / "review_implied.gpkg")
         log.info(
-            "review_implied.gpkg: %d implied compartments for the review queue (review_queue.py of Stage D4 merges "
+            "review_implied.gpkg: %d implied protected areas for the review queue (review_queue.py of Stage D4 merges "
             "them once it exists).",
             len(gdf_rev),
         )
     parts_s = time.perf_counter() - t
     if n_imp:
         log.info(
-            "implied_compartments.gpkg: %d compartments, %.2f km2; confidence %s; corroborated %d; rp %s.",
+            "implied_protected_areas.gpkg: %d protected areas, %.2f km2; confidence %s; corroborated %d; rp %s.",
             n_imp,
             gdf_imp.area.sum() / 1e6,
             gdf_imp["confidence"].value_counts().to_dict(),
@@ -1672,7 +1674,7 @@ if __name__ == "__main__":
                 ("medium", INK["muted"]),
                 ("low", INK["grid"]),
             )
-            panel_title = "Implied compartments per context and confidence"
+            panel_title = "Implied protected areas per context and confidence"
         else:
             conf = (
                 pd.crosstab(
@@ -1856,7 +1858,7 @@ if __name__ == "__main__":
                             )
                         },
                     )
-            # compartment_map: hillshade, built fraction, outlines, barriers, rivers, edge cells
+            # protected_area_map: hillshade, built fraction, outlines, barriers, rivers, edge cells
             built_vrt = work_dir / "implied_built.vrt"
             gdal.BuildVRT(
                 str(built_vrt),
@@ -1886,7 +1888,7 @@ if __name__ == "__main__":
                     (by_c["confidence"] == "low") | (by_c["explicit_overlap_share"] > 0)
                 ]
             )
-            for name in plots.select("compartment_map", ids_c, flag_m):
+            for name in plots.select("protected_area_map", ids_c, flag_m):
                 r = by_c.loc[name]
                 geom = r.geometry
                 bounds_p, cell = Plots.window(
@@ -1949,14 +1951,14 @@ if __name__ == "__main__":
                                 color=INK["primary"],
                                 lw=1.0,
                                 ls=(0, (4, 2)),
-                                label="explicit compartment",
+                                label="explicit protected area",
                             )
                 for g in shapely.get_parts(geom):
                     ax.plot(
                         *g.exterior.xy,
                         color=COLOURS["snapped"],
                         lw=1.6,
-                        label="implied compartment",
+                        label="implied protected area",
                     )
                 sel = np.array(
                     [
@@ -1996,13 +1998,13 @@ if __name__ == "__main__":
                     fontsize=8,
                 )
                 ax.set_title(
-                    f"compartment_map · {name} · run {run['RUN_ID']}\n"
+                    f"protected_area_map · {name} · run {run['RUN_ID']}\n"
                     f"level {r['level_min_m']:.2f}-{r['level_max_m']:.2f} m, crest support {r['crest_support']:.2f}, "
                     f"closures {r['closure_support']}, GFM held {r['gfm_held']}, rp {r['rp']:.0f} ({r['confidence']})"
                 )
                 plots.save(
                     fig,
-                    "compartment_map",
+                    "protected_area_map",
                     name,
                     {
                         k: r[k]
@@ -2034,7 +2036,7 @@ if __name__ == "__main__":
         "pass2_s": round(sum(r["secs"]["pass2"] for r in list_res2), 2),
         "pass2_wall_s": round(pass2_s, 2),
         "parts_c_f_s": round(parts_s, 2),
-        "implied_compartments": n_imp,
+        "implied_protected_areas": n_imp,
         "levels_s": round(curves_s, 2),
         "plots_s": round(plots_s, 2),
         "total_s": round(time.perf_counter() - start, 2),

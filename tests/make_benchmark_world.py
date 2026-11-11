@@ -1,7 +1,7 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
 # Writes a large synthetic DTM (two strip-layout GeoTIFFs without overviews, like delivered national mosaics),
-# rivers, levees and a config for performance runs of prepare_dtm.py, build_units.py and compartments.py.
+# rivers, levees and a config for performance runs of prepare_dtm.py, build_units.py and protected_areas.py.
 # Run: pixi run python -m tests.make_benchmark_world  (DEFENSES_BENCH_DIR sets the folder)
 
 import json
@@ -137,7 +137,7 @@ contradiction_ratio = 0.5
 id_rounding_m = 10.0
 keep_intermediate = false
 
-[countries.BM.compartments]
+[countries.BM.protected_areas]
 gap_tolerance_m = 20.0
 touch_tolerance_m = 0.01
 self_close_min_length_factor = 3.0

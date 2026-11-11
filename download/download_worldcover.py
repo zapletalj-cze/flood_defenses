@@ -42,7 +42,7 @@ if __name__ == "__main__":
             "sources.worldcover_url_template or worldcover_grid_url is empty; set them or list local tiles "
             "in countries.<code>.lulc.worldcover."
         )
-    # The corridor holds every compartment; the DTM footprint is the fallback before build_units.py ran.
+    # The corridor holds every protected area; the DTM footprint is the fallback before build_units.py ran.
     area_path = next(
         (
             p

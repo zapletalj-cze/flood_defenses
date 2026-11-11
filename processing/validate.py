@@ -1,6 +1,6 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-03
-# Compares the compartments with reference protected-area polygons: area-based recall and precision, covered share of
+# Compares the protected areas with reference protected-area polygons: area-based recall and precision, covered share of
 # each reference polygon and, with reference return periods, a confusion matrix of RP classes.
 
 import json
@@ -37,16 +37,16 @@ if __name__ == "__main__":
         raise SystemExit(
             "countries.<code>.reference_protected_areas is empty; nothing to validate."
         )
-    result_path = out_dir / "compartments_rp.gpkg"
+    result_path = out_dir / "protected_areas_rp.gpkg"
     if not result_path.exists():
-        result_path = out_dir / "compartments.gpkg"
+        result_path = out_dir / "protected_areas.gpkg"
     if not result_path.exists():
-        raise SystemExit("No compartments found; run compartments.py first.")
-    gdf_comp = gpd.read_file(result_path)
-    crs = gdf_comp.crs
+        raise SystemExit("No protected areas found; run protected_areas.py first.")
+    gdf_pa = gpd.read_file(result_path)
+    crs = gdf_pa.crs
     if crs is None or not crs.is_projected:
         raise SystemExit(
-            "The compartments must be in a projected CRS to compute areas."
+            "The protected areas must be in a projected CRS to compute areas."
         )
     field = country["reference_rp_field"]
     gdf_ref = gis.Vector.read_merged(
@@ -58,16 +58,16 @@ if __name__ == "__main__":
         extent = gis.Vector.read_merged(
             country["validation_extent"], crs.to_wkt()
         ).union_all()
-        gdf_comp = gpd.clip(gdf_comp, extent)
+        gdf_pa = gpd.clip(gdf_pa, extent)
         gdf_ref = gpd.clip(gdf_ref, extent)
     gdf_ref = gdf_ref[gdf_ref.area > 0].reset_index(drop=True)
-    gdf_comp = gdf_comp[gdf_comp.area > 0].reset_index(drop=True)
+    gdf_pa = gdf_pa[gdf_pa.area > 0].reset_index(drop=True)
     log.info(
         "Validating %s against %d reference polygons.", result_path.name, len(gdf_ref)
     )
 
     # --- Area-based recall and precision ---
-    result_union = gdf_comp.union_all()
+    result_union = gdf_pa.union_all()
     ref_union = gdf_ref.union_all()
     intersection = result_union.intersection(ref_union).area
     recall = intersection / ref_union.area if ref_union.area > 0 else float("nan")
@@ -100,24 +100,24 @@ if __name__ == "__main__":
         "result_area_m2": result_union.area,
     }
 
-    # --- Return periods: each compartment against the reference polygon it overlaps most ---
-    if field and "rp" in gdf_comp.columns:
+    # --- Return periods: each protected area against the reference polygon it overlaps most ---
+    if field and "rp" in gdf_pa.columns:
         if field not in gdf_ref.columns:
             raise SystemExit(
                 f"Reference field {field!r} not found; columns: {list(gdf_ref.columns)}"
             )
         classes = np.asarray(country["rp"]["classes"], float)
         left, right = gdf_ref.sindex.query(
-            gdf_comp.geometry.values, predicate="intersects"
+            gdf_pa.geometry.values, predicate="intersects"
         )
-        df_pairs = pd.DataFrame({"compartment": left, "reference": right})
+        df_pairs = pd.DataFrame({"protected area": left, "reference": right})
         df_pairs["overlap"] = shapely.area(
             shapely.intersection(
-                gdf_comp.geometry.values[left], gdf_ref.geometry.values[right]
+                gdf_pa.geometry.values[left], gdf_ref.geometry.values[right]
             )
         )
         df_best = df_pairs.sort_values("overlap", ascending=False).drop_duplicates(
-            "compartment"
+            "protected area"
         )
         df_best = df_best[df_best["overlap"] > 0]
         reference_rp = pd.to_numeric(gdf_ref[field], errors="coerce").to_numpy()[
@@ -125,7 +125,7 @@ if __name__ == "__main__":
         ]
         known = np.isfinite(reference_rp) & (reference_rp > 0)
         df_best, reference_rp = df_best[known], reference_rp[known]
-        gdf_cmp = gdf_comp.iloc[df_best["compartment"].to_numpy()]
+        gdf_cmp = gdf_pa.iloc[df_best["protected area"].to_numpy()]
         # Reference values snapped to the nearest class (log scale) for the confusion matrix.
         snapped = classes[
             np.argmin(
@@ -144,7 +144,7 @@ if __name__ == "__main__":
         exact = snapped == gdf_cmp["rp"].to_numpy()
         report.update(
             {
-                "rp_compartments_compared": int(len(df_best)),
+                "rp_protected_areas_compared": int(len(df_best)),
                 "rp_share_within_interval": (
                     float(within.mean()) if len(df_best) else float("nan")
                 ),
@@ -154,7 +154,7 @@ if __name__ == "__main__":
             }
         )
         log.info(
-            "RP: %d compartments with a reference RP; reference RP within rp_low..rp_high for %.1f %%, same "
+            "RP: %d protected areas with a reference RP; reference RP within rp_low..rp_high for %.1f %%, same "
             "class for %.1f %%. Confusion matrix in validation_rp_confusion.csv.",
             len(df_best),
             100 * report["rp_share_within_interval"],
@@ -162,6 +162,6 @@ if __name__ == "__main__":
         )
     elif field:
         log.warning(
-            "The compartments have no rp column (run rp_index.py); RP validation skipped."
+            "The protected areas have no rp column (run rp_index.py); RP validation skipped."
         )
     (out_dir / "validation.json").write_text(json.dumps(report, indent=2))

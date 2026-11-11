@@ -21,15 +21,30 @@ NLD_WFS_URL = "https://levees.sec.usace.army.mil/mapserver/public/ows"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("download_nld")
 
-parser = argparse.ArgumentParser(description="Download National Levee Database layers from the NLD WFS service.")
+parser = argparse.ArgumentParser(
+    description="Download National Levee Database layers from the NLD WFS service."
+)
 parser.add_argument("--output-dir", required=True, type=Path)
-parser.add_argument("--url", default=NLD_WFS_URL, help="WFS endpoint (default: public NLD OGC service).")
-parser.add_argument("--layers", nargs="+",
-                    help="Layer names or case-insensitive substrings to download (default: all layers).")
-parser.add_argument("--extent", nargs="+", help="Optional polygon file(s); only features in their bounding box.")
-parser.add_argument("--page-size", type=int, default=1000, help="Features per WFS request.")
+parser.add_argument(
+    "--url", default=NLD_WFS_URL, help="WFS endpoint (default: public NLD OGC service)."
+)
+parser.add_argument(
+    "--layers",
+    nargs="+",
+    help="Layer names or case-insensitive substrings to download (default: all layers).",
+)
+parser.add_argument(
+    "--extent",
+    nargs="+",
+    help="Optional polygon file(s); only features in their bounding box.",
+)
+parser.add_argument(
+    "--page-size", type=int, default=1000, help="Features per WFS request."
+)
 parser.add_argument("--retries", type=int, default=4)
-parser.add_argument("--list", action="store_true", help="List the available layers and exit.")
+parser.add_argument(
+    "--list", action="store_true", help="List the available layers and exit."
+)
 args = parser.parse_args()
 
 gdal.SetConfigOption("OGR_WFS_PAGING_ALLOWED", "ON")
@@ -55,17 +70,26 @@ if args.list:
     raise SystemExit(0)
 
 if args.layers:
-    selected = [n for n in names if any(p == n or p.lower() in n.lower() for p in args.layers)]
+    selected = [
+        n for n in names if any(p == n or p.lower() in n.lower() for p in args.layers)
+    ]
     if not selected:
-        raise SystemExit(f"No layer matches {args.layers}. Use --list to see the available layers.")
+        raise SystemExit(
+            f"No layer matches {args.layers}. Use --list to see the available layers."
+        )
 else:
     selected = names
 
 translate_options = {}
 if args.extent:
     frames = [gpd.read_file(p) for p in args.extent]
-    extent = gpd.GeoDataFrame(pd.concat([f.to_crs(frames[0].crs) for f in frames]), crs=frames[0].crs)
-    translate_options = {"spatFilter": list(extent.total_bounds), "spatSRS": extent.crs.to_wkt()}
+    extent = gpd.GeoDataFrame(
+        pd.concat([f.to_crs(frames[0].crs) for f in frames]), crs=frames[0].crs
+    )
+    translate_options = {
+        "spatFilter": list(extent.total_bounds),
+        "spatSRS": extent.crs.to_wkt(),
+    }
 
 args.output_dir.mkdir(parents=True, exist_ok=True)
 for name in selected:
@@ -73,8 +97,15 @@ for name in selected:
     path = args.output_dir / f"{stem}.gpkg"
     for attempt in range(args.retries + 1):
         try:
-            result = gdal.VectorTranslate(str(path), source, format="GPKG", layers=[name], layerName=stem,
-                                          accessMode="overwrite", **translate_options)
+            result = gdal.VectorTranslate(
+                str(path),
+                source,
+                format="GPKG",
+                layers=[name],
+                layerName=stem,
+                accessMode="overwrite",
+                **translate_options,
+            )
             count = result.GetLayer(0).GetFeatureCount()
             result = None
             break

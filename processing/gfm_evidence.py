@@ -1,6 +1,6 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
-# Tests every compartment against GFM flood scenes: dry inside while the undefended floodplain at the same height
+# Tests every protected area against GFM flood scenes: dry inside while the undefended floodplain at the same height
 # around it is wet (held), or wet inside (flooded); optional hints of missing barriers from cells that stay dry.
 
 import datetime
@@ -35,8 +35,8 @@ KEYS = [
     "general.warp_memory_limit_mb",
     "general.gdal_threads_per_worker",
     "general.log_level",
-    "country.compartments.max_level_m",
-    "country.compartments.min_area_m2",
+    "country.protected_areas.max_level_m",
+    "country.protected_areas.min_area_m2",
     "evidence.comparison_distance_m",
     "evidence.min_valid_pixels",
     "evidence.f_wet_comparison",
@@ -53,7 +53,7 @@ KEYS = [
     "sources.gfm_nodata_values",
 ]
 COLUMNS = [
-    "compartment_id",
+    "protected_area_id",
     "unit_id",
     "item_id",
     "datetime",
@@ -73,7 +73,7 @@ def evidence_unit(task):
     gt, wkt = labels_ds.GetGeoTransform(), labels_ds.GetProjection()
     res = gt[1]
     labels = labels_ds.ReadAsArray()
-    kept = dict(task["compartments"])  # unit_label -> compartment_id
+    kept = dict(task["protected_areas"])  # unit_label -> protected_area_id
     reach = int(np.ceil(p["comparison_distance_m"] / res))
     if task["hints"] or not kept:
         r0, r1, c0, c1 = 0, labels.shape[0], 0, labels.shape[1]
@@ -88,7 +88,7 @@ def evidence_unit(task):
         c0, c1 = max(cols_any[0] - reach, 0), min(
             cols_any[-1] + 1 + reach, labels.shape[1]
         )
-    # Analysis window: the compartments and their comparison zones (whole unit window with hints).
+    # Analysis window: the protected areas and their comparison zones (whole unit window with hints).
     labels = labels[r0:r1, c0:c1]
     hand = gdal.Open(str(unit_dir / "hand_undef.tif")).ReadAsArray(
         int(c0), int(r0), int(c1 - c0), int(r1 - r0)
@@ -102,8 +102,8 @@ def evidence_unit(task):
         gt[3],
     )
 
-    # Comparison zone per compartment: outside all compartments, within the comparison distance, not higher than
-    # the median HAND inside the compartment and not above max_level_m.
+    # Comparison zone per protected area: outside all protected areas, within the comparison distance, not higher than
+    # the median HAND inside the protected area and not above max_level_m.
     zones = gis.Evidence.comparison_zones(labels, hand, kept, reach, p["max_level_m"])
 
     if task["hints"]:
@@ -121,7 +121,7 @@ def evidence_unit(task):
             > 0
         )
         # Levee bodies, their toes and the mixed GFM pixels along them stay dry whenever a levee holds: cells
-        # close to a barrier line or a compartment are not tested.
+        # close to a barrier line or a protected area are not tested.
         gdf_bl = gpd.read_file(task["barrier_lines"], bbox=bounds)
         near = (labels > 0) | (
             gis.Raster.rasterize_geometries(
@@ -201,7 +201,7 @@ def evidence_unit(task):
         gdf_hint["unit_id"] = task["unit_id"]
         gis.Vector.write_gpkg(gdf_hint, unit_dir / "missing_barrier_hints.gpkg")
     seconds = time.perf_counter() - start
-    summary = f"unit {task['unit_id']}: {len(task['scenes'])} scenes x {len(kept)} compartments tested in {seconds:.1f} s"
+    summary = f"unit {task['unit_id']}: {len(task['scenes'])} scenes x {len(kept)} protected areas tested in {seconds:.1f} s"
     logging.getLogger("gfm_evidence").info(summary)
     return {"unit_id": task["unit_id"], "seconds": seconds, "summary": summary}
 
@@ -226,10 +226,10 @@ if __name__ == "__main__":
     )
     if (
         not (out_dir / "gfm_index.csv").exists()
-        or not (out_dir / "compartments.gpkg").exists()
+        or not (out_dir / "protected_areas.gpkg").exists()
     ):
         raise SystemExit(
-            "gfm_index.csv or compartments.gpkg is missing; run compartments.py and download_gfm.py."
+            "gfm_index.csv or protected_areas.gpkg is missing; run protected_areas.py and download_gfm.py."
         )
     df_idx = pd.read_csv(out_dir / "gfm_index.csv", dtype={"unit_id": str}).fillna("")
     if len(df_idx):
@@ -242,7 +242,7 @@ if __name__ == "__main__":
                 df_idx = df_idx[compare(datetime.date.fromisoformat(bound)).to_numpy()]
     if run["UNITS"]:
         df_idx = df_idx[df_idx["unit_id"].isin(run["UNITS"])]
-    gdf_comp = gpd.read_file(out_dir / "compartments.gpkg")
+    gdf_pa = gpd.read_file(out_dir / "protected_areas.gpkg")
     params = {
         **{
             k: evidence[k]
@@ -259,8 +259,8 @@ if __name__ == "__main__":
                 "hint_exclusion_m",
             ]
         },
-        "max_level_m": cfg["country"]["compartments"]["max_level_m"],
-        "min_area_m2": cfg["country"]["compartments"]["min_area_m2"],
+        "max_level_m": cfg["country"]["protected_areas"]["max_level_m"],
+        "min_area_m2": cfg["country"]["protected_areas"]["min_area_m2"],
         "flood_values": sources["gfm_flood_values"],
         "exclusion_values": sources["gfm_exclusion_values"],
         "reference_water_values": sources["gfm_reference_water_values"],
@@ -268,15 +268,15 @@ if __name__ == "__main__":
     }
     list_task = []
     for unit_id, df_scn in df_idx.groupby("unit_id"):
-        gdf_mem = gdf_comp[gdf_comp["unit_id"] == unit_id]
+        gdf_mem = gdf_pa[gdf_pa["unit_id"] == unit_id]
         if gdf_mem.empty and not run["HINTS"]:
             continue
         list_task.append(
             {
                 "unit_id": unit_id,
                 "unit_dir": str(work_dir / "units" / unit_id),
-                "compartments": list(
-                    zip(gdf_mem["unit_label"].astype(int), gdf_mem["compartment_id"])
+                "protected_areas": list(
+                    zip(gdf_mem["unit_label"].astype(int), gdf_mem["protected_area_id"])
                 ),
                 "scenes": df_scn.to_dict("records"),
                 "hints": run["HINTS"],
@@ -287,7 +287,7 @@ if __name__ == "__main__":
             }
         )
     log.info(
-        "Evidence: %d scene windows in %d units with compartments%s.",
+        "Evidence: %d scene windows in %d units with protected areas%s.",
         len(df_idx),
         len(list_task),
         (
@@ -315,20 +315,20 @@ if __name__ == "__main__":
         else pd.DataFrame(columns=COLUMNS)
     )
     df_ev.to_csv(out_dir / "gfm_evidence.csv", index=False)
-    # One feature per compartment and scene, for visual checks in QGIS.
-    gdf_ev = gdf_comp[["compartment_id", "geometry"]].merge(
-        df_ev, on="compartment_id", how="inner"
+    # One feature per protected area and scene, for visual checks in QGIS.
+    gdf_ev = gdf_pa[["protected_area_id", "geometry"]].merge(
+        df_ev, on="protected_area_id", how="inner"
     )
     gis.Vector.write_gpkg(
-        gpd.GeoDataFrame(gdf_ev, geometry="geometry", crs=gdf_comp.crs),
+        gpd.GeoDataFrame(gdf_ev, geometry="geometry", crs=gdf_pa.crs),
         out_dir / "gfm_evidence.gpkg",
     )
     counts = df_ev["outcome"].value_counts()
     log.info(
-        "gfm_evidence.csv: %d tests (%s) for %d compartments.",
+        "gfm_evidence.csv: %d tests (%s) for %d protected areas.",
         len(df_ev),
         ", ".join(f"{k} {v}" for k, v in counts.items()),
-        df_ev["compartment_id"].nunique() if len(df_ev) else 0,
+        df_ev["protected_area_id"].nunique() if len(df_ev) else 0,
     )
 
     if run["HINTS"]:
@@ -352,7 +352,7 @@ if __name__ == "__main__":
         else:
             gdf_hint = gpd.GeoDataFrame(
                 {"unit_id": pd.Series(dtype=str)},
-                geometry=gpd.GeoSeries([], crs=gdf_comp.crs),
+                geometry=gpd.GeoSeries([], crs=gdf_pa.crs),
             )
         gis.Vector.write_gpkg(gdf_hint, out_dir / "missing_barrier_hints.gpkg")
         log.info(

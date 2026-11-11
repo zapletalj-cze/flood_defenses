@@ -38,7 +38,7 @@ written only in a scratch folder, to measure the runtime figures.
 - **HAND_YZ.** The `[countries.XX.lulc]` table and the WorldCover sources.
 
 ### 1.3 Method changes and interpretations
-- **compartments.py**
+- **protected_areas.py**
   - **Bug fixes B1–B4:**
     - tapered stream burning;
     - river cells kept in the levee removal zone;
@@ -51,12 +51,12 @@ written only in a scratch folder, to measure the runtime figures.
   - **Merging.**
     - A complete candidate inside its own core wins.
     - Pieces truncated everywhere are united and take the lowest level.
-    - A contradiction rule drops truncated compartments that better-placed units do not see.
-  - **Barrier lines** are bridged **once per country** in `compartments.py`; Stage D moves this into
+    - A contradiction rule drops truncated protected areas that better-placed units do not see.
+  - **Barrier lines** are bridged **once per country** in `protected_areas.py`; Stage D moves this into
     `barriers_merge.py`.
 - **rp_index.py**
   - totals check with exact areas;
-  - valuation only in the bounding box of each unit's compartments;
+  - valuation only in the bounding box of each unit's protected areas;
   - Stage C columns created empty;
   - `value_ghsl + value_lulc` (HAND_YZ).
 - **Stage C.**
@@ -75,9 +75,9 @@ written only in a scratch folder, to measure the runtime figures.
 
 | Stage D item | Current state |
 |---|---|
-| `barriers_merge.py` | Merging and bridging live in `compartments.py` (`work/<c>/barrier_lines.gpkg`, fields `source`, `bridged`) |
+| `barriers_merge.py` | Merging and bridging live in `protected_areas.py` (`work/<c>/barrier_lines.gpkg`, fields `source`, `bridged`) |
 | `rasterize_lines_max` | Barriers are rasterized with `gdal.RasterizeLayer` (`ALL_TOUCHED`), diagonal contacts are closed, crests are read as the native maximum in boxes per unit |
-| Controller propagation | `gis.Hydro.priority_flood` returns spill, seed and order (numba); compartments are 4-connected protected regions |
+| Controller propagation | `gis.Hydro.priority_flood` returns spill, seed and order (numba); protected areas are 4-connected protected regions |
 | Per-context units | One working resolution and core size per country |
 | Population, context distributions, `defenses_clip.gpkg` | One country distribution; no population; no clip layer |
 | GFM context, EMS | Not present |
@@ -117,10 +117,10 @@ written only in a scratch folder, to measure the runtime figures.
 | D1 | `processing/prepare_dtm.py` | inspection and benchmark of `dsm` |
 | D2 | `processing/crest_lines.py` (new) | `crest_lines.gpkg` (transects, numba detection, building and roughness exclusions, linking) |
 | D2 | `processing/barriers_merge.py` (new) | `barriers_all.gpkg` (dedupe by priority, crest Z, closure gaps at OSM crossings, regular gaps) |
-| D3 | `processing/compartments.py` | reads `barriers_all.gpkg`; `rasterize_lines_max`; compartments by controller cell; `parent_id`, `nesting_level`; context fields; per-context resolution and core size; reconciliation with the coarse pass |
+| D3 | `processing/protected_areas.py` | reads `barriers_all.gpkg`; `rasterize_lines_max`; protected areas by controller cell; `parent_id`, `nesting_level`; context fields; per-context resolution and core size; reconciliation with the coarse pass |
 | D3 | `processing/build_units.py` | units of `dense_urban` and `industrial` use their context's resolution and core size |
-| D3 | `processing/coarse_connectivity.py` (new) | corridor at `coarse_resolution_m`, split by connected corridor components if RAM is short; `compartments_coarse.gpkg` |
-| D4 | `processing/rp_index.py` | population (GHS-POP, totals preserved), per-context weights and distributions (country fallback below 30 compartments), `has_regulated_site`, nesting monotonicity, `defenses_clip.gpkg` |
+| D3 | `processing/coarse_connectivity.py` (new) | corridor at `coarse_resolution_m`, split by connected corridor components if RAM is short; `protected_areas_coarse.gpkg` |
+| D4 | `processing/rp_index.py` | population (GHS-POP, totals preserved), per-context weights and distributions (country fallback below 30 protected areas), `has_regulated_site`, nesting monotonicity, `defenses_clip.gpkg` |
 | D4 | `processing/review_queue.py` (new) | `review_queue.gpkg`, `review_queue.csv` |
 | D5 | `processing/gfm_evidence.py` | `context` per test, `no_test_urban`, EMS scenes (`source`) |
 | D5 | `processing/raised_sites.py` (new) | `raised_sites.gpkg` (diagnostic only) |
@@ -145,7 +145,7 @@ All additions are extensions. Existing calls keep their behaviour.
 - **New tables.** The tables of D.2, verbatim. The context parameter tables (`[countries.XX.context.params.<context>]`)
   exist for `industrial`, `dense_urban`, `urban` and `rural`; `rural` defaults to today's country values.
 - **Additional keys**, with placeholder values:
-  - `rp.min_context_compartments = 30`;
+  - `rp.min_context_protected_areas = 30`;
   - `evidence.urban_min_valid_share = 0.5`;
   - `[raised_sites] height_m`, `ring_width_m`.
 - **Unverified codes stay as placeholders.** CORINE, Urban Atlas and SMOD codes are logged as placeholders until
@@ -170,7 +170,7 @@ strip layout and option A copies).
 | Transect sampling and detection (300 m, 1 m samples, both banks, one window per 500 m of river) | 9430 transects: strip layout 1520–1770 /s, tiled (option A) 12 000–12 250 /s; detection 0.02 s in total | 1000 km of river, both banks every 10 m = 200 000 transects: about 2 min (strip) or 17 s (tiled) per raster; the DSM doubles it |
 | Coarse terrain read at 25 m | 576 km²: 21.9 s strip without overviews (38 s per 1000 km²), 0.61 s tiled with overviews (1.1 s per 1000 km²) | 20 000 km² of corridor: 13 min (strip) or 21 s (tiled) |
 | Coarse kernels at 25 m | measured per cell: HAND 0.46 µs, flood 0.38 µs (+3 % with controller) | 20 000 km² = 32 M cells: about 40 s; RAM at 95 B/cell: 3 GB, so corridors above about 60 000 km² are split by components |
-| Fine units at 2 m in `dense_urban` and `industrial` | `compartments.py` 2.4 µs per domain cell, measured at 2 m | 0.6 s per km² of domain, against 0.1 s at 5 m; 1000 km² of such domain = 10 worker-minutes |
+| Fine units at 2 m in `dense_urban` and `industrial` | `protected_areas.py` 2.4 µs per domain cell, measured at 2 m | 0.6 s per km² of domain, against 0.1 s at 5 m; 1000 km² of such domain = 10 worker-minutes |
 | Population warp in `rp_index.py` | GHSL warps measured at 1.6–4.6 s per unit for two products | about +1–2 s per unit |
 | `context_zones`, `barriers_merge`, `review_queue` | vector operations; not measured yet | measured in D1, D2 and D4 on the synthetic world before any country estimate |
 
@@ -189,7 +189,7 @@ strip layout and option A copies).
 5. **OSM flood wall tags.** taginfo is blocked here. Proposal: `download_osm.py` counts the candidate tags in the
    country extract itself, e.g. `barrier=wall` with `wall=flood_wall`, or `man_made=dyke`, and
    `osm_tags_walls` is filled from those counts.
-6. **Compartment definition changes in D3.** Compartments sharing a controller replace connected protected
+6. **Protected area definition changes in D3.** Protected areas sharing a controller replace connected protected
    regions. Nested systems split into parent and child, so some Stage A expectations change, and the affected
    tests will be updated, not loosened.
 7. **HAND_YZ and context zones.** Land cover value stays in `HAND_YZ.py` (WorldCover, Urban Atlas). Zoning comes

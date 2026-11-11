@@ -299,7 +299,7 @@ contradiction_ratio = 0.5
 id_rounding_m = 10.0
 keep_intermediate = true
 
-[countries.T5.compartments]
+[countries.T5.protected_areas]
 gap_tolerance_m = 20.0
 touch_tolerance_m = 0.01
 self_close_min_length_factor = 3.0
@@ -614,21 +614,21 @@ if proc.returncode == 0:
 else:
     list_res.append(("snap_rivers runs", False))
 
-# --- Stage A on T5 (inputs of E2-E4): DTM preparation, units, compartments behind the levee rings ---
+# --- Stage A on T5 (inputs of E2-E4): DTM preparation, units, protected areas behind the levee rings ---
 write_config("test_e.toml")
 stage_a_ok = True
-for module in ("prepare_dtm", "build_units", "compartments"):
+for module in ("prepare_dtm", "build_units", "protected_areas"):
     proc = run(module, "test_e.toml", f"processing.{module}")
     if proc.returncode != 0:
         list_res.append((f"stage A {module} runs for T5", False))
         stage_a_ok = False
         break
 if stage_a_ok:
-    gdf_comp = gpd.read_file(out / "compartments.gpkg")
+    gdf_pa = gpd.read_file(out / "protected_areas.gpkg")
     list_res.append(
         (
-            f"stage A on T5: {len(gdf_comp)} explicit compartments behind the levee rings",
-            len(gdf_comp) >= 2,
+            f"stage A on T5: {len(gdf_pa)} explicit protected areas behind the levee rings",
+            len(gdf_pa) >= 2,
         )
     )
     # --- E2: subsegments of 1000 m directly, then with HAND recomputed, then the base of 500 m ---
@@ -913,12 +913,12 @@ if stage_a_ok and (out / "subsegments.gpkg").exists():
     else:
         list_res.append(("implied_protection (A-B) runs", False))
 
-# --- E4: implied compartments, precedence, temporal signal, corroboration, RP ---
-imp_path = out / "implied" / "base" / "implied_compartments.gpkg"
+# --- E4: implied protected areas, precedence, temporal signal, corroboration, RP ---
+imp_path = out / "implied" / "base" / "implied_protected_areas.gpkg"
 if stage_a_ok and imp_path.exists():
     gdf_ic = gpd.read_file(imp_path)
-    gdf_comp = gpd.read_file(out / "compartments.gpkg")
-    ring_a = gdf_comp[gdf_comp.intersects(world(shapely.box(*RINGS[0])))]
+    gdf_pa = gpd.read_file(out / "protected_areas.gpkg")
+    ring_a = gdf_pa[gdf_pa.intersects(world(shapely.box(*RINGS[0])))]
     town_c = gdf_ic[
         (gdf_ic["river_id"] == main_id)
         & (gdf_ic["side"] == "left")
@@ -927,7 +927,7 @@ if stage_a_ok and imp_path.exists():
     ]
     list_res.append(
         (
-            f"merging: the town forms {len(town_c)} implied compartment over subsegments "
+            f"merging: the town forms {len(town_c)} implied protected area over subsegments "
             f"{town_c['k_from'].tolist()}-{town_c['k_to'].tolist()}, {town_c['n_bridged'].tolist()} bridged (park)",
             len(town_c) == 1 and int(town_c["n_bridged"].iloc[0]) >= 1,
         )
@@ -947,7 +947,7 @@ if stage_a_ok and imp_path.exists():
                 f"precedence: the town clipped by ring A (overlap share {town_c['explicit_overlap_share'].iloc[0]:.3f}, "
                 f"{inside_a:.0f} m2 left inside it)"
                 if len(town_c)
-                else "precedence: town compartment missing"
+                else "precedence: town protected area missing"
             ),
             len(town_c) == 1
             and 0 < town_c["explicit_overlap_share"].iloc[0] < 0.8
@@ -992,7 +992,7 @@ if stage_a_ok and imp_path.exists():
     run_dir = out / "plots" / "implied" / "base"
     counts = {
         k: len(list((run_dir / k).glob("*.png")))
-        for k in ("longitudinal", "temporal", "compartment_map")
+        for k in ("longitudinal", "temporal", "protected_area_map")
     }
     index = (run_dir / "index.html").read_text()
     list_res.append(
@@ -1000,13 +1000,13 @@ if stage_a_ok and imp_path.exists():
             f"plots: {counts} figures, listed in index.html with their metrics",
             counts["longitudinal"] == 4
             and counts["temporal"] == len(gdf_ic)
-            and counts["compartment_map"] == len(gdf_ic)
+            and counts["protected_area_map"] == len(gdf_ic)
             and "crest_support" in index,
         )
     )
 else:
     list_res.append(
-        ("implied_protection (C-F) writes implied_compartments.gpkg", False)
+        ("implied_protection (C-F) writes implied_protected_areas.gpkg", False)
     )
 
 # --- E5: GFM scenes and event RPs, reference areas, integration, sensitivity grid ---
@@ -1050,7 +1050,7 @@ if stage_a_ok and imp_path.exists() and len(town_c):
     # SCENE_A, so that conservative_both (flooded: the higher RP) is what the Stage E scripts read
     pd.DataFrame(
         {
-            "compartment_id": [town_id, town_id],
+            "protected_area_id": [town_id, town_id],
             "item_id": ["SCENE_A", "SCENE_B"],
             "outcome": ["flooded", "flooded"],
             "rp_combined": [10.0, 50.0],
@@ -1068,8 +1068,8 @@ if stage_a_ok and imp_path.exists() and len(town_c):
         ),
         data / "reference.gpkg",
     )
-    gdf_clip = gpd.read_file(out / "compartments.gpkg")[
-        ["compartment_id", "geometry"]
+    gdf_clip = gpd.read_file(out / "protected_areas.gpkg")[
+        ["protected_area_id", "geometry"]
     ].assign(rp=50.0, rp_source="model")
     gis.Vector.write_gpkg(gdf_clip, out / "defenses_clip.gpkg")
     write_config(
@@ -1082,7 +1082,7 @@ if stage_a_ok and imp_path.exists() and len(town_c):
     clip_ok = False
     if proc.returncode == 0 and (out / "defenses_clip_with_implied.gpkg").exists():
         gdf_cwi = gpd.read_file(out / "defenses_clip_with_implied.gpkg")
-        kept = gdf_cwi[gdf_cwi["compartment_id"].notna()]
+        kept = gdf_cwi[gdf_cwi["protected_area_id"].notna()]
         added = (
             gdf_cwi[gdf_cwi["implied_id"].notna()]
             if "implied_id" in gdf_cwi
@@ -1093,8 +1093,8 @@ if stage_a_ok and imp_path.exists() and len(town_c):
             and all(
                 a.equals(b)
                 for a, b in zip(
-                    kept.sort_values("compartment_id").geometry,
-                    gdf_clip.sort_values("compartment_id").geometry,
+                    kept.sort_values("protected_area_id").geometry,
+                    gdf_clip.sort_values("protected_area_id").geometry,
                 )
             )
             and len(added) > 0
@@ -1135,10 +1135,12 @@ if stage_a_ok and imp_path.exists() and len(town_c):
         list_res.append(
             (
                 f"sensitivity grid: {len(sens)} runs (4 methods x 2 shares x 2 lengths), "
-                f"{int((sens['length_m'] == 1000.0).sum())} at 1000 m with {int(sens.loc[sens['length_m'] == 1000.0, 'implied_compartments'].sum())} compartments",
+                f"{int((sens['length_m'] == 1000.0).sum())} at 1000 m with {int(sens.loc[sens['length_m'] == 1000.0, 'implied_protected_areas'].sum())} protected areas",
                 len(sens) == 16
                 and int(
-                    sens.loc[sens["length_m"] == 1000.0, "implied_compartments"].sum()
+                    sens.loc[
+                        sens["length_m"] == 1000.0, "implied_protected_areas"
+                    ].sum()
                 )
                 > 0,
             )
@@ -1175,10 +1177,12 @@ if stage_a_ok and imp_path.exists() and len(town_c):
         )
     else:
         list_res.append(("implied_evaluate runs", False))
-    proc = run("compartments_force", "test_e.toml", "processing.compartments", FORCE=1)
+    proc = run(
+        "protected_areas_force", "test_e.toml", "processing.protected_areas", FORCE=1
+    )
     list_res.append(
         (
-            "compartments.py snaps the rivers again with FORCE (rivers_channel.gpkg) and recomputes all units",
+            "protected_areas.py snaps the rivers again with FORCE (rivers_channel.gpkg) and recomputes all units",
             proc.returncode == 0
             and "Rivers snapped into their channel (rivers_channel.gpkg)" in proc.stderr
             and "Units: 8 to process" in proc.stderr,

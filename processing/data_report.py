@@ -30,7 +30,7 @@ COUNTRY = "XX"  # "XX": the country of [general] country
 REPORT_DIR = (
     "reports"  # folder in the repository; the report goes to <REPORT_DIR>/<country>/
 )
-PLOT = True  # overview.png with the DTM footprint, levees and compartments
+PLOT = True  # overview.png with the DTM footprint, levees and protected areas
 
 MAX_REPORT_KB = 60  # report.md is cut at this size
 DTM_WINDOWS = 24  # random 256 x 256 windows read for the DTM statistics
@@ -42,16 +42,16 @@ PERCENTILES = [0, 5, 25, 50, 75, 95, 100]
 
 # Output layers summarised when present, with the columns shown in the list of the largest features
 OUTPUTS = {
-    "compartments.gpkg": [
-        "compartment_id",
+    "protected_areas.gpkg": [
+        "protected_area_id",
         "area_m2",
         "protection_level_m",
         "margin_median_m",
         "truncated",
         "unit_id",
     ],
-    "compartments_rp.gpkg": [
-        "compartment_id",
+    "protected_areas_rp.gpkg": [
+        "protected_area_id",
         "area_m2",
         "rp",
         "rp_low",
@@ -63,7 +63,7 @@ OUTPUTS = {
     "rivers_channel.gpkg": [],
     "units_core.gpkg": [],
     "gfm_evidence.gpkg": [],
-    "implied/base/implied_compartments.gpkg": [],
+    "implied/base/implied_protected_areas.gpkg": [],
     "defenses_clip.gpkg": [],
 }
 TABLES = [
@@ -190,9 +190,10 @@ if __name__ == "__main__":
         "bytes_per_cell",
     ):
         L.append(f"- country.{key} = {country.get(key)!r}")
-    comp = country.get("compartments", {})
+    pa_cfg = country.get("protected_areas", {})
     L.append(
-        "- country.compartments: " + ", ".join(f"{k} = {v!r}" for k, v in comp.items())
+        "- country.protected_areas: "
+        + ", ".join(f"{k} = {v!r}" for k, v in pa_cfg.items())
     )
     L.append("")
 
@@ -346,7 +347,7 @@ if __name__ == "__main__":
         L += ["```"] + [ln[:300] for ln in lines[-6:]] + ["```", ""]
 
     # --- Overview map ---
-    if run["PLOT"] and (footprint is not None or "compartments.gpkg" in layers):
+    if run["PLOT"] and (footprint is not None or "protected_areas.gpkg" in layers):
         import matplotlib
 
         matplotlib.use("Agg")
@@ -357,18 +358,20 @@ if __name__ == "__main__":
         )
         if footprint is not None:
             footprint.boundary.plot(ax=ax, color=INK["muted"], lw=0.6)
-        comp_g = layers.get("compartments_rp.gpkg", layers.get("compartments.gpkg"))
-        if comp_g is not None and len(comp_g):
-            # fill plus a point per compartment, so that small ones stay visible at country scale
-            comp_g.plot(
+        gdf_pa_map = layers.get(
+            "protected_areas_rp.gpkg", layers.get("protected_areas.gpkg")
+        )
+        if gdf_pa_map is not None and len(gdf_pa_map):
+            # fill plus a point per protected area, so that small ones stay visible at country scale
+            gdf_pa_map.plot(
                 ax=ax, color=CATEGORICAL[0], alpha=0.6, edgecolor=CATEGORICAL[0], lw=0.6
             )
-            pts = comp_g.representative_point()
+            pts = gdf_pa_map.representative_point()
             ax.scatter(pts.x, pts.y, s=6, color=CATEGORICAL[0], lw=0)
         if gdf_lv is not None and len(gdf_lv):
             gdf_lv.simplify(50).plot(ax=ax, color=CATEGORICAL[1], lw=0.8)
         ax.set_title(
-            f"{code}: DTM footprint (grey), levees in the footprint (orange), compartments (blue)",
+            f"{code}: DTM footprint (grey), levees in the footprint (orange), protected areas (blue)",
             loc="left",
             fontsize=9,
         )

@@ -1,6 +1,6 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-05
-# Stage F: matches compartments (and Stage E implied compartments) to GloFAS and EFAS river cells, turns the GFM
+# Stage F: matches protected areas (and Stage E implied protected areas) to GloFAS and EFAS river cells, turns the GFM
 # tests into event return periods per source, combines the sources and bounds the model RP interval; plots.
 
 import json
@@ -30,7 +30,7 @@ gdal.UseExceptions()
 CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
 RUN_ID = "base"  # plots in <output_dir>/<country>/plots/discharge/<RUN_ID>
-IMPLIED_RUN = "base"  # Stage E run whose implied compartments get event return periods too (when it exists)
+IMPLIED_RUN = "base"  # Stage E run whose implied protected areas get event return periods too (when it exists)
 SHOW_PLOTS = False  # show up to implied.plots.show_max figures per type while running (needs a display)
 
 KEYS = [
@@ -89,18 +89,18 @@ if __name__ == "__main__":
     log = gis.Run.logger("rp_bounds", out_dir / "logs", general["log_level"])
     gis.Config.warn_placeholders(cfg)
     start = time.perf_counter()
-    list_need = [out_dir / "compartments_rp.gpkg", out_dir / "gfm_evidence.csv"]
+    list_need = [out_dir / "protected_areas_rp.gpkg", out_dir / "gfm_evidence.csv"]
     if not all(p.exists() for p in list_need):
         raise SystemExit(
             f"Missing inputs {[str(p) for p in list_need if not p.exists()]}; run rp_index.py and gfm_evidence.py first."
         )
-    gdf_comp = gpd.read_file(list_need[0])
+    gdf_pa = gpd.read_file(list_need[0])
     # The model values of rp_index.py are kept as *_prior, so that reruns start from them again.
     for column in MODEL_COLUMNS:
-        if f"{column}_prior" not in gdf_comp.columns:
-            gdf_comp[f"{column}_prior"] = gdf_comp[column]
-        gdf_comp[column] = gdf_comp[f"{column}_prior"]
-    wkt = gdf_comp.crs.to_wkt()
+        if f"{column}_prior" not in gdf_pa.columns:
+            gdf_pa[f"{column}_prior"] = gdf_pa[column]
+        gdf_pa[column] = gdf_pa[f"{column}_prior"]
+    wkt = gdf_pa.crs.to_wkt()
     classes = np.asarray(country["rp"]["classes"], float)
     sources = [
         s
@@ -118,9 +118,9 @@ if __name__ == "__main__":
         log.warning("No discharge source prepared: no observed bounds.")
         raise SystemExit(0)
 
-    # --- Sites: explicit compartments at their source river cell, implied compartments at their river ---
+    # --- Sites: explicit protected areas at their source river cell, implied protected areas at their river ---
     field = country["river_upstream_area_field"]
-    # river lines of the same-river test: the Stage E thalweg, else the channel lines of compartments.py
+    # river lines of the same-river test: the Stage E thalweg, else the channel lines of protected_areas.py
     for name in ("rivers_snapped.gpkg", "rivers_channel.gpkg", ""):
         if not name or (out_dir / name).exists():
             break
@@ -138,17 +138,17 @@ if __name__ == "__main__":
             )
     sites = pd.DataFrame(
         {
-            "compartment_id": gdf_comp["compartment_id"],
+            "protected_area_id": gdf_pa["protected_area_id"],
             "kind": "explicit",
-            "x": gdf_comp["source_x"].astype(float),
-            "y": gdf_comp["source_y"].astype(float),
+            "x": gdf_pa["source_x"].astype(float),
+            "y": gdf_pa["source_y"].astype(float),
         }
     )
     imp_dir = out_dir / "implied" / run["IMPLIED_RUN"]
-    if (imp_dir / "implied_compartments.gpkg").exists() and (
+    if (imp_dir / "implied_protected_areas.gpkg").exists() and (
         out_dir / "river_points.gpkg"
     ).exists():
-        gdf_imp = gpd.read_file(imp_dir / "implied_compartments.gpkg").to_crs(wkt)
+        gdf_imp = gpd.read_file(imp_dir / "implied_protected_areas.gpkg").to_crs(wkt)
         if len(gdf_imp):
             gdf_pts = gpd.read_file(out_dir / "river_points.gpkg").to_crs(wkt)
             near = shapely.STRtree(gdf_pts.geometry.values).query_nearest(
@@ -160,7 +160,7 @@ if __name__ == "__main__":
                     sites,
                     pd.DataFrame(
                         {
-                            "compartment_id": gdf_imp["implied_id"],
+                            "protected_area_id": gdf_imp["implied_id"],
                             "kind": "implied",
                             "x": xy[:, 0],
                             "y": xy[:, 1],
@@ -170,7 +170,7 @@ if __name__ == "__main__":
                 ignore_index=True,
             )
             log.info(
-                "Implied compartments of run %s: %d sites at their nearest river point.",
+                "Implied protected areas of run %s: %d sites at their nearest river point.",
                 run["IMPLIED_RUN"],
                 len(gdf_imp),
             )
@@ -284,7 +284,7 @@ if __name__ == "__main__":
             if m["index"] >= 0:
                 list_match.append(
                     {
-                        "compartment_id": site["compartment_id"],
+                        "protected_area_id": site["protected_area_id"],
                         "kind": site["kind"],
                         "source": src,
                         "cell_id": int(npz["cell_id"][m["index"]]),
@@ -303,7 +303,7 @@ if __name__ == "__main__":
         list_match
         or [
             {
-                "compartment_id": "",
+                "protected_area_id": "",
                 "kind": "",
                 "source": "",
                 "cell_id": -1,
@@ -330,9 +330,9 @@ if __name__ == "__main__":
             ignore_index=True,
         )
     df_test = df_test[df_test["outcome"].isin(["held", "flooded"])].drop_duplicates(
-        ["compartment_id", "item_id"]
+        ["protected_area_id", "item_id"]
     )
-    site_of = {cid: i for i, cid in enumerate(sites["compartment_id"])}
+    site_of = {cid: i for i, cid in enumerate(sites["protected_area_id"])}
     acq = (
         pd.to_datetime(df_test["datetime"], utc=True, format="ISO8601")
         .dt.tz_localize(None)
@@ -341,7 +341,7 @@ if __name__ == "__main__":
     window = dis["flooded_window_days"]
     list_event = []
     for (_, row), day in zip(df_test.iterrows(), acq):
-        i = site_of.get(row["compartment_id"])
+        i = site_of.get(row["protected_area_id"])
         if i is None:
             continue
         for src in sources:
@@ -365,7 +365,7 @@ if __name__ == "__main__":
             extrapolated = rp_event > dis["max_rp_extrapolation"]
             list_event.append(
                 {
-                    "compartment_id": row["compartment_id"],
+                    "protected_area_id": row["protected_area_id"],
                     "item_id": row["item_id"],
                     "datetime": row["datetime"],
                     "outcome": row["outcome"],
@@ -380,7 +380,7 @@ if __name__ == "__main__":
     df_ev = pd.DataFrame(
         list_event,
         columns=[
-            "compartment_id",
+            "protected_area_id",
             "item_id",
             "datetime",
             "outcome",
@@ -396,7 +396,7 @@ if __name__ == "__main__":
 
     # --- 3. One return period per test from the sources (source_mode) ---
     list_comb = []
-    for (cid, item), df_t in df_ev.groupby(["compartment_id", "item_id"]):
+    for (cid, item), df_t in df_ev.groupby(["protected_area_id", "item_id"]):
         by = df_t.set_index("source")
         outcome = df_t["outcome"].iloc[0]
         mode = dis["source_mode"]
@@ -429,7 +429,7 @@ if __name__ == "__main__":
         )
         list_comb.append(
             {
-                "compartment_id": cid,
+                "protected_area_id": cid,
                 "item_id": item,
                 "outcome": outcome,
                 "rp_combined": rp_c,
@@ -444,7 +444,7 @@ if __name__ == "__main__":
     df_comb = pd.DataFrame(
         list_comb,
         columns=[
-            "compartment_id",
+            "protected_area_id",
             "item_id",
             "outcome",
             "rp_combined",
@@ -463,53 +463,53 @@ if __name__ == "__main__":
         int(df_comb["source_disagreement"].sum()),
     )
 
-    # --- 4. Bounds per explicit compartment and combination with the model interval (logic of Stage C) ---
-    dc = df_comb[df_comb["compartment_id"].isin(gdf_comp["compartment_id"])]
-    held = dc[dc["outcome"] == "held"].groupby("compartment_id")
-    flooded = dc[dc["outcome"] == "flooded"].groupby("compartment_id")
-    gdf_comp["n_held"] = (
-        gdf_comp["compartment_id"]
+    # --- 4. Bounds per explicit protected area and combination with the model interval (logic of Stage C) ---
+    dc = df_comb[df_comb["protected_area_id"].isin(gdf_pa["protected_area_id"])]
+    held = dc[dc["outcome"] == "held"].groupby("protected_area_id")
+    flooded = dc[dc["outcome"] == "flooded"].groupby("protected_area_id")
+    gdf_pa["n_held"] = (
+        gdf_pa["protected_area_id"]
         .map(held["rp_combined"].count())
         .fillna(0)
         .astype(int)
     )
-    gdf_comp["n_flooded"] = (
-        gdf_comp["compartment_id"]
+    gdf_pa["n_flooded"] = (
+        gdf_pa["protected_area_id"]
         .map(flooded["rp_combined"].count())
         .fillna(0)
         .astype(int)
     )
-    gdf_comp["obs_rp_low"] = gdf_comp["compartment_id"].map(held["rp_combined"].max())
-    gdf_comp["obs_rp_high"] = gdf_comp["compartment_id"].map(
+    gdf_pa["obs_rp_low"] = gdf_pa["protected_area_id"].map(held["rp_combined"].max())
+    gdf_pa["obs_rp_high"] = gdf_pa["protected_area_id"].map(
         flooded["rp_combined"].min()
     )
     for s in ("glofas", "efas"):
-        gdf_comp[f"rp_obs_low_{s}"] = gdf_comp["compartment_id"].map(
+        gdf_pa[f"rp_obs_low_{s}"] = gdf_pa["protected_area_id"].map(
             held[f"rp_{s}"].max()
         )
-        gdf_comp[f"rp_obs_high_{s}"] = gdf_comp["compartment_id"].map(
+        gdf_pa[f"rp_obs_high_{s}"] = gdf_pa["protected_area_id"].map(
             flooded[f"rp_{s}"].min()
         )
-    used = dc.groupby("compartment_id")["used"].agg(
+    used = dc.groupby("protected_area_id")["used"].agg(
         lambda u: "both" if "both" in set(u) or len(set(u)) > 1 else next(iter(set(u)))
     )
-    gdf_comp["obs_source"] = gdf_comp["compartment_id"].map(used).fillna("")
-    gdf_comp["source_disagreement"] = (
-        gdf_comp["compartment_id"]
-        .map(dc.groupby("compartment_id")["source_disagreement"].any())
+    gdf_pa["obs_source"] = gdf_pa["protected_area_id"].map(used).fillna("")
+    gdf_pa["source_disagreement"] = (
+        gdf_pa["protected_area_id"]
+        .map(dc.groupby("protected_area_id")["source_disagreement"].any())
         .fillna(False)
         .astype(bool)
     )
-    gdf_comp["obs_conflict"] = (
-        gdf_comp["obs_rp_low"] > gdf_comp["obs_rp_high"]
-    ).fillna(False)
-    gdf_comp["model_obs_conflict"] = False
+    gdf_pa["obs_conflict"] = (gdf_pa["obs_rp_low"] > gdf_pa["obs_rp_high"]).fillna(
+        False
+    )
+    gdf_pa["model_obs_conflict"] = False
     for s in sources:
-        part = sites[sites["kind"] == "explicit"].set_index("compartment_id")
+        part = sites[sites["kind"] == "explicit"].set_index("protected_area_id")
         for col in ("cell", "distance_km", "ratio", "same_river", "match_quality"):
-            values = gdf_comp["compartment_id"].map(part[f"{s}_{col}"])
+            values = gdf_pa["protected_area_id"].map(part[f"{s}_{col}"])
             if col == "cell":
-                gdf_comp[f"{s}_cell_id"] = [
+                gdf_pa[f"{s}_cell_id"] = [
                     (
                         int(data[s]["npz"]["cell_id"][int(v)])
                         if v is not None and int(v) >= 0
@@ -518,7 +518,7 @@ if __name__ == "__main__":
                     for v in values
                 ]
             else:
-                gdf_comp[f"{s}_{col}"] = values.to_numpy()
+                gdf_pa[f"{s}_{col}"] = values.to_numpy()
     cases = {
         "combined": 0,
         "model_obs_conflict": 0,
@@ -526,8 +526,8 @@ if __name__ == "__main__":
         "override_kept": 0,
     }
     log_classes = np.log(classes)
-    for i in gdf_comp.index[(gdf_comp["n_held"] + gdf_comp["n_flooded"]) > 0]:
-        row = gdf_comp.loc[i]
+    for i in gdf_pa.index[(gdf_pa["n_held"] + gdf_pa["n_flooded"]) > 0]:
+        row = gdf_pa.loc[i]
         if row["rp_source_prior"] == "override":
             cases["override_kept"] += 1
             continue
@@ -541,7 +541,7 @@ if __name__ == "__main__":
         if low > high:
             # The observations contradict the model interval: only the observed interval is used, a side without
             # observations stays open.
-            gdf_comp.loc[i, "model_obs_conflict"] = True
+            gdf_pa.loc[i, "model_obs_conflict"] = True
             cases["model_obs_conflict"] += 1
             low, high = obs_low, obs_high
         else:
@@ -557,24 +557,24 @@ if __name__ == "__main__":
             low = classes[max(k - 1, 0)]
         if not np.isfinite(high):
             high = classes[min(k + 1, len(classes) - 1)]
-        gdf_comp.loc[i, "rp"] = snapped_rp
-        gdf_comp.loc[i, "rp_low"] = min(low, snapped_rp)
-        gdf_comp.loc[i, "rp_high"] = max(high, snapped_rp)
-        gdf_comp.loc[i, "rp_source"] = f"{row['rp_source_prior']}+obs"
+        gdf_pa.loc[i, "rp"] = snapped_rp
+        gdf_pa.loc[i, "rp_low"] = min(low, snapped_rp)
+        gdf_pa.loc[i, "rp_high"] = max(high, snapped_rp)
+        gdf_pa.loc[i, "rp_source"] = f"{row['rp_source_prior']}+obs"
     for column in ["rp", "rp_low", "rp_high"]:
-        gdf_comp[column] = gdf_comp[column].astype(float)
-    gis.Vector.write_gpkg(gdf_comp, out_dir / "compartments_rp.gpkg")
+        gdf_pa[column] = gdf_pa[column].astype(float)
+    gis.Vector.write_gpkg(gdf_pa, out_dir / "protected_areas_rp.gpkg")
     narrowed = int(
         (
-            (gdf_comp["rp_low"] > gdf_comp["rp_low_prior"])
-            | (gdf_comp["rp_high"] < gdf_comp["rp_high_prior"])
+            (gdf_pa["rp_low"] > gdf_pa["rp_low_prior"])
+            | (gdf_pa["rp_high"] < gdf_pa["rp_high_prior"])
         ).sum()
     )
     log.info(
-        "Observed bounds: %s; %d intervals narrowed. compartments_rp.gpkg updated (%d compartments).",
+        "Observed bounds: %s; %d intervals narrowed. protected_areas_rp.gpkg updated (%d protected areas).",
         ", ".join(f"{k} {v}" for k, v in cases.items()),
         narrowed,
-        len(gdf_comp),
+        len(gdf_pa),
     )
 
     # --- Plots: match_map, fit, event, source_comparison, summary ---
@@ -607,14 +607,16 @@ if __name__ == "__main__":
         ]
         flag_m = [
             c
-            for c in matched["compartment_id"]
+            for c in matched["protected_area_id"]
             if any(
                 sites.loc[site_of[c], f"{s}_match_quality"] == "weak" for s in sources
             )
         ]
         # match_map: one panel per source in offsets from the source river cell, cells coloured by the upstream
         # area ratio, the search radius and the band that counts as the same river
-        for name in plots.select("match_map", list(matched["compartment_id"]), flag_m):
+        for name in plots.select(
+            "match_map", list(matched["protected_area_id"]), flag_m
+        ):
             site = sites.loc[site_of[name]]
             reach_km = max(dis[s]["search_radius_km"] for s in sources)
             box = shapely.box(
@@ -660,7 +662,7 @@ if __name__ == "__main__":
                             *((np.asarray(g.coords) - origin) / 1000).T,
                             color=INK["secondary"],
                             lw=1.6,
-                            label="river of the compartment",
+                            label="river of the protected area",
                         )
                 c = dis[s]
                 ax.add_patch(
@@ -777,7 +779,7 @@ if __name__ == "__main__":
         rp_line = np.logspace(
             np.log10(1.01), np.log10(dis["max_rp_extrapolation"]), 200
         )
-        for name in plots.select("fit", list(matched["compartment_id"]), flag_m):
+        for name in plots.select("fit", list(matched["protected_area_id"]), flag_m):
             site = sites.loc[site_of[name]]
             fig, ax = plt.subplots(figsize=(7.5, 4.8), layout="constrained")
             parts = []
@@ -834,15 +836,18 @@ if __name__ == "__main__":
         # event: one panel per matched source (own y-axis) with the RP thresholds of its fit and the discharge the
         # event return period comes from
         tests_ids = [
-            f"{c}__{i}" for c, i in zip(df_comb["compartment_id"], df_comb["item_id"])
+            f"{c}__{i}"
+            for c, i in zip(df_comb["protected_area_id"], df_comb["item_id"])
         ]
         flag_e = [t_ for t_, d_ in zip(tests_ids, df_comb["source_disagreement"]) if d_]
         for name in plots.select("event", tests_ids, flag_e):
             cid, item = name.split("__")
             row = df_comb[
-                (df_comb["compartment_id"] == cid) & (df_comb["item_id"] == item)
+                (df_comb["protected_area_id"] == cid) & (df_comb["item_id"] == item)
             ].iloc[0]
-            df_e = df_ev[(df_ev["compartment_id"] == cid) & (df_ev["item_id"] == item)]
+            df_e = df_ev[
+                (df_ev["protected_area_id"] == cid) & (df_ev["item_id"] == item)
+            ]
             day = np.datetime64(
                 pd.Timestamp(df_e["datetime"].iloc[0]).tz_localize(None).date(), "D"
             )
@@ -1034,7 +1039,7 @@ if __name__ == "__main__":
         plots.save(
             fig, "source_comparison", "source_comparison", {"tests_both": len(both)}
         )
-        # summary: matches by quality, event RP distribution per source, compartment flags
+        # summary: matches by quality, event RP distribution per source, protected area flags
         plots.select("summary", ["summary"])
         fig, axes = plt.subplots(1, 3, figsize=(14, 4.6), layout="constrained")
         qual = (
@@ -1058,7 +1063,7 @@ if __name__ == "__main__":
                 bars, fmt="%d", fontsize=8, color=INK["secondary"], padding=2
             )
         axes[0].set_xticks(x, qual.index)
-        axes[0].set_ylabel("Sites (compartments)")
+        axes[0].set_ylabel("Sites (protected areas)")
         axes[0].set_title(f"Matches by quality ({len(sites)} sites)", loc="left")
         axes[0].legend(fontsize=8)
         bins = np.logspace(0, np.log10(dis["max_rp_extrapolation"]), 13)
@@ -1082,16 +1087,16 @@ if __name__ == "__main__":
             "narrowed": narrowed,
             "obs_conflict": cases["obs_conflict"],
             "model_obs_conflict": cases["model_obs_conflict"],
-            "source_disagreement": int(gdf_comp["source_disagreement"].sum()),
+            "source_disagreement": int(gdf_pa["source_disagreement"].sum()),
         }
         bars = axes[2].bar(
             range(len(counts)), list(counts.values()), color=INK["secondary"], width=0.3
         )
         axes[2].bar_label(bars, fmt="%d", fontsize=8, color=INK["secondary"], padding=2)
         axes[2].set_xticks(range(len(counts)), list(counts.keys()), rotation=15)
-        axes[2].set_ylabel("Compartments")
+        axes[2].set_ylabel("Protected areas")
         axes[2].set_title(
-            f"Explicit compartments ({len(gdf_comp)}, {int(((gdf_comp['n_held'] + gdf_comp['n_flooded']) > 0).sum())} with tests)",
+            f"Explicit protected areas ({len(gdf_pa)}, {int(((gdf_pa['n_held'] + gdf_pa['n_flooded']) > 0).sum())} with tests)",
             loc="left",
         )
         for ax in axes:

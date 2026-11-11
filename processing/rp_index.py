@@ -1,6 +1,6 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
-# Estimates a return period of protection per compartment from exposure (GHSL building volume valued with JRC-based
+# Estimates a return period of protection per protected area from exposure (GHSL building volume valued with JRC-based
 # maximum damages and depth-damage curves, plus the land cover value of HAND_YZ.py when enabled) per metre of levee
 # and from the river size (upstream area).
 
@@ -22,7 +22,7 @@ import gis
 CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
 FORCE = False  # recompute the exposure of units that are already finished
-UNITS = []  # unit ids to process; empty = all units with compartments
+UNITS = []  # unit ids to process; empty = all units with protected areas
 
 KEYS = [
     "general.work_dir",
@@ -68,7 +68,7 @@ def index_unit(task):
     labels_ds = gdal.Open(str(unit_dir / "labels.tif"))
     gt, wkt = labels_ds.GetGeoTransform(), labels_ds.GetProjection()
     labels = labels_ds.ReadAsArray()
-    # Only the bounding box of the unit's kept compartments is valued.
+    # Only the bounding box of the unit's kept protected areas is valued.
     kept = np.isin(labels, np.array(list(task["levels"]), dtype=labels.dtype))
     rows_any, cols_any = np.flatnonzero(kept.any(axis=1)), np.flatnonzero(
         kept.any(axis=0)
@@ -86,7 +86,7 @@ def index_unit(task):
     rows, cols = labels.shape
     bounds = (gt[0], gt[3] - rows * res, gt[0] + cols * res, gt[3])
 
-    # Protection level of each kept compartment as a per-cell raster; depth of water below it.
+    # Protection level of each kept protected area as a per-cell raster; depth of water below it.
     level = np.full(labels.max() + 1, np.nan, np.float32)
     level[np.array(list(task["levels"]), dtype=np.int64)] = list(
         task["levels"].values()
@@ -160,7 +160,7 @@ def index_unit(task):
         "total_ratio": checks,
         "peak_rss_mb": gis.Run.peak_rss_mb(),
         "summary": (
-            f"unit {task['unit_id']}: {len(df_res)} compartments valued in {seconds:.1f} s; warped/source "
+            f"unit {task['unit_id']}: {len(df_res)} protected areas valued in {seconds:.1f} s; warped/source "
             "volume " + ", ".join(f"{k} {v:.4f}" for k, v in checks.items())
         ),
     }
@@ -185,14 +185,14 @@ if __name__ == "__main__":
         general["gdal_cachemax_mb"], general["gdal_threads_per_worker"]
     )
     list_need = [
-        out_dir / "compartments.gpkg",
+        out_dir / "protected_areas.gpkg",
         out_dir / "barriers.gpkg",
         out_dir / "ghsl_total.vrt",
         out_dir / "ghsl_non_residential.vrt",
     ]
     if not all(path.exists() for path in list_need):
         raise SystemExit(
-            f"Missing inputs {[str(p) for p in list_need if not p.exists()]}; run compartments.py "
+            f"Missing inputs {[str(p) for p in list_need if not p.exists()]}; run protected_areas.py "
             "and download_ghsl.py first."
         )
     if not country["river_upstream_area_field"] and not country["upstream_area_raster"]:
@@ -242,9 +242,9 @@ if __name__ == "__main__":
     )
 
     # --- Exposure per unit (parallel, checkpointed) ---
-    gdf_comp = gpd.read_file(out_dir / "compartments.gpkg")
-    wkt = gdf_comp.crs.to_wkt()
-    list_unit = sorted(gdf_comp["unit_id"].unique())
+    gdf_pa = gpd.read_file(out_dir / "protected_areas.gpkg")
+    wkt = gdf_pa.crs.to_wkt()
+    list_unit = sorted(gdf_pa["unit_id"].unique())
     if run["UNITS"]:
         list_unit = [u for u in list_unit if u in run["UNITS"]]
     list_task, list_skip = [], []
@@ -258,7 +258,7 @@ if __name__ == "__main__":
         ):
             list_skip.append(unit_id)
             continue
-        gdf_mem = gdf_comp[gdf_comp["unit_id"] == unit_id]
+        gdf_mem = gdf_pa[gdf_pa["unit_id"] == unit_id]
         list_task.append(
             {
                 "unit_id": unit_id,
@@ -283,7 +283,7 @@ if __name__ == "__main__":
             }
         )
     log.info(
-        "Units with compartments: %d to process, %d finished and skipped.",
+        "Units with protected areas: %d to process, %d finished and skipped.",
         len(list_task),
         len(list_skip),
     )
@@ -320,10 +320,10 @@ if __name__ == "__main__":
         ],
         ignore_index=True,
     )
-    gdf_rp = gdf_comp.merge(df_val, on=["unit_id", "unit_label"], how="left")
+    gdf_rp = gdf_pa.merge(df_val, on=["unit_id", "unit_label"], how="left")
     if gdf_rp["value_exposed"].isna().any():
         log.warning(
-            "%d compartments have no exposure value (units not processed).",
+            "%d protected areas have no exposure value (units not processed).",
             int(gdf_rp["value_exposed"].isna().sum()),
         )
     # Land cover exposure (HAND_YZ.py) supplements the building value.
@@ -337,14 +337,14 @@ if __name__ == "__main__":
             )
         df_lulc = pd.read_csv(lulc_path).drop(columns=["unit_id", "unit_label"])
         gdf_rp = gdf_rp.drop(columns="value_lulc").merge(
-            df_lulc, on="compartment_id", how="left"
+            df_lulc, on="protected_area_id", how="left"
         )
         if gdf_rp["value_lulc"].isna().any():
             log.warning(
-                "%d compartments have no land cover value (HAND_YZ.py not run for their units); 0 is used.",
+                "%d protected areas have no land cover value (HAND_YZ.py not run for their units); 0 is used.",
                 int(gdf_rp["value_lulc"].isna().sum()),
             )
-        list_lulc_col = [c for c in df_lulc.columns if c != "compartment_id"]
+        list_lulc_col = [c for c in df_lulc.columns if c != "protected_area_id"]
         gdf_rp[list_lulc_col] = gdf_rp[list_lulc_col].fillna(0.0)
         gdf_rp["value_exposed"] = gdf_rp["value_ghsl"] + gdf_rp["value_lulc"]
         log.info(
@@ -391,11 +391,11 @@ if __name__ == "__main__":
     missing_area = ~(gdf_rp["upstream_area_km2"] > 0)
     if missing_area.any():
         log.warning(
-            "%d compartments have no upstream area; their score uses the value term only.",
+            "%d protected areas have no upstream area; their score uses the value term only.",
             int(missing_area.sum()),
         )
 
-    # --- Score and quantile mapping (compartments with levees only) ---
+    # --- Score and quantile mapping (protected areas with levees only) ---
     scored = ~gdf_rp["no_levee"]
     gdf_rp["v_rel"] = np.where(
         scored, gdf_rp["value_exposed"] / gdf_rp["levee_length_m"].where(scored), np.nan
@@ -462,7 +462,7 @@ if __name__ == "__main__":
         conflicts = gdf_sjoin_ovr_rp.groupby("index_right")["rp"].nunique()
         if (conflicts > 1).any():
             log.warning(
-                "%d compartments contain override points with different rp; the first is used.",
+                "%d protected areas contain override points with different rp; the first is used.",
                 int((conflicts > 1).sum()),
             )
         gdf_first = gdf_sjoin_ovr_rp.drop_duplicates("index_right").set_index(
@@ -472,16 +472,16 @@ if __name__ == "__main__":
             gdf_first["rp"].astype(float).to_numpy()[:, None], 3, axis=1
         )
         gdf_rp.loc[gdf_first.index, "rp_source"] = "override"
-        log.info("Overrides applied to %d compartments.", len(gdf_first))
+        log.info("Overrides applied to %d protected areas.", len(gdf_first))
 
     for column, value in OBSERVATION_COLUMNS.items():
         gdf_rp[column] = value
     for column in ["rp_model", "rp_cap", "rp", "rp_low", "rp_high"]:
         gdf_rp[column] = gdf_rp[column].astype(float)
-    gis.Vector.write_gpkg(gdf_rp, out_dir / "compartments_rp.gpkg")
+    gis.Vector.write_gpkg(gdf_rp, out_dir / "protected_areas_rp.gpkg")
     shares = gdf_rp.loc[scored, "rp_model"].value_counts(normalize=True).sort_index()
     log.info(
-        "Model classes (share of compartments with levees): %s; targets %s.",
+        "Model classes (share of protected areas with levees): %s; targets %s.",
         ", ".join(f"{int(k)}: {v:.2f}" for k, v in shares.items()),
         ", ".join(
             f"{c}: {s:.2f}"
@@ -489,7 +489,7 @@ if __name__ == "__main__":
         ),
     )
     log.info(
-        "RP sources: %s. compartments_rp.gpkg written (%d compartments).",
+        "RP sources: %s. protected_areas_rp.gpkg written (%d protected areas).",
         ", ".join(f"{k} {v}" for k, v in gdf_rp["rp_source"].value_counts().items()),
         len(gdf_rp),
     )
