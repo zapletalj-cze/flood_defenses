@@ -210,7 +210,8 @@ async function runStep(module) {
   }
 }
 async function runCore() {
-  const list = S.state.steps.filter((s) => s.group === "core");
+  // the core steps without the optional transport embankments (they need transport_lines)
+  const list = S.state.steps.filter((s) => s.group === "core" && s.module !== "processing.transport_embankments");
   if (!confirm(`Queue the core pipeline for ${S.country}?\n\n${list.map((s, i) => `${i + 1}. ${s.title}`).join("\n")}`)) return;
   for (const s of list) {
     await api("/api/run", { module: s.module, country: S.country, variables: variablesOf(s) });

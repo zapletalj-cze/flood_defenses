@@ -34,6 +34,7 @@ OPTIONAL = [
     "processing.discharge_prepare",
     "processing.rp_bounds",
     "processing.validate",
+    "processing.transport_embankments",
 ]
 
 if __name__ == "__main__":
@@ -141,6 +142,17 @@ if __name__ == "__main__":
             "upstream area",
             False,
             "set river_upstream_area_field (column name) or upstream_area_raster",
+        )
+    for path in gis.Config.as_list(country.get("transport_lines")):
+        add(
+            "inputs (optional)",
+            f"transport_lines {Path(path).name}",
+            Path(path).exists(),
+            (
+                "road and railway lines to examine for embankments"
+                if Path(path).exists()
+                else "file not found"
+            ),
         )
     for path in gis.Config.as_list(country.get("river_guides")):
         add(

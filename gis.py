@@ -14,6 +14,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from math import acos, ceil, degrees, floor, sqrt
@@ -3079,6 +3080,70 @@ class Hydro:
         return end_low, along_min
 
     @staticmethod
+    def embankment_stations(t, z, params):
+        """
+        Cross-sections of a linear structure (road, railway) evaluated per station: crest, terrain on both sides,
+        heights, footprint and class. Classes: 1 embankment (terrain drops on both sides by at least min_height_m),
+        2 one-sided (only one side drops), 3 cutting (the line lies min_height_m below the terrain on both sides),
+        0 at grade, -1 no data.
+        :param t: offsets along the normal (negative = left of the line direction)
+        :param z: (n, len(t)) DTM values of the profiles, NaN = nodata
+        :param params: dict crest_search_m, side_near_m, side_far_m, min_height_m, footprint_fraction
+        :return: dict of arrays crest_z, line_z, terrain_left, terrain_right, height_left, height_right,
+                 footprint_m, cls
+        """
+        p = params
+        a = np.abs(t)
+        with np.errstate(invalid="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            crest = np.nanmax(np.where(a <= p["crest_search_m"], z, np.nan), axis=1)
+            line_z = np.nanmedian(
+                np.where(
+                    a <= max(p["crest_search_m"] / 4, abs(t[1] - t[0])), z, np.nan
+                ),
+                axis=1,
+            )
+            band_l = (t <= -p["side_near_m"]) & (t >= -p["side_far_m"])
+            band_r = (t >= p["side_near_m"]) & (t <= p["side_far_m"])
+            terrain_l = np.nanmedian(np.where(band_l, z, np.nan), axis=1)
+            terrain_r = np.nanmedian(np.where(band_r, z, np.nan), axis=1)
+            height_l, height_r = crest - terrain_l, crest - terrain_r
+            # footprint: from the crest outwards to the first cell within footprint_fraction of the height above
+            # the terrain of that side
+            foot = np.zeros(len(z))
+            for side, terrain, height in (
+                (-1, terrain_l, height_l),
+                (1, terrain_r, height_r),
+            ):
+                limit = terrain + p["footprint_fraction"] * np.maximum(height, 0)
+                reach = np.where(
+                    (np.sign(t) == side) & (a <= p["side_near_m"]), a, np.inf
+                )[None, :] + np.where(z <= limit[:, None], 0.0, np.inf)
+                foot += np.where(
+                    np.isfinite(reach.min(axis=1)), reach.min(axis=1), p["side_near_m"]
+                )
+        h = p["min_height_m"]
+        up_l, up_r = height_l >= h, height_r >= h
+        cls = np.zeros(len(z), np.int8)
+        cls[up_l ^ up_r] = 2
+        cls[up_l & up_r] = 1
+        cut = (line_z <= terrain_l - h) & (line_z <= terrain_r - h)
+        cls[cut & ~(up_l | up_r)] = 3
+        cls[~(np.isfinite(crest) & np.isfinite(terrain_l) & np.isfinite(terrain_r))] = (
+            -1
+        )
+        return {
+            "crest_z": crest,
+            "line_z": line_z,
+            "terrain_left": terrain_l,
+            "terrain_right": terrain_r,
+            "height_left": height_l,
+            "height_right": height_r,
+            "footprint_m": foot,
+            "cls": cls,
+        }
+
+    @staticmethod
     def first_event_on_path(order, seeds, event, starts):
         """
         Follows the paths of a priority flood back from start cells towards their seed and reports the first cell
@@ -4345,6 +4410,22 @@ class Config:
         "levee_gaps.max_gap_m": "float",
         "levee_gaps.crest_tolerance_m": "float",
         "leaks.sample_spacing_m": "float",
+        "country.transport_lines": "opt_paths",
+        "transport.station_spacing_m": "float",
+        "transport.half_width_m": "float",
+        "transport.crest_search_m": "float",
+        "transport.side_near_m": "float",
+        "transport.side_far_m": "float",
+        "transport.min_height_m": "float",
+        "transport.footprint_fraction": "float",
+        "transport.min_segment_m": "float",
+        "transport.break_window_m": "float",
+        "transport.break_depth_m": "float",
+        "transport.max_opening_m": "float",
+        "transport.culvert_window_m": "float",
+        "transport.culvert_min_depth_m": "float",
+        "transport.stream_distance_m": "float",
+        "transport.cross_sections_per_class": "int",
         "river_snap.densify_m": "float",
         "river_snap.guide_search_m": "float",
         "river_snap.guide_max_shift_m": "float",
@@ -4653,6 +4734,23 @@ class Config:
         "levee_gaps.max_gap_m": 200.0,
         "levee_gaps.crest_tolerance_m": 0.5,
         "leaks.sample_spacing_m": 50.0,
+        # transport embankments from the DTM (Stage G step 3; also in config/advanced.toml)
+        "country.transport_lines": [],
+        "transport.station_spacing_m": 10.0,
+        "transport.half_width_m": 40.0,
+        "transport.crest_search_m": 6.0,
+        "transport.side_near_m": 12.0,
+        "transport.side_far_m": 30.0,
+        "transport.min_height_m": 0.5,
+        "transport.footprint_fraction": 0.2,
+        "transport.min_segment_m": 50.0,
+        "transport.break_window_m": 150.0,
+        "transport.break_depth_m": 1.0,
+        "transport.max_opening_m": 150.0,
+        "transport.culvert_window_m": 100.0,
+        "transport.culvert_min_depth_m": 0.3,
+        "transport.stream_distance_m": 10.0,
+        "transport.cross_sections_per_class": 6,
         # comparison zone of the GFM tests, also the margin of the group rasters of file B
         "evidence.comparison_distance_m": 2000.0,
         # river snapping (Stage G): values of the snapping procedure the method follows
@@ -5579,6 +5677,40 @@ class Http:
 
 
 class Stats:
+    @staticmethod
+    def runs(values, min_length=1):
+        """
+        Runs of equal values in a sequence; runs shorter than min_length take the value of the run before them
+        (the first run: of the run after it), then neighbours with the same value are joined
+        :param values: 1D sequence
+        :param min_length: shortest run kept
+        :return: list of (start index, end index exclusive, value)
+        """
+        values = list(values)
+        list_run = []
+        for k, v in enumerate(values):
+            if list_run and list_run[-1][2] == v:
+                list_run[-1][1] = k + 1
+            else:
+                list_run.append([k, k + 1, v])
+        changed = True
+        while changed and len(list_run) > 1:
+            changed = False
+            for k, (s, e, v) in enumerate(list_run):
+                if e - s < min_length:
+                    other = list_run[k - 1] if k > 0 else list_run[k + 1]
+                    list_run[k][2] = other[2]
+                    changed = True
+                    break
+            joined = [list_run[0]]
+            for s, e, v in list_run[1:]:
+                if joined[-1][2] == v:
+                    joined[-1][1] = e
+                else:
+                    joined.append([s, e, v])
+            list_run = joined
+        return [tuple(r) for r in list_run]
+
     @staticmethod
     def gumbel_lmoments(sample):
         """

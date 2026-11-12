@@ -108,6 +108,15 @@ STEPS = [
         "protected_areas",
     ),
     (
+        "processing.transport_embankments",
+        "core",
+        "Transport embankments",
+        "Road and railway embankments from the DTM, their openings (optional: transport_lines)",
+        ["RUN_ID"],
+        ["transport_embankments.gpkg", "openings.gpkg"],
+        "transport_embankments",
+    ),
+    (
         "download.download_ghsl",
         "core",
         "Building volume (GHSL)",

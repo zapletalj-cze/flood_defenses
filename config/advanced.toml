@@ -117,6 +117,7 @@ reference_protected_areas = []  # optional, validation only
 reference_rp_field = ""         # optional
 validation_extent = []          # optional polygons; validate.py clips both layers to them
 overrides = ""                  # optional point file with columns rp and note
+transport_lines = []            # optional: road and railway lines you prepare; only where to look, the DTM decides
 working_resolution_m = 10.0      # processing grid; terrain is averaged from the native DTM
 corridor_buffer_m = 3000.0      # river buffer defining the processed corridor
 unit_core_size_m = 20000.0      # square unit cores, aligned to the working grid
@@ -275,6 +276,25 @@ straight_length_factor = 0.25
 straight_max_deviation_m = 2.0     # a nearly straight vertex is removed only this close to its neighbours' chord
 spike_passes = 6
 band_rows = 512                    # DTM rows read at a time
+
+# Transport embankments from the DTM (transport_embankments.py): cross-sections along the lines of transport_lines,
+# class per station (embankment, one-sided, cutting, at grade), openings (bridges, underpasses, probable culverts).
+[transport]
+station_spacing_m = 10.0        # cross-sections along each line
+half_width_m = 40.0             # profile length on each side
+crest_search_m = 6.0            # crest = highest cell within this distance of the line
+side_near_m = 12.0              # terrain of a side: median of the profile between side_near_m
+side_far_m = 30.0               # ... and side_far_m from the line
+min_height_m = 0.5              # embankment: crest at least this much above the terrain of a side
+footprint_fraction = 0.2        # footprint ends where the slope is within this share of the height above the terrain
+min_segment_m = 50.0            # shorter class changes along a line are absorbed by their neighbour
+break_window_m = 150.0          # reference crest: running median over this length
+break_depth_m = 1.0             # bridge or underpass: crest at least this much below the reference crest
+max_opening_m = 150.0           # longer breaks are gaps between separate embankments, not openings
+culvert_window_m = 100.0        # probable culvert: lowest terrain of both sides within this distance along the line
+culvert_min_depth_m = 0.3       # ... at least this much below the terrain on both sides along the line
+stream_distance_m = 10.0        # a river line this close to an opening or crossing an embankment marks drainage
+cross_sections_per_class = 6    # cross-section plots per class
 
 [sources]
 request_pause_s = 1.0           # pause between requests; retry k waits request_pause_s * 2**k

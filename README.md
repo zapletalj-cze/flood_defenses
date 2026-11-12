@@ -224,6 +224,7 @@ processing/
   discharge_prepare.py     daily series per river cell, annual maxima, Gumbel fits (Stage F)
   rp_bounds.py             matching to discharge cells, event return periods, source combination, bounds
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
+  transport_embankments.py road and railway embankments from the DTM, their openings (Stage G step 3)
 tests/
   test_kernels.py          numba kernels on small grids (21 checks)
   test_pipeline.py         end-to-end synthetic countries for Stage A and G (45 checks)
@@ -234,6 +235,7 @@ tests/
   test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7, E4: 8, E5: 7 checks)
   test_stage_f.py          Stage F on its own synthetic country T6 (16 checks)
   test_gui.py              server of the GUI on a synthetic setup (15 checks)
+  test_transport.py        transport embankments on a synthetic country T7 (15 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -421,6 +423,7 @@ Keys beyond the original schema, with the reason for each:
 | 2 | `build_units.py` | `corridor.gpkg`, `units_core.gpkg`, `units_window.gpkg`, `units.csv`, `work/<c>/units_domain.gpkg` |
 | 3 (optional) | `prepare_dtm.py` with `convert_dtm = true` | tiled copies in `work/<c>/dtm/`; `dtm.vrt` repointed to them |
 | 6 | `protected_areas.py` (first two units, then all) | `rivers_channel.gpkg`, `river_groups.gpkg`, `levees_crest.gpkg`; per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `protected_areas.gpkg`, `protected_areas_by_group.gpkg`, `leaks.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `protected_areas.gpkg` (file A), `protected_areas_by_group.gpkg` (file B), `leaks.gpkg`, `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
+| 6a (optional) | `transport_embankments.py` (needs `transport_lines`) | `transport_embankments.gpkg`, `openings.gpkg`, `plots/transport/<RUN_ID>/` |
 | 7 | `download_ghsl.py` | `ghsl_total.vrt`, `ghsl_non_residential.vrt`, `ghsl_sources.json` |
 | D1 (Stage D) | `prepare_dtm.py` with `dsm`; `download_ghsl.py` with `smod`, `pop` | `dsm_inspection.csv`, `dsm_benchmark.csv`, `dsm_footprint.gpkg`; `ghsl_smod.vrt`, `ghsl_pop.vrt` |
 | D1 (Stage D) | `download_clms.py`, then `context_zones.py` | `corine_codes.tif`, `urban_atlas.gpkg`, `clms_sources.json`; `zones.gpkg` |
@@ -766,6 +769,96 @@ offset and tolerances come from the existing keys.
 **Test** (Stage B, crossings open): rings 1 and 2 leak through the streams inside them
 (`water_source_behind` at the stream cells, 1400 m of levee each, 2.5 m of protection
 lost); ring 3 does not leak. Pipeline: the open gap of C_wide is found as free line ends.
+
+### 5.11 Transport embankments from the DTM (`transport_embankments.py`)
+
+Road and railway embankments in the floodplain can hold water back like levees. The
+lines you list in `countries.<code>.transport_lines` (a file you prepare, e.g. roads and
+railways) only show **where to look**. Their attributes are not used: every decision comes
+from the DTM.
+
+```mermaid
+flowchart TD
+    L["transport_lines inside the corridor"] --> S["Stations every station_spacing_m"]
+    S --> P["Cross-section of the native DTM, half_width_m to both sides"]
+    P --> C["Crest: highest cell within crest_search_m;
+    terrain of each side: median between side_near_m and side_far_m"]
+    C --> K{"crest − terrain ≥ min_height_m?"}
+    K -- "both sides" --> E["embankment"]
+    K -- "one side" --> O["one_sided"]
+    K -- "neither; the line min_height_m below both sides" --> CU["cutting"]
+    K -- "neither" --> G["at_grade"]
+    E & O & CU & G --> F{"HAND of the units ≤ max_level_m?"}
+    F -- no --> X["outside_floodplain"]
+    F -- yes --> R["Segments: runs of one class; changes shorter
+    than min_segment_m absorbed → transport_embankments.gpkg"]
+    R --> B["Embankment segments: crest every native pixel;
+    drop ≥ break_depth_m below the running median, embankment on both sides,
+    at most max_opening_m → bridge (river within stream_distance_m) or underpass"]
+    R --> V["Probable culverts: a mapped stream crossing the embankment (high), or the
+    terrain of both sides lowest along the line by ≥ culvert_min_depth_m (medium; low below 2×)"]
+    B & V --> OP["openings.gpkg"]
+```
+
+**Classes per station:**
+
+| Class | Profile |
+|---|---|
+| `embankment` | crest at least `min_height_m` above the terrain on **both** sides; only these are barriers |
+| `one_sided` | above the terrain on one side only (a road on a hillside bench) |
+| `cutting` | the line lies `min_height_m` below the terrain on both sides |
+| `at_grade` | none of these |
+| `outside_floodplain` | HAND of the units above `protected_areas.max_level_m` |
+
+**Openings** (`openings.gpkg`; `type`, `width_m`, `invert_z`, `crest_z`, `confidence`,
+`evidence`):
+- **Bridges and underpasses** are breaks in the crest. The crest is followed at every
+  native pixel along embankment segments, so openings narrower than the station spacing
+  are found too. The width is the length of the break and the invert the lowest DTM cell
+  in it. Confidence is high, because the break is visible in the DTM.
+- **Probable culverts** are not visible in the DTM. They are inferred where water must
+  cross the embankment:
+  - a mapped river line crosses it (high confidence);
+  - the terrain of **both** sides is lowest along the line, i.e. a valley passes under a
+    continuous crest (medium confidence when at least twice `culvert_min_depth_m` deep,
+    low below that).
+
+  Their width is unknown (NaN). The invert is the lower side terrain.
+
+**Segments** (`transport_embankments.gpkg`): `class`, `length_m`, `crest_z_min`,
+`crest_z_median`, `height_left_m`, `height_right_m`, `height_min_m` (lower side),
+`footprint_m`, `hand_median_m`, `openings`, `line_id`, `source`.
+
+**Plots** (`plots/transport/<RUN_ID>/index.html`):
+- cross-sections of sample stations per class (`cross_sections_per_class`);
+- crest profiles along embankments, the crest at every pixel, openings marked;
+- a map of the classes and openings;
+- a summary.
+
+**Parameters** (`[transport]` in `config/advanced.toml`): the defaults in the diagram
+were set on the synthetic tests. **Check them on your pilot units**: the cross-sections
+show whether `side_near_m`/`side_far_m` reach beyond the footprint of your embankments,
+and the crest profiles whether `break_depth_m` separates bridges from crest noise.
+
+**Measured** (benchmark DTM at 1 m, 78 km of lines inside the corridor, 7 828 stations):
+- 6–18 s in total (warm and cold disk cache);
+- profiles 3.4–7.4 s, floodplain test 0.6–4.8 s;
+- peak memory 1.2 GB.
+
+The time grows with the length of the lines and with the DTM pixels per profile (91 at
+1 m, 9 at 10 m).
+
+**Not yet:** the embankments do not enter the barriers yet. Integration (lowest-priority
+barrier class, culverts open or closed, protected areas relying on embankments marked,
+comparison with and without) is the next step.
+
+**Test** (`pixi run test-transport`, 15 checks, synthetic country T7):
+- **classes:** an embankment, a cutting through a ridge, a road at grade, a road on a
+  hillside bench;
+- **openings:** a 30 m bridge over the river and an 8 m underpass, both with their exact
+  width; a culvert in a valley under a continuous crest (medium); a culvert where a mapped
+  stream crosses (high);
+- **no other openings,** and the plots with `index.html`.
 
 ## 6. Large DTMs: corridors, storage layout, units
 
@@ -1988,6 +2081,9 @@ protected areas take seconds.
     - `model_obs_conflict` with rp = 200.
   - **Validation:** recall and precision against an independent computation; the
     confusion matrix and both shares.
+- **`pixi run test-transport`, 15 checks,** transport embankments on the synthetic
+  country T7 (§5.11).
+- **`pixi run test-gui`, 15 checks,** the server of the GUI (§1.1).
 - **`pixi run test-stage-f`, 16 checks,** on its own synthetic country T6.
   - **Setup.** T6 is a 20 km box with one river (5000 km²) and two protected areas. GloFAS
     (0.05°, daily, one file per year) and EFAS (1 arcmin, 6-hourly, one file per month)

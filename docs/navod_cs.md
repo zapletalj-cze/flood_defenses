@@ -116,6 +116,18 @@ tlačítko Quit nebo Ctrl+C v terminálu.
   největšími úniky.
 - **Po změně linií hrází** spusťte `protected-areas` s FORCE (stejně jako u řek).
 
+**Náspy silnic a železnic** (`transport-embankments`, README §5.11, zatím jen analýza):
+- **Vstup:** do `[countries.<kód>]` přidejte `transport_lines = ["D:/…/roads.gpkg"]`, tedy
+  linie silnic a železnic, které připravíte. Ukazují jen, kde hledat; o všem rozhoduje DTM.
+- **Kdy:** spouští se po `protected-areas` (potřebuje HAND jednotek pro nivu).
+- **Výstupy:**
+  - `transport_embankments.gpkg`: třídy násep, jednostranný, zářez, v úrovni terénu;
+  - `openings.gpkg`: mosty, podjezdy, pravděpodobné propustky s jistotou;
+  - grafy v `plots/transport/<běh>/index.html`.
+- **Parametry:** jsou v `[transport]` v `config/advanced.toml`; ověřte je na pilotních
+  jednotkách podle řezů a podélných profilů.
+- **Bariéry:** náspy do bariér zatím nevstupují. To bude další krok (integrace).
+
 **Stage E** je experimentální a nejdřív se pouští na pilotní jednotky (`[implied] units`). Výsledky se do
 `defenses_clip.gpkg` nedostanou, dokud není `include_implied = true`.
 
