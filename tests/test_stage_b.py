@@ -313,6 +313,36 @@ list_res.append(
         and hits(gdf_before, "R3_plain") == 1,
     )
 )
+gdf_byg = (
+    gpd.read_file(out / "protected_areas_by_group.gpkg")
+    if (out / "protected_areas_by_group.gpkg").exists()
+    else gpd.GeoDataFrame(columns=["group_id", "geometry"], geometry="geometry")
+)
+gdf_rg = (
+    gpd.read_file(out / "river_groups.gpkg")
+    if (out / "river_groups.gpkg").exists()
+    else None
+)
+
+
+def hits_group(frame, label, group):
+    return int(
+        frame[frame["group_id"] == group].covers(world(Point(*probes[label]))).sum()
+    )
+
+
+list_res.append(
+    (
+        "per river group (protected_areas_by_group.gpkg), crossings open: the main river (group 1) is held back by "
+        "all three rings, the small streams together (group 0) only by ring 3",
+        len(gdf_byg) > 0
+        and gdf_rg is not None
+        and sorted(gdf_rg["group_id"]) == [0] * (len(rivers) - 1) + [1]
+        and all(hits_group(gdf_byg, k, 1) == 1 for k in probes)
+        and hits_group(gdf_byg, "R3_plain", 0) == 1
+        and hits_group(gdf_byg, "R1_gate", 0) == 0,
+    )
+)
 gdf_channel = (
     gpd.read_file(out / "rivers_channel.gpkg")
     if (out / "rivers_channel.gpkg").exists()

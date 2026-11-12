@@ -232,6 +232,31 @@ list_res.append(
     )
 )
 
+# River groups: a main stem of five 10 km reaches, two tributaries and a minor stream.
+reaches = [
+    shapely.linestrings(c)
+    for c in [
+        [[0, 0], [10e3, 0]],
+        [[10e3, 0], [20e3, 0]],
+        [[20e3, 0], [30e3, 0]],
+        [[30e3, 0], [40e3, 0]],
+        [[40e3, 0], [50e3, 0]],
+        [[20e3, 5e3], [20e3, 0]],
+        [[30e3, 8e3], [30e3, 0]],
+        [[40e3, 3e3], [40e3, 0]],
+    ]
+]
+groups = gis.Vector.river_groups(
+    reaches, [5000, 3000, 2900, 1200, 1100, 900, 150, 50], 2.0, 30000.0, 100.0, 0.01
+)
+list_res.append(
+    (
+        f"river_groups: the main stem joins up to 30 km, a jump in upstream area above 2 or a tributary starts a "
+        f"group, a minor stream is group 0 ({groups.tolist()})",
+        groups.tolist() == [1, 1, 1, 2, 2, 3, 4, 0],
+    )
+)
+
 for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")
 sys.exit(0 if all(ok for _, ok in list_res) else 1)

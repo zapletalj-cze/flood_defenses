@@ -2,6 +2,8 @@
 # Date: 2026-11-03
 # Derives areas protected by flood levees (protected areas) per processing unit and merges the units: priority-flood
 # spill levels above the river (HAND on the undefended DTM) with and without barriers; margin = difference.
+# File A: all rivers are water sources at once; file B: the same per river group (connected reaches of similar
+# upstream area), the other rivers then being terrain.
 
 import json
 import logging
@@ -40,6 +42,10 @@ KEYS = [
     "country.levees",
     "country.rivers",
     "country.river_guides",
+    "country.river_upstream_area_field",
+    "river_groups.max_join_ratio",
+    "river_groups.max_length_m",
+    "river_groups.min_upstream_area_km2",
     "river_snap.densify_m",
     "river_snap.guide_search_m",
     "river_snap.guide_max_shift_m",
@@ -116,6 +122,226 @@ OUTPUT_COLUMNS = [
 ]
 
 
+def protected_regions(f, barrier, domain, dtm, gt, wkt, p):
+    """
+    Protected regions of one flood pair and their statistics (shared by all water sources together and by each
+    river group)
+    :param f: dict margin, spill_undef, spill_def, river_ref, order_def, seed_def (2D arrays of the unit window)
+    :param barrier: barrier cells
+    :param domain: processing domain cells
+    :param dtm: terrain (NaN = missing coverage)
+    :param gt: geotransform of the window
+    :param wkt: CRS of the window
+    :param p: parameters (min_margin_m, max_level_m, min_area_m2)
+    :return: (label array, GeoDataFrame of the regions with UNIT_COLUMNS)
+    """
+    margin, spill_undef, spill_def = f["margin"], f["spill_undef"], f["spill_def"]
+    river_ref, order_def, seed_def = f["river_ref"], f["order_def"], f["seed_def"]
+    res = gt[1]
+    cell_area = res * res
+    shape = margin.shape
+    protected = (
+        (margin >= p["min_margin_m"]) & (spill_undef <= p["max_level_m"]) & ~barrier
+    )
+    labels, n_candidates = ndimage.label(protected)
+    sizes = np.bincount(labels.ravel())
+    keep = np.flatnonzero(sizes * cell_area >= p["min_area_m2"])
+    keep = keep[keep > 0]
+    relabel = np.zeros(n_candidates + 1, np.int32)
+    relabel[keep] = np.arange(1, len(keep) + 1)
+    labels = relabel[labels]
+    ids = np.arange(1, len(keep) + 1)
+    if len(ids):
+        # Statistics over protected area cells only (scipy.ndimage label statistics scan the whole window).
+        cells = np.flatnonzero(labels.ravel())
+        df_cells = pd.DataFrame(
+            {
+                "label": labels.ravel()[cells],
+                "spill": spill_def.ravel()[cells],
+                "margin": margin.ravel()[cells],
+                "river_ref": river_ref.ravel()[cells],
+                "order": order_def.ravel()[cells],
+                "cell": cells,
+            }
+        )
+        grouped = df_cells.groupby("label")
+        # Entry = first protected area cell reached by the defended flood; source = seed river cell of its path.
+        entry_rows, entry_cols = np.divmod(
+            df_cells["cell"].to_numpy()[
+                grouped["order"].idxmin().reindex(ids).to_numpy()
+            ],
+            shape[1],
+        )
+        seed_rows, seed_cols = np.divmod(seed_def[entry_rows, entry_cols], shape[1])
+        del df_cells["order"], df_cells["cell"]
+        border = np.unique(
+            np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
+        )
+        touching = np.unique(labels[ndimage.binary_dilation(~domain) & (labels > 0)])
+        # Missing DTM coverage acts as a wall: such protected areas may be closed artificially.
+        at_dtm_edge = np.unique(
+            labels[ndimage.binary_dilation(np.isnan(dtm) & domain) & (labels > 0)]
+        )
+        df_stats = pd.DataFrame(
+            {
+                "unit_label": ids,
+                "area_m2": sizes[keep] * cell_area,
+                "protection_level_m": grouped["spill"].min().reindex(ids).to_numpy(),
+                "margin_median_m": grouped["margin"].median().reindex(ids).to_numpy(),
+                "margin_max_m": grouped["margin"].max().reindex(ids).to_numpy(),
+                "river_ref_median_m": grouped["river_ref"]
+                .median()
+                .reindex(ids)
+                .to_numpy(),
+                "entry_x": gt[0] + (entry_cols + 0.5) * res,
+                "entry_y": gt[3] - (entry_rows + 0.5) * res,
+                "source_x": gt[0] + (seed_cols + 0.5) * res,
+                "source_y": gt[3] - (seed_rows + 0.5) * res,
+                "truncated": np.isin(ids, border),
+                "touches_corridor_edge": np.isin(ids, touching),
+                "touches_dtm_edge": np.isin(ids, at_dtm_edge),
+            }
+        ).astype(UNIT_COLUMNS)
+        del df_cells, grouped
+    else:
+        df_stats = pd.DataFrame(
+            {c: pd.Series(dtype=d) for c, d in UNIT_COLUMNS.items()}
+        )
+    gdf_poly = gis.Raster.polygonize_labels(labels, gt, wkt).rename(
+        columns={"label": "unit_label"}
+    )
+    return labels, gdf_poly.merge(df_stats, on="unit_label", how="inner")
+
+
+def merge_units(gdf_cand, gdf_core, gdf_win, list_done, country, code, wkt, gdf_bl):
+    """
+    Merges the protected area candidates of all finished units: one area seen by several windows is kept once,
+    areas truncated everywhere are united or dropped when neighbouring windows contradict them; ids and no_levee
+    :param gdf_cand: candidates of all units (unit columns and unit_id)
+    :param gdf_core: unit cores indexed by unit_id
+    :param gdf_win: unit windows indexed by unit_id
+    :param list_done: finished unit ids
+    :param country: country configuration
+    :param code: country code (id prefix)
+    :param wkt: CRS
+    :param gdf_bl: barrier lines
+    :return: (merged GeoDataFrame, number dropped as contradicted)
+    """
+    if len(gdf_cand):
+        geoms = gdf_cand.geometry.values
+        areas = shapely.area(geoms)
+        rep_pt = shapely.point_on_surface(geoms)
+        gdf_cand["in_core"] = shapely.covers(
+            gdf_core.geometry.reindex(gdf_cand.unit_id).values, rep_pt
+        )
+        gdf_cand["edge_distance"] = shapely.distance(
+            rep_pt,
+            shapely.boundary(gdf_win.geometry.reindex(gdf_cand.unit_id).values),
+        )
+        # The same protected area seen from several unit windows: candidates of different units overlapping by at
+        # least merge_overlap_ratio of the smaller one form one group.
+        left, right = gdf_cand.sindex.query(geoms, predicate="intersects")
+        pair = (left < right) & (
+            gdf_cand.unit_id.values[left] != gdf_cand.unit_id.values[right]
+        )
+        left, right = left[pair], right[pair]
+        overlap = shapely.area(
+            shapely.intersection(geoms[left], geoms[right])
+        ) / np.minimum(areas[left], areas[right])
+        same = overlap >= country["merge_overlap_ratio"]
+        graph = coo_matrix(
+            (np.ones(same.sum()), (left[same], right[same])),
+            shape=(len(gdf_cand),) * 2,
+        )
+        _, gdf_cand["group"] = connected_components(graph, directed=False)
+        group_size = gdf_cand.groupby("group")["group"].transform("size")
+        list_keep = [gdf_cand[group_size == 1]]
+        for _, gdf_grp in gdf_cand[group_size > 1].groupby("group"):
+            gdf_full = gdf_grp[~gdf_grp["truncated"].astype(bool)]
+            if len(gdf_full):
+                # Prefer a complete candidate whose representative point lies in its own core, then the most
+                # central one (largest distance from its window edge).
+                list_keep.append(
+                    gdf_full.sort_values(
+                        ["in_core", "edge_distance"], ascending=False
+                    ).iloc[[0]]
+                )
+            else:
+                # Truncated in every window: union of the pieces (recall), lowest protection level among them.
+                gdf_mrg = gdf_grp.loc[[gdf_grp.geometry.area.idxmax()]].copy()
+                lowest = gdf_grp.loc[gdf_grp["protection_level_m"].idxmin()]
+                gdf_mrg = gdf_mrg.set_geometry(
+                    gpd.GeoSeries(
+                        [shapely.union_all(gdf_grp.geometry.values)],
+                        index=gdf_mrg.index,
+                        crs=wkt,
+                    )
+                )
+                gdf_mrg["area_m2"] = gdf_mrg.geometry.area
+                for column in [
+                    "protection_level_m",
+                    "entry_x",
+                    "entry_y",
+                    "source_x",
+                    "source_y",
+                ]:
+                    gdf_mrg[column] = lowest[column]
+                for column in ["touches_corridor_edge", "touches_dtm_edge"]:
+                    gdf_mrg[column] = gdf_grp[column].astype(bool).any()
+                list_keep.append(gdf_mrg)
+        gdf_final = gpd.GeoDataFrame(
+            pd.concat(list_keep, ignore_index=True), geometry="geometry", crs=wkt
+        )
+        # A protected area truncated in every window may exist only because window edges
+        # closed it. Units whose windows see the same area and found nothing there have
+        # the better view (an edge can only add walls); drop it if they cover enough.
+        n_contra = 0
+        if country["drop_contradicted_truncated"]:
+            gdf_win_done = gdf_win.loc[list_done]
+            keep_rows = np.ones(len(gdf_final), bool)
+            for k in np.flatnonzero(gdf_final["truncated"].astype(bool).to_numpy()):
+                geometry = gdf_final.geometry.iloc[k]
+                members = set(
+                    gdf_cand.unit_id[gdf_cand.group == gdf_final.group.iloc[k]]
+                )
+                gdf_oth = gdf_win_done[
+                    ~gdf_win_done.index.isin(members)
+                    & gdf_win_done.intersects(geometry)
+                ]
+                hits = gdf_cand.unit_id.values[
+                    gdf_cand.sindex.query(geometry, predicate="intersects")
+                ]
+                gdf_sil = gdf_oth[~gdf_oth.index.isin(hits)]
+                if len(gdf_sil):
+                    covered = geometry.intersection(
+                        shapely.union_all(gdf_sil.geometry.values)
+                    ).area / max(geometry.area, 1e-9)
+                    keep_rows[k] = covered < country["contradiction_ratio"]
+            n_contra = int((~keep_rows).sum())
+            gdf_final = gdf_final[keep_rows].reset_index(drop=True)
+    else:
+        gdf_final = gdf_cand.copy()
+        n_contra = 0
+    rep_pt = shapely.point_on_surface(gdf_final.geometry.values)
+    step = country["id_rounding_m"]
+    ids = pd.Series(
+        [
+            f"{code}_{int(round(x / step) * step)}_{int(round(y / step) * step)}"
+            for x, y in shapely.get_coordinates(rep_pt)
+        ],
+        dtype=str,
+    )
+    dup_rank = ids.groupby(ids).cumcount()
+    gdf_final["protected_area_id"] = np.where(
+        dup_rank > 0, ids + "_" + (dup_rank + 1).astype(str), ids
+    )
+    distance = country["rp"]["levee_adjacent_distance_m"]
+    gdf_final["no_levee"] = (
+        gis.Vector.length_near_boundary(gdf_final, gdf_bl, distance) == 0
+    )
+    return gdf_final, n_contra
+
+
 def process_unit(task):
     start = time.perf_counter()
     times, counts = {}, {}
@@ -166,6 +392,14 @@ def process_unit(task):
             gdf_rn.geometry, np.ones(len(gdf_rn)), shape, gt, wkt, False, np.uint8
         )
         > 0
+    )
+    # river group + 1 per river cell (0 = no river), for the protected areas per group
+    river_group = (
+        gis.Raster.rasterize_geometries(
+            gdf_rn.geometry, gdf_rn["group_id"] + 1, shape, gt, wkt, False, np.int32
+        )
+        if "group_id" in gdf_rn.columns
+        else None
     )
     if p["fill_nodata_holes"]:
         # Nodata inside the DTM coverage (lidar water surfaces, data gaps) would act as a wall and
@@ -565,82 +799,74 @@ def process_unit(task):
         )
         seed_def = order_def = np.full(shape, -1, np.int32)
 
-    # --- Protected areas ---
+    # --- Protected areas: all water sources together ---
     t = time.perf_counter()
-    protected = (
-        (margin >= p["min_margin_m"]) & (spill_undef <= p["max_level_m"]) & ~barrier
-    )
-    labels, n_candidates = ndimage.label(protected)
-    sizes = np.bincount(labels.ravel())
-    keep = np.flatnonzero(sizes * cell_area >= p["min_area_m2"])
-    keep = keep[keep > 0]
-    relabel = np.zeros(n_candidates + 1, np.int32)
-    relabel[keep] = np.arange(1, len(keep) + 1)
-    labels = relabel[labels]
-    ids = np.arange(1, len(keep) + 1)
-    if len(ids):
-        # Statistics over protected area cells only (scipy.ndimage label statistics scan the whole window).
-        cells = np.flatnonzero(labels.ravel())
-        df_cells = pd.DataFrame(
-            {
-                "label": labels.ravel()[cells],
-                "spill": spill_def.ravel()[cells],
-                "margin": margin.ravel()[cells],
-                "river_ref": river_ref.ravel()[cells],
-                "order": order_def.ravel()[cells],
-                "cell": cells,
-            }
-        )
-        grouped = df_cells.groupby("label")
-        # Entry = first protected area cell reached by the defended flood; source = seed river cell of its path.
-        entry_rows, entry_cols = np.divmod(
-            df_cells["cell"].to_numpy()[
-                grouped["order"].idxmin().reindex(ids).to_numpy()
-            ],
-            shape[1],
-        )
-        seed_rows, seed_cols = np.divmod(seed_def[entry_rows, entry_cols], shape[1])
-        del df_cells["order"], df_cells["cell"]
-        border = np.unique(
-            np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
-        )
-        touching = np.unique(labels[ndimage.binary_dilation(~domain) & (labels > 0)])
-        # Missing DTM coverage acts as a wall: such protected areas may be closed artificially.
-        at_dtm_edge = np.unique(
-            labels[ndimage.binary_dilation(np.isnan(dtm) & domain) & (labels > 0)]
-        )
-        df_stats = pd.DataFrame(
-            {
-                "unit_label": ids,
-                "area_m2": sizes[keep] * cell_area,
-                "protection_level_m": grouped["spill"].min().reindex(ids).to_numpy(),
-                "margin_median_m": grouped["margin"].median().reindex(ids).to_numpy(),
-                "margin_max_m": grouped["margin"].max().reindex(ids).to_numpy(),
-                "river_ref_median_m": grouped["river_ref"]
-                .median()
-                .reindex(ids)
-                .to_numpy(),
-                "entry_x": gt[0] + (entry_cols + 0.5) * res,
-                "entry_y": gt[3] - (entry_rows + 0.5) * res,
-                "source_x": gt[0] + (seed_cols + 0.5) * res,
-                "source_y": gt[3] - (seed_rows + 0.5) * res,
-                "truncated": np.isin(ids, border),
-                "touches_corridor_edge": np.isin(ids, touching),
-                "touches_dtm_edge": np.isin(ids, at_dtm_edge),
-            }
-        ).astype(UNIT_COLUMNS)
-        del df_cells, grouped
-    else:
-        df_stats = pd.DataFrame(
-            {c: pd.Series(dtype=d) for c, d in UNIT_COLUMNS.items()}
-        )
-    gdf_poly = gis.Raster.polygonize_labels(labels, gt, wkt).rename(
-        columns={"label": "unit_label"}
-    )
-    gdf_pa = gdf_poly.merge(df_stats, on="unit_label", how="inner")
+    flood = {
+        "margin": margin,
+        "spill_undef": spill_undef,
+        "spill_def": spill_def,
+        "river_ref": river_ref,
+        "order_def": order_def,
+        "seed_def": seed_def,
+    }
+    labels, gdf_pa = protected_regions(flood, barrier, domain, dtm, gt, wkt, p)
     gdf_pa["unit_id"] = unit_id
     counts["protected_areas"] = len(gdf_pa)
     times["protected_areas"] = time.perf_counter() - t
+
+    # --- Protected areas per river group: water sources and drainage outlets are the cells of one group; the
+    # other rivers are terrain (a flood does not come from all rivers at once) ---
+    t = time.perf_counter()
+    list_grp = []
+    if river_group is not None and stream.any():
+        for value in np.setdiff1d(np.unique(river_group[seeds]), [0]):
+            seeds_g = seeds & (river_group == value)
+            hand_g, ref_g, _ = gis.Hydro.hand_above_streams(
+                dtm_undef,
+                seeds_g,
+                p["stream_burn_m"],
+                p["stream_burn_buffer_m"] / res,
+                valid,
+            )
+            surface = hand_g.copy()
+            surface[barrier] = np.maximum(
+                crest[barrier] - ref_g[barrier], hand_g[barrier]
+            )
+            spill_u, _, _ = gis.Hydro.priority_flood(hand_g, seeds_g)
+            spill_d, seed_g, order_g = gis.Hydro.priority_flood(surface, seeds_g)
+            del surface, hand_g
+            _, gdf_g = protected_regions(
+                {
+                    "margin": spill_d - spill_u,
+                    "spill_undef": spill_u,
+                    "spill_def": spill_d,
+                    "river_ref": ref_g,
+                    "order_def": order_g,
+                    "seed_def": seed_g,
+                },
+                barrier,
+                domain,
+                dtm,
+                gt,
+                wkt,
+                p,
+            )
+            del spill_u, spill_d, ref_g, seed_g, order_g
+            gdf_g["group_id"] = int(value) - 1
+            list_grp.append(gdf_g)
+    gdf_grp = (
+        gpd.GeoDataFrame(pd.concat(list_grp, ignore_index=True), crs=wkt)
+        if list_grp
+        else gpd.GeoDataFrame(
+            {c: pd.Series(dtype=d) for c, d in UNIT_COLUMNS.items()}
+            | {"group_id": pd.Series(dtype="int64")},
+            geometry=gpd.GeoSeries([], crs=wkt),
+        )
+    )
+    gdf_grp["unit_id"] = unit_id
+    counts["river_groups"] = len(list_grp)
+    counts["protected_areas_by_group"] = len(gdf_grp)
+    times["groups"] = time.perf_counter() - t
 
     # --- Crest statistics of barrier lines inside the core ---
     t = time.perf_counter()
@@ -693,6 +919,8 @@ def process_unit(task):
         ]:
             gis.Raster.write_array(unit_dir / f"{name}.tif", array, gt, wkt)
     gis.Vector.write_gpkg(gdf_pa, unit_dir / "protected_areas.gpkg")
+    if river_group is not None:
+        gis.Vector.write_gpkg(gdf_grp, unit_dir / "protected_areas_by_group.gpkg")
     gis.Vector.write_gpkg(gdf_encl, unit_dir / "enclosed_streams.gpkg")
     pd.DataFrame(
         list_crest, columns=["line_id", "crest_min_m", "crest_hand_min_m"]
@@ -714,7 +942,8 @@ def process_unit(task):
     done["summary"] = (
         f"unit {unit_id}: {len(gdf_pa)} protected areas in {seconds:.0f} s (read {times['read_terrain']:.1f} s, "
         f"crest {times['crest_read']:.1f} s in {counts['crest_boxes']} boxes, hand {times.get('hand', 0):.1f} s, "
-        f"flood {times.get('flood', 0):.1f} s, write {times['write']:.1f} s), peak RSS {peak_mb / 1024:.2f} GB "
+        f"flood {times.get('flood', 0):.1f} s, {counts['river_groups']} river groups {times['groups']:.1f} s, "
+        f"write {times['write']:.1f} s), peak RSS {peak_mb / 1024:.2f} GB "
         f"({done['bytes_per_cell']:.0f} B per window cell)"
     )
     marker = unit_dir / "done.json.tmp"
@@ -909,7 +1138,51 @@ if __name__ == "__main__":
         len(gdf_rn),
         params["gated_crossings"],
     )
-    gis.Vector.write_gpkg(gdf_rn[["geometry"]], work_dir / "rivers_used.gpkg")
+    # --- River groups: connected reaches of similar upstream area, for the protected areas per group ---
+    field, rg = country["river_upstream_area_field"], cfg["river_groups"]
+    groups_on = bool(field) and field in gdf_rn.columns
+    if groups_on:
+        gdf_rn["group_id"] = gis.Vector.river_groups(
+            gdf_rn.geometry.values,
+            pd.to_numeric(gdf_rn[field], errors="coerce"),
+            rg["max_join_ratio"],
+            rg["max_length_m"],
+            rg["min_upstream_area_km2"],
+            params["touch_tolerance_m"],
+        )
+        gdf_rn["length_m"] = gdf_rn.geometry.length
+        gis.Vector.write_gpkg(
+            gdf_rn[["group_id", field, "length_m", "geometry"]],
+            out_dir / "river_groups.gpkg",
+        )
+        g_len = (
+            gdf_rn[gdf_rn["group_id"] > 0].groupby("group_id")["length_m"].sum() / 1000
+        )
+        log.info(
+            "River groups (river_groups.gpkg): %d groups of reaches from %.0f km2 (join ratio %.1f, at most %.0f km), "
+            "length per group %s km; %d minor reaches (group 0) are handled together.",
+            len(g_len),
+            rg["min_upstream_area_km2"],
+            rg["max_join_ratio"],
+            rg["max_length_m"] / 1000,
+            (
+                ", ".join(
+                    f"p{q} {v:.1f}"
+                    for q, v in zip((5, 50, 95), np.percentile(g_len, (5, 50, 95)))
+                )
+                if len(g_len)
+                else "-"
+            ),
+            int((gdf_rn["group_id"] == 0).sum()),
+        )
+    else:
+        log.warning(
+            "No river_upstream_area_field in the rivers: protected areas per river group are not computed."
+        )
+    gis.Vector.write_gpkg(
+        gdf_rn[(["group_id"] if groups_on else []) + ["geometry"]],
+        work_dir / "rivers_used.gpkg",
+    )
 
     # --- Units ---
     list_unk = sorted(set(run["UNITS"]) - set(df_units.unit_id))
@@ -984,117 +1257,8 @@ if __name__ == "__main__":
             | {"unit_id": pd.Series(dtype=str)},
             geometry=gpd.GeoSeries([], crs=wkt),
         )
-    if len(gdf_cand):
-        geoms = gdf_cand.geometry.values
-        areas = shapely.area(geoms)
-        rep_pt = shapely.point_on_surface(geoms)
-        gdf_cand["in_core"] = shapely.covers(
-            gdf_core.geometry.reindex(gdf_cand.unit_id).values, rep_pt
-        )
-        gdf_cand["edge_distance"] = shapely.distance(
-            rep_pt,
-            shapely.boundary(gdf_win.geometry.reindex(gdf_cand.unit_id).values),
-        )
-        # The same protected area seen from several unit windows: candidates of different units overlapping by at
-        # least merge_overlap_ratio of the smaller one form one group.
-        left, right = gdf_cand.sindex.query(geoms, predicate="intersects")
-        pair = (left < right) & (
-            gdf_cand.unit_id.values[left] != gdf_cand.unit_id.values[right]
-        )
-        left, right = left[pair], right[pair]
-        overlap = shapely.area(
-            shapely.intersection(geoms[left], geoms[right])
-        ) / np.minimum(areas[left], areas[right])
-        same = overlap >= country["merge_overlap_ratio"]
-        graph = coo_matrix(
-            (np.ones(same.sum()), (left[same], right[same])),
-            shape=(len(gdf_cand),) * 2,
-        )
-        _, gdf_cand["group"] = connected_components(graph, directed=False)
-        group_size = gdf_cand.groupby("group")["group"].transform("size")
-        list_keep = [gdf_cand[group_size == 1]]
-        for _, gdf_grp in gdf_cand[group_size > 1].groupby("group"):
-            gdf_full = gdf_grp[~gdf_grp["truncated"].astype(bool)]
-            if len(gdf_full):
-                # Prefer a complete candidate whose representative point lies in its own core, then the most
-                # central one (largest distance from its window edge).
-                list_keep.append(
-                    gdf_full.sort_values(
-                        ["in_core", "edge_distance"], ascending=False
-                    ).iloc[[0]]
-                )
-            else:
-                # Truncated in every window: union of the pieces (recall), lowest protection level among them.
-                gdf_mrg = gdf_grp.loc[[gdf_grp.geometry.area.idxmax()]].copy()
-                lowest = gdf_grp.loc[gdf_grp["protection_level_m"].idxmin()]
-                gdf_mrg = gdf_mrg.set_geometry(
-                    gpd.GeoSeries(
-                        [shapely.union_all(gdf_grp.geometry.values)],
-                        index=gdf_mrg.index,
-                        crs=wkt,
-                    )
-                )
-                gdf_mrg["area_m2"] = gdf_mrg.geometry.area
-                for column in [
-                    "protection_level_m",
-                    "entry_x",
-                    "entry_y",
-                    "source_x",
-                    "source_y",
-                ]:
-                    gdf_mrg[column] = lowest[column]
-                for column in ["touches_corridor_edge", "touches_dtm_edge"]:
-                    gdf_mrg[column] = gdf_grp[column].astype(bool).any()
-                list_keep.append(gdf_mrg)
-        gdf_final = gpd.GeoDataFrame(
-            pd.concat(list_keep, ignore_index=True), geometry="geometry", crs=wkt
-        )
-        # A protected area truncated in every window may exist only because window edges
-        # closed it. Units whose windows see the same area and found nothing there have
-        # the better view (an edge can only add walls); drop it if they cover enough.
-        n_contra = 0
-        if country["drop_contradicted_truncated"]:
-            gdf_win_done = gdf_win.loc[list_done]
-            keep_rows = np.ones(len(gdf_final), bool)
-            for k in np.flatnonzero(gdf_final["truncated"].astype(bool).to_numpy()):
-                geometry = gdf_final.geometry.iloc[k]
-                members = set(
-                    gdf_cand.unit_id[gdf_cand.group == gdf_final.group.iloc[k]]
-                )
-                gdf_oth = gdf_win_done[
-                    ~gdf_win_done.index.isin(members)
-                    & gdf_win_done.intersects(geometry)
-                ]
-                hits = gdf_cand.unit_id.values[
-                    gdf_cand.sindex.query(geometry, predicate="intersects")
-                ]
-                gdf_sil = gdf_oth[~gdf_oth.index.isin(hits)]
-                if len(gdf_sil):
-                    covered = geometry.intersection(
-                        shapely.union_all(gdf_sil.geometry.values)
-                    ).area / max(geometry.area, 1e-9)
-                    keep_rows[k] = covered < country["contradiction_ratio"]
-            n_contra = int((~keep_rows).sum())
-            gdf_final = gdf_final[keep_rows].reset_index(drop=True)
-    else:
-        gdf_final = gdf_cand.copy()
-        n_contra = 0
-    rep_pt = shapely.point_on_surface(gdf_final.geometry.values)
-    step = country["id_rounding_m"]
-    ids = pd.Series(
-        [
-            f"{run['COUNTRY']}_{int(round(x / step) * step)}_{int(round(y / step) * step)}"
-            for x, y in shapely.get_coordinates(rep_pt)
-        ],
-        dtype=str,
-    )
-    dup_rank = ids.groupby(ids).cumcount()
-    gdf_final["protected_area_id"] = np.where(
-        dup_rank > 0, ids + "_" + (dup_rank + 1).astype(str), ids
-    )
-    distance = country["rp"]["levee_adjacent_distance_m"]
-    gdf_final["no_levee"] = (
-        gis.Vector.length_near_boundary(gdf_final, gdf_bl, distance) == 0
+    gdf_final, n_contra = merge_units(
+        gdf_cand, gdf_core, gdf_win, list_done, country, run["COUNTRY"], wkt, gdf_bl
     )
     gdf_final = gdf_final[OUTPUT_COLUMNS].astype(
         {
@@ -1105,6 +1269,55 @@ if __name__ == "__main__":
         }
     )
     gis.Vector.write_gpkg(gdf_final, out_dir / "protected_areas.gpkg")
+
+    # --- Protected areas per river group: merged group by group (areas of different groups may overlap) ---
+    n_by_group = 0
+    if groups_on:
+        list_g = [
+            gpd.read_file(work_dir / "units" / u / "protected_areas_by_group.gpkg")
+            for u in list_done
+            if (work_dir / "units" / u / "protected_areas_by_group.gpkg").exists()
+        ]
+        list_g = [f for f in list_g if len(f)]
+        list_merged = []
+        if list_g:
+            gdf_cg = pd.concat(list_g, ignore_index=True)
+            for group_id, gdf_one in gdf_cg.groupby("group_id"):
+                gdf_m, _ = merge_units(
+                    gpd.GeoDataFrame(
+                        gdf_one.reset_index(drop=True), geometry="geometry", crs=wkt
+                    ),
+                    gdf_core,
+                    gdf_win,
+                    list_done,
+                    country,
+                    run["COUNTRY"],
+                    wkt,
+                    gdf_bl,
+                )
+                gdf_m["protected_area_id"] = (
+                    gdf_m["protected_area_id"] + f"_g{int(group_id)}"
+                )
+                gdf_m["group_id"] = int(group_id)
+                list_merged.append(gdf_m)
+        columns = OUTPUT_COLUMNS[:-1] + ["group_id", "geometry"]
+        gdf_byg = (
+            gpd.GeoDataFrame(
+                pd.concat(list_merged, ignore_index=True), geometry="geometry", crs=wkt
+            )[columns]
+            if list_merged
+            else gpd.GeoDataFrame(columns=columns, geometry="geometry", crs=wkt)
+        )
+        gis.Vector.write_gpkg(gdf_byg, out_dir / "protected_areas_by_group.gpkg")
+        n_by_group = len(gdf_byg)
+        log.info(
+            "Protected areas per river group (protected_areas_by_group.gpkg): %d areas in %d groups, %.1f km2 in "
+            "total (overlaps between groups counted per group), against %.1f km2 with all water sources together.",
+            n_by_group,
+            gdf_byg["group_id"].nunique() if n_by_group else 0,
+            gdf_byg.geometry.area.sum() / 1e6 if n_by_group else 0.0,
+            gdf_final.geometry.area.sum() / 1e6,
+        )
     n_truncated = int(gdf_final["truncated"].sum())
     log.info(
         "Protected areas: %d from %d unit candidates in %d finished units; truncated %d (%.1f %%; many truncated "

@@ -2269,6 +2269,69 @@ class Vector:
         return shapely.LineString(xy)
 
     @staticmethod
+    def river_groups(
+        geoms, upstream_km2, max_join_ratio, max_length_m, min_upstream_km2, touch
+    ):
+        """
+        Groups river reaches that are connected and of similar size. Reaches meet at shared
+        end points (within touch); the downstream neighbour of a reach is the touching reach
+        with the largest upstream area, if larger than its own. Going upstream from the
+        largest reaches, a reach joins the group of its downstream neighbour when the
+        upstream area grows by at most max_join_ratio across the junction and the group stays
+        within max_length_m; otherwise it starts a group. Reaches below min_upstream_km2 form
+        group 0 (minor streams, handled together).
+        :param geoms: array of LineString or MultiLineString reaches
+        :param upstream_km2: upstream area per reach
+        :param max_join_ratio: largest upstream area ratio (downstream / upstream) to join
+        :param max_length_m: largest group length
+        :param min_upstream_km2: smallest upstream area of a reach with its own group
+        :param touch: distance at which end points meet
+        :return: int array of group ids (0 = minor streams; groups numbered from 1)
+        """
+        geoms = np.asarray(geoms, dtype=object)
+        area = np.nan_to_num(np.asarray(upstream_km2, float), nan=0.0)
+        n = len(geoms)
+        group = np.zeros(n, np.int64)
+        if not n:
+            return group
+        parts, owner = shapely.get_parts(geoms, return_index=True)
+        ends = np.concatenate(
+            [shapely.get_point(parts, 0), shapely.get_point(parts, -1)]
+        )
+        end_owner = np.concatenate([owner, owner])
+        i, j = shapely.STRtree(ends).query(ends, predicate="dwithin", distance=touch)
+        a, b = end_owner[i], end_owner[j]
+        pair = a != b
+        a, b = a[pair], b[pair]
+        # downstream neighbour: the touching reach with the largest upstream area, if larger than the reach
+        down = np.full(n, -1, np.int64)
+        best = np.full(n, -np.inf)
+        larger = area[b] > area[a]
+        for r, d in zip(a[larger], b[larger]):
+            if area[d] > best[r]:
+                best[r], down[r] = area[d], d
+        length = shapely.length(geoms)
+        group_len = {}
+        next_id = 1
+        for r in np.argsort(-area, kind="stable"):
+            if area[r] < min_upstream_km2:
+                continue
+            d = down[r]
+            g = group[d] if d >= 0 else 0
+            if (
+                g > 0
+                and area[d] <= max_join_ratio * max(area[r], 1e-9)
+                and group_len[g] + length[r] <= max_length_m
+            ):
+                group[r] = g
+                group_len[g] += length[r]
+            else:
+                group[r] = next_id
+                group_len[next_id] = length[r]
+                next_id += 1
+        return group
+
+    @staticmethod
     def dominant_nearby(points, geoms, weights, tolerance):
         """
         Per point, the feature with the largest weight among those within the distance of
@@ -3937,6 +4000,9 @@ class Config:
         "country.levees": "paths",
         "country.rivers": "paths",
         "country.river_guides": "opt_paths",
+        "river_groups.max_join_ratio": "float",
+        "river_groups.max_length_m": "float",
+        "river_groups.min_upstream_area_km2": "float",
         "river_snap.densify_m": "float",
         "river_snap.guide_search_m": "float",
         "river_snap.guide_max_shift_m": "float",
@@ -4230,8 +4296,13 @@ class Config:
     }
     # Keys added after a stage was done: a missing key takes this default (logged), so older configurations stay valid.
     DEFAULTS = {
+        # river groups of the protected areas per group (Stage G; defaults only, not in the toml files)
+        "river_groups.max_join_ratio": 2.0,
+        "river_groups.max_length_m": 30000.0,
+        "river_groups.min_upstream_area_km2": 100.0,
         # river snapping (Stage G): values of the snapping procedure the method follows
         "country.river_guides": [],
+        "country.river_upstream_area_field": "",
         "river_snap.densify_m": 20.0,
         "river_snap.guide_search_m": 150.0,
         "river_snap.guide_max_shift_m": 180.0,

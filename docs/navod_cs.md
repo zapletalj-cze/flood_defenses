@@ -1,5 +1,5 @@
 <!-- Author: Jakub Zapletal -->
-<!-- Date: 2026-11-05 -->
+<!-- Date: 2026-11-12 -->
 <!-- Krátký návod, jak pracovat se skripty balíku flood_defenses. -->
 
 # Krátký návod: práce se skripty
@@ -51,7 +51,7 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`. Schémata po
 |---|---|---|
 | 1 | `prepare-dtm` | `dtm_inspection.csv`, `dtm_benchmark.csv` (s DSM i `dsm_*`) |
 | 2 | `build-units` | `corridor.gpkg`, `units_core.gpkg` |
-| 3 | `protected-areas`: nejdřív dvě jednotky (`DEFENSES_UNITS`), pak vše | `rivers_channel.gpkg` (řeky v korytě), `protected_areas.gpkg`, `barriers.gpkg`, `performance.json` |
+| 3 | `protected-areas`: nejdřív dvě jednotky (`DEFENSES_UNITS`), pak vše | `rivers_channel.gpkg` (řeky v korytě), `river_groups.gpkg`, `protected_areas.gpkg` (soubor A), `protected_areas_by_group.gpkg` (soubor B), `barriers.gpkg`, `performance.json` |
 | 4 | `download-ghsl`, `rp-index` | `protected_areas_rp.gpkg` (`rp`, `rp_low`, `rp_high`) |
 | volitelně | `download-worldcover`, `hand-yz`, `lulc.enabled = true`, znovu `rp-index` | `exposure_lulc.csv` |
 | volitelně | `download-gfm`, `gfm-evidence` | `gfm_evidence.gpkg` |
@@ -62,6 +62,18 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`. Schémata po
 | Stage E2 | `implied-segments` | `subsegments.gpkg` |
 | Stage E3–E4 | `implied-protection` | `implied/base/implied_subsegments.gpkg`, `implied_protected_areas.gpkg` |
 | Stage E5 | `implied-evaluate` | `sensitivity.csv`, `plots/implied/sensitivity/index.html` |
+
+**Soubory A a B** (`protected-areas`, README §8.3):
+- **A** (`protected_areas.gpkg`): všechny řeky jsou zdrojem vody najednou.
+- **B** (`protected_areas_by_group.gpkg`): chráněná území zvlášť pro každou skupinu toků. Skupina
+  jsou celé úseky MERIT spojené po proudu, dokud plocha povodí na soutoku nevzroste víc než
+  2× a skupina nepřesáhne 30 km; úseky pod 100 km² tvoří společnou skupinu 0. Hodnoty jsou
+  jen v kódu (`gis.Config.DEFAULTS`), ne v toml.
+- **Podmínka:** `river_upstream_area_field` musí být **název sloupce** s plochou povodí v km².
+  Bez něj se B nepočítá (varování v logu).
+- **Čas:** každá skupina v jednotce přidá zhruba tolik, kolik trvá HAND a obě záplavy souboru A
+  (na jednotce 30 M buněk asi 27–31 s). Počet skupin je v řádku každé jednotky v logu.
+- Další kroky (`rp-index`, `gfm-evidence`, `rp-bounds`) zatím čtou soubor A.
 
 **Stage E** je experimentální a nejdřív se pouští na pilotní jednotky (`[implied] units`). Výsledky se do
 `defenses_clip.gpkg` nedostanou, dokud není `include_implied = true`.

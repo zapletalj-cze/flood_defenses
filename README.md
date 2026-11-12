@@ -42,7 +42,8 @@ flowchart TD
     PD["prepare_dtm: inspection, footprint, read benchmark"]
     BU["build_units: corridor along the rivers, units with a halo"]
     PA["protected_areas: rivers snapped into the channel, barriers,
-    HAND and spill levels with and without barriers per unit (diagram in §5)"]
+    HAND and spill levels with and without barriers per unit (diagram in §5);
+    A: all rivers at once, B: per river group (§8.3)"]
     GH["download_ghsl: building volume"]
     RI["rp_index: exposed value, score, return period class"]
     OBS["optional observations: GFM scenes (gfm_evidence),
@@ -69,7 +70,7 @@ by `pixi run make-figures` (`docs/make_figures.py`) from synthetic data.
 2. [Repository layout](#2-repository-layout)
 3. [Configuration](#3-configuration)
 4. [Run order and outputs](#4-run-order-and-outputs)
-5. [Method: from levee lines to protected areas](#5-method-from-levee-lines-to-protected-protected areas)
+5. [Method: from levee lines to protected areas](#5-method-from-levee-lines-to-protected-areas)
 6. [Large DTMs: corridors, storage layout, units](#6-large-dtms-corridors-storage-layout-units)
 7. [Parallel processing, checkpoints, merging](#7-parallel-processing-checkpoints-merging)
 8. [River lines and water sources](#8-river-lines-and-water-sources)
@@ -364,7 +365,7 @@ Keys beyond the original schema, with the reason for each:
 | 1 | `prepare_dtm.py` | `dtm_inspection.csv`, `dtm_footprint.gpkg`, `dtm_benchmark.csv`, `dtm_estimates.json`, `work/<c>/dtm/dtm.vrt` |
 | 2 | `build_units.py` | `corridor.gpkg`, `units_core.gpkg`, `units_window.gpkg`, `units.csv`, `work/<c>/units_domain.gpkg` |
 | 3 (optional) | `prepare_dtm.py` with `convert_dtm = true` | tiled copies in `work/<c>/dtm/`; `dtm.vrt` repointed to them |
-| 6 | `protected_areas.py` (first two units, then all) | per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `protected_areas.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `protected_areas.gpkg`, `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
+| 6 | `protected_areas.py` (first two units, then all) | `rivers_channel.gpkg`, `river_groups.gpkg`; per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `protected_areas.gpkg`, `protected_areas_by_group.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `protected_areas.gpkg` (file A), `protected_areas_by_group.gpkg` (file B), `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
 | 7 | `download_ghsl.py` | `ghsl_total.vrt`, `ghsl_non_residential.vrt`, `ghsl_sources.json` |
 | D1 (Stage D) | `prepare_dtm.py` with `dsm`; `download_ghsl.py` with `smod`, `pop` | `dsm_inspection.csv`, `dsm_benchmark.csv`, `dsm_footprint.gpkg`; `ghsl_smod.vrt`, `ghsl_pop.vrt` |
 | D1 (Stage D) | `download_clms.py`, then `context_zones.py` | `corine_codes.tif`, `urban_atlas.gpkg`, `clms_sources.json`; `zones.gpkg` |
@@ -389,6 +390,11 @@ Run logs go to `output_dir/<country>/logs/<script>_<timestamp>.log`.
   `no_levee`, `unit_id`, `unit_label`, geometry.
 - **Added columns:** `touches_dtm_edge` (B3) and `unit_label`, which points to the
   protected area's cells in the unit's `labels.tif`.
+- **`protected_areas_by_group.gpkg`** (file B, §8.3) has the same columns plus
+  `group_id`; its ids end with `_g<group>`. Its `unit_label` refers to the group's own
+  labels, which are not stored as rasters yet, so it does not point into `labels.tif`.
+- **Downstream steps** (`rp_index.py`, `gfm_evidence.py`, `rp_bounds.py`) read file A for
+  now.
 
 ## 5. Method: from levee lines to protected areas
 
@@ -398,6 +404,7 @@ Run logs go to `output_dir/<country>/logs/<script>_<timestamp>.log`.
 flowchart TD
     subgraph C["Once per country, shared by all units"]
         S1["Snap the rivers into their channel (§8) → rivers_channel.gpkg"]
+        S3["Group the river reaches by topology and upstream area (§8.3) → river_groups.gpkg"]
         S2["Merge the levee lines, bridge gaps up to gap_tolerance_m → barrier_lines.gpkg"]
     end
     subgraph U["Per unit (core plus halo window), in parallel, with checkpoints"]
@@ -412,11 +419,16 @@ flowchart TD
         U7["margin = spill_def − spill_undef"]
         U8["protected = margin ≥ min_margin_m and spill_undef ≤ max_level_m;
         4-connected regions of at least min_area_m2"]
+        U9["Per river group (§8.3): U5–U8 again with the group's rivers
+        as the only water sources; the other rivers are terrain"]
     end
     M["Merge the units: one area seen by two windows kept once,
     truncated areas checked against the neighbours, ids
-    → protected_areas.gpkg, barriers.gpkg"]
+    → protected_areas.gpkg (A), barriers.gpkg"]
+    MB["The same merge group by group
+    → protected_areas_by_group.gpkg (B)"]
     C --> U1 --> U2 --> U3 --> U4 --> U5 --> U6 --> U7 --> U8 --> M
+    U8 --> U9 --> MB
 ```
 
 ![From terrain to protected areas on one unit](docs/img/unit_steps.png)
@@ -777,6 +789,90 @@ all units.
   - a stream that passes a closed levee keeps its outer part as a water source, because it
     is backwater of the river outside. Heights near it then refer to its bed. Rivers that
     end at the levee avoid this (test R1 of Stage B).
+
+### 8.3 River groups and protected areas per group (file B)
+
+**Why.** A flood does not come from all rivers at once. In file A every river is a water
+source at the same time, so a small stream behind a levee can cut the protected area of
+the large river in front of it. File B computes the protected areas per group of river
+reaches: for each group, only its own rivers are water sources and the other rivers are
+terrain.
+
+```mermaid
+flowchart TD
+    R["rivers_channel.gpkg: the river reaches as they are (MERIT reaches)"]
+    T["Topology: reaches meet at shared end points (touch_tolerance_m);
+    downstream neighbour = touching reach with the largest upstream area"]
+    O["Go through the reaches from the largest upstream area"]
+    Q{"upstream area ≥ 100 km²?"}
+    Z["group 0: minor streams, handled together"]
+    J{"downstream neighbour has a group,
+    its area ≤ 2 × the reach's area,
+    group length + reach length ≤ 30 km?"}
+    JY["join the group of the downstream neighbour"]
+    JN["start a new group"]
+    G["river_groups.gpkg (group_id per reach)"]
+    U["Per unit and group: HAND, flood without and with barriers,
+    protected areas, with only the group's river cells as water sources and HAND outlets"]
+    B["protected_areas_by_group.gpkg: units merged group by group"]
+    R --> T --> O --> Q
+    Q -- no --> Z --> G
+    Q -- yes --> J
+    J -- yes --> JY --> G
+    J -- no --> JN --> G
+    G --> U --> B
+```
+
+**Grouping** (`gis.Vector.river_groups`). The reaches stay as they are: a group is a set
+of whole reaches, joined where the river does not change much.
+- **Topology.** Reaches meet where their end points lie within `touch_tolerance_m`. The
+  downstream neighbour of a reach is the touching reach with the largest upstream area,
+  if it is larger than the reach's own.
+- **Order.** Reaches are visited from the largest upstream area. A reach joins the group
+  of its downstream neighbour when:
+  - the upstream area grows at most 2× across the junction (a tributary much smaller
+    than the main river starts its own group);
+  - the group stays within 30 km. Any number of reaches can be joined.
+- **Minor streams.** Reaches below 100 km² form group 0 and are handled together, as one
+  more flood.
+- **Values.** 2, 30 km and 100 km² are defaults in `gis.Config.DEFAULTS`
+  (`river_groups.max_join_ratio`, `max_length_m`, `min_upstream_area_km2`), not in the
+  toml files.
+- **Needs** `river_upstream_area_field`. Without that column the groups and file B are
+  skipped with a warning; file A is computed as before.
+
+**Per group in a unit.** For every group with river cells in the window:
+1. **HAND** on the undefended DTM with the group's river cells as the only outlets and
+   burned cells.
+2. **Floods.** Without and with the barrier crests, from the group's river cells.
+3. **Protected areas.** The same rules and statistics as in file A (`min_margin_m`,
+   `max_level_m`, `min_area_m2`).
+
+`gated_crossings` (§8.2) applies as in file A.
+
+**Merging.** The unit results are merged group by group with the same rules as file A
+(§7.3). Areas of different groups may overlap: one place can be protected against the
+large river and also against a stream.
+
+**Outputs.**
+- **`river_groups.gpkg`:** each reach with `group_id`, the upstream area and its length.
+  The log gives the number of groups and the length per group (p5, p50, p95).
+- **`protected_areas_by_group.gpkg`:** the columns of file A plus `group_id`.
+- **Log:** the area of file B (overlaps counted per group) against file A.
+
+**Cost.** Every group repeats HAND and the two floods on the whole window: about 27–31 s
+per group on a 30 M-cell unit, as long as HAND and both floods of file A together
+(§13.4). A unit with 2 groups took 91–101 s instead of about 37–40 s. Peak memory grew from
+about 95 to about 119 bytes per window cell. The number of groups per unit is in each
+unit's log line; `performance.json` extrapolates from your test units with the groups
+included.
+
+**Test** (Stage B country, crossings open):
+- the main river is group 1, the three tributaries group 0;
+- in file A only ring 3 is protected, because the tributaries inside rings 1 and 2 are
+  water sources;
+- in file B all three rings protect against the main river (group 1); against the
+  tributaries (group 0) only ring 3 does.
 
 ## 9. Return period index
 
@@ -1449,7 +1545,10 @@ Remaining potential:
 | **Total** | **76–81 s** | **56–61 s** |
 | Peak RSS | 3.0 GB (106–108 B/cell) | **2.6–2.7 GB (93–95 B/cell)** |
 
-Worker time is **2.4 µs per domain cell**. At 5 m, 1000 km² of domain (40 M cells) takes
+With river groups (§8.3), each group adds about 27–31 s per unit (measured on two
+benchmark units with 2 groups each: 91 and 101 s in total, 3.3 GB peak).
+
+Worker time without river groups is **2.4 µs per domain cell**. At 5 m, 1000 km² of domain (40 M cells) takes
 about 1.6 worker-minutes. `protected_areas.py` logs the extrapolation from your own test
 units (`performance.json`).
 
@@ -1506,13 +1605,15 @@ protected areas take seconds.
 
 ## 14. Tests
 
-- **`pixi run test-kernels`, 17 checks:**
+- **`pixi run test-kernels`, 18 checks:**
   - closed ring, gap, diagonal barrier;
   - nested rings in both crest orders;
   - seed and order propagation, entry cell;
   - breaching and nodata;
   - B1 reproduced without burning and fixed with it;
-  - river snapping into a channel, with and without a guide line (§8.1).
+  - river snapping into a channel, with and without a guide line (§8.1);
+  - river groups: a main stem of five 10 km reaches split at 30 km and at a jump in
+    upstream area, tributaries in their own groups, a minor stream in group 0 (§8.3).
 - **`pixi run test-pipeline`, 40 checks:** synthetic countries in two strip-layout files.
   - **Pipeline mechanics:** inspection, footprint, benchmark; conversions A and B;
     units; unit selection and checkpoints.
@@ -1525,9 +1626,11 @@ protected areas take seconds.
   - **Gaps:** a river gap (river profile, no artifact); T3, the whole river without DTM
     data, giving the same protected areas.
   - **T0, empty levees:** margin exactly 0.
-- **`pixi run test-stage-b`, 15 checks:**
+- **`pixi run test-stage-b`, 16 checks:**
   - **Water sources:** with `gated_crossings = false` the streams inside rings 1 and 2 are
     water sources, so only ring 3 is protected; with `true` all three rings are protected.
+  - **River groups:** with crossings open, file B protects all three rings against the
+    main river and only ring 3 against the tributaries (§8.3).
   - **Snapping:** `rivers_channel.gpkg` is written once per country; without guide lines
     the lines stay unchanged.
   - **GHSL:** zipped tiles and schema; latest-epoch probing.
