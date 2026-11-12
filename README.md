@@ -89,6 +89,37 @@ by `pixi run make-figures` (`docs/make_figures.py`) from synthetic data.
 
 ## 1. Running the scripts
 
+### 1.1 GUI
+
+`pixi run gui` opens the **Defenses GUI**, an alternative to the shell for everyday work.
+
+![Defenses GUI: pipeline](docs/img/gui_pipeline.png)
+
+| Page | What it does |
+|---|---|
+| **Pipeline** | Every step as a card in run order: status, the outputs it has written, its run variables (`UNITS`, `FORCE`, `RUN_ID`…; they start from the values at the top of the script) and a Run button. **Run core pipeline** queues the core steps in order |
+| **Console** (bottom) | Runs one step at a time from a queue, streams its output and shows the progress of the units (`[k/N]`, ETA), warnings and errors. **Stop** ends the step with its worker processes |
+| **Results** | Protected areas (files A and B), leaks by cause with the largest places, levee lines on the crest, units, speed and extrapolated country time, the overview of the latest report, output files |
+| **Configuration** | Form for the short `defenses.toml`: folders, workers, input files of each country with a check that they exist and a Browse dialog. The upstream area column is picked from the numeric columns of the rivers file. A Raw TOML tab edits the whole file. Saving keeps comments and layout (`gis.Config.set_toml_value`) and checks the TOML first |
+| **Logs** | Run logs of the scripts with filters for warnings and errors, and search |
+
+**How it works.**
+- **Standard library only.** `gui/app.py` is a small HTTP server; the page (`gui/static/`)
+  opens in an app window of Edge or Chrome, or in the default browser. No new dependency.
+- **Same runs as the shell.** Every step runs as `python -m <module>` in the pixi
+  environment, with the run variables as `DEFENSES_<NAME>` environment variables. A run
+  from the GUI therefore equals the same run from the shell.
+- **Local only.** The server listens on `127.0.0.1` and accepts API calls only with a
+  token created at start.
+- **Closing.** **Quit** in the sidebar, or Ctrl+C in the terminal.
+
+**Run variables of the GUI** (top of `gui/app.py`, or `DEFENSES_<NAME>`): `CONFIG_PATH`,
+`PORT` (0 = any free port), `OPEN_WINDOW`.
+
+![Defenses GUI: results](docs/img/gui_results.png)
+
+### 1.2 Shell
+
 **No command-line parameters.** Each script starts with a block of *run variables*:
 
 ```python
@@ -152,6 +183,9 @@ docs/navod_cs.md           short guide to running the scripts, in Czech
 docs/make_figures.py       explanatory figures of this README (docs/img/), from synthetic data
 docs/stage_d_plan.md       Stage D, step D.1: inventory, inputs, plan and measured runtime impact
 docs/stage_e_plan.md       Stage E, step E.2: outputs check, corridor read benchmark, plan (approved)
+gui/
+  app.py                   Defenses GUI: local server, job queue, configuration editing (pixi run gui)
+  static/                  page of the GUI: index.html, style.css, app.js, logo.svg
 download/
   download_ghsl.py         GHSL building volume tiles -> VRT mosaics
   download_gfm.py          GFM scene search (STAC), screening, clipped layers per unit
@@ -163,7 +197,7 @@ processing/
   data_report.py           compact report of inputs, outputs and logs into reports/<country>/ (pixi run report)
   prepare_dtm.py           DTM inspection, footprint, benchmark, estimates, optional conversion
   build_units.py           river corridor, processing units, memory estimate
-  protected_areas.py          per-unit protected areas in parallel, checkpoints, merging
+  protected_areas.py       per-unit protected areas in parallel, checkpoints, merging; files A and B, leaks
   rp_index.py              exposure, score, RP per protected area
   HAND_YZ.py               land cover exposure (WorldCover, Urban Atlas) supplementing GHSL
   context_zones.py         industrial / dense urban / urban / rural zones of the corridor (Stage D)
@@ -176,9 +210,9 @@ processing/
   rp_bounds.py             matching to discharge cells, event return periods, source combination, bounds
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
 tests/
-  test_kernels.py          numba kernels on small grids (16 checks)
-  test_pipeline.py         end-to-end synthetic countries for Stage A (40 checks)
-  test_stage_b.py          end-to-end synthetic country for Stage B (20 checks)
+  test_kernels.py          numba kernels on small grids (21 checks)
+  test_pipeline.py         end-to-end synthetic countries for Stage A and G (45 checks)
+  test_stage_b.py          end-to-end synthetic country for Stage B (17 checks)
   test_stage_c.py          end-to-end Stage C on the Stage B country (26 checks)
   test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)

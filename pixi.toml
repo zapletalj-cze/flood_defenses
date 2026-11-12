@@ -27,6 +27,8 @@ cdsapi = ">=0.7.4"
 
 # Scripts run as modules from the repository root, so `import gis` resolves without sys.path changes.
 [tasks]
+# Desktop GUI, an alternative to the shell (local web application, standard library only)
+gui = "python -m gui.app"
 check = "python -m processing.check_inputs"
 report = "python -m processing.data_report"
 make-figures = "python -m docs.make_figures"

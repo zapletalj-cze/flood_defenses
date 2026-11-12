@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Defenses">
+  <!-- Defenses logo: water, levee, protected house -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5AA6EE"/>
+      <stop offset="1" stop-color="#3FBFAE"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#bg)"/>
+  <path d="M8.5 37.5q3.75-3 7.5 0t7.5 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" opacity=".9"/>
+  <path d="M8.5 44.5q3.75-3 7.5 0t7.5 0" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" opacity=".7"/>
+  <path d="M23 50L31 29.5h5L44 50z" fill="#fff"/>
+  <path d="M46.5 50v-7.2l4.75-4.3 4.75 4.3V50z" fill="#fff" opacity=".85"/>
+  <path d="M8 51.5h48" stroke="#fff" stroke-width="3" stroke-linecap="round" opacity=".95"/>
+</svg>

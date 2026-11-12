@@ -1,0 +1,82 @@
+<!doctype html>
+<!-- Author: Jakub Zapletal -->
+<!-- Date: 2026-11-12 -->
+<!-- Page of the Defenses GUI (served by gui/app.py). -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Defenses</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script>window.DEFENSES_TOKEN = "{{TOKEN}}";</script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="/static/logo.svg" alt="" class="brand-logo">
+        <div>
+          <div class="brand-name">Defenses</div>
+          <div class="brand-sub">Flood defence layer</div>
+        </div>
+      </div>
+
+      <div class="country-card">
+        <label for="country" class="eyebrow">Country</label>
+        <div class="select-wrap">
+          <select id="country"></select>
+        </div>
+        <div class="country-meta" id="countryMeta"></div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <a href="#pipeline" data-page="pipeline"><span class="ico" data-icon="flow"></span>Pipeline</a>
+        <a href="#results" data-page="results"><span class="ico" data-icon="chart"></span>Results</a>
+        <a href="#config" data-page="config"><span class="ico" data-icon="sliders"></span>Configuration</a>
+        <a href="#logs" data-page="logs"><span class="ico" data-icon="doc"></span>Logs</a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="cfg-path" id="cfgPath" title="Configuration file"></div>
+        <button class="btn ghost small" id="quitBtn"><span class="ico" data-icon="power"></span>Quit</button>
+      </div>
+    </aside>
+
+    <main class="main" id="main">
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">Pipeline</h1>
+          <p id="pageSub" class="sub"></p>
+        </div>
+        <div class="top-actions" id="topActions"></div>
+      </header>
+      <div id="banner"></div>
+      <section id="page" class="page"></section>
+    </main>
+  </div>
+
+  <section class="console collapsed" id="console" aria-label="Console">
+    <div class="console-head" id="consoleHead">
+      <div class="console-title">
+        <span class="pulse" id="consolePulse"></span>
+        <strong id="consoleJob">Console</strong>
+        <span class="chip" id="consoleStatus"></span>
+        <span class="console-meta" id="consoleMeta"></span>
+      </div>
+      <div class="console-progress"><div class="bar"><span id="consoleBar"></span></div><span id="consoleEta"></span></div>
+      <div class="console-actions">
+        <button class="btn ghost small" id="stopBtn"><span class="ico" data-icon="stop"></span>Stop</button>
+        <button class="icon-btn" id="consoleToggle" title="Show or hide the console"><span class="ico" data-icon="chevron"></span></button>
+      </div>
+    </div>
+    <div class="console-body">
+      <div class="queue" id="queue"></div>
+      <pre class="log" id="consoleLog"></pre>
+    </div>
+  </section>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

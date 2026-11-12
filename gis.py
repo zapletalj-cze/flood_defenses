@@ -4874,6 +4874,97 @@ class Config:
                     )
 
     @staticmethod
+    def toml_literal(value):
+        """
+        TOML text of a value: string, bool, int, float or a list of them
+        :param value: Python value
+        :return: str
+        """
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return repr(value)
+        if isinstance(value, (list, tuple)):
+            return "[" + ", ".join(Config.toml_literal(v) for v in value) + "]"
+        return json.dumps(str(value), ensure_ascii=False)
+
+    @staticmethod
+    def set_toml_value(path, table, key, value):
+        """
+        Sets one key of a TOML file in place: the line of the key keeps its indentation and
+        trailing comment, every other line stays as it is. A missing key is added at the end
+        of its table, a missing table at the end of the file. The result must parse, otherwise
+        the file is left unchanged.
+        :param path: TOML file
+        :param table: dotted table name ("general", "countries.POL.rp"); "" = top level
+        :param key: key name
+        :param value: new value (see toml_literal)
+        :return: None
+        """
+        with open(str(path), encoding="utf-8") as f:
+            text = f.read()
+        lines = text.splitlines()
+        header = re.compile(r"^\s*(\[\[?)\s*([^\[\]]+?)\s*\]\]?\s*(#.*)?$")
+        heads = [
+            (i, m.group(1), m.group(2))
+            for i, line in enumerate(lines)
+            if (m := header.match(line))
+        ]
+        if table == "":
+            start, end = 0, (heads[0][0] if heads else len(lines))
+        else:
+            hit = [k for k, h in enumerate(heads) if h[1] == "[" and h[2] == table]
+            start = heads[hit[0]][0] + 1 if hit else None
+            end = (
+                heads[hit[0] + 1][0] if hit and hit[0] + 1 < len(heads) else len(lines)
+            )
+        literal = Config.toml_literal(value)
+        pattern = re.compile(rf"^(\s*){re.escape(key)}\s*=\s*(.*)$")
+        if start is None:
+            lines += ["", f"[{table}]", f"{key} = {literal}"]
+        else:
+            done = False
+            for i in range(start, end):
+                m = pattern.match(lines[i])
+                if not m:
+                    continue
+                # the value may continue on the next lines (multi-line arrays)
+                last = i
+                while last < end - 1:
+                    try:
+                        tomllib.loads(
+                            "v = " + "\n".join([m.group(2)] + lines[i + 1 : last + 1])
+                        )
+                        break
+                    except tomllib.TOMLDecodeError:
+                        last += 1
+                comment = ""
+                if last == i:
+                    # the comment starts at the first '#' after a value that parses on its own
+                    rest = m.group(2)
+                    for pos in [k for k, ch in enumerate(rest) if ch == "#"]:
+                        try:
+                            tomllib.loads(f"v = {rest[:pos]}")
+                        except tomllib.TOMLDecodeError:
+                            continue
+                        gap = len(rest[:pos]) - len(rest[:pos].rstrip())
+                        comment = " " * max(gap, 1) + rest[pos:]
+                        break
+                lines[i : last + 1] = [f"{m.group(1)}{key} = {literal}{comment}"]
+                done = True
+                break
+            if not done:
+                last = start - 1
+                for i in range(start, end):
+                    if lines[i].strip() and not lines[i].lstrip().startswith("#"):
+                        last = i
+                lines.insert(last + 1, f"{key} = {literal}")
+        new_text = "\n".join(lines) + ("\n" if text.endswith("\n") or not text else "")
+        tomllib.loads(new_text)
+        with open(str(path), "w", encoding="utf-8") as f:
+            f.write(new_text)
+
+    @staticmethod
     def read_merged(path):
         """
         Reads a configuration file on top of its defaults: advanced.toml in the same

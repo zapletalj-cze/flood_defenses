@@ -31,6 +31,24 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`. Schémata po
 
 ## 2. Spouštění
 
+**GUI místo shellu:** `pixi run gui` otevře okno aplikace Defenses:
+- **Pipeline:** kroky v pořadí; u každého stav, zapsané výstupy, proměnné běhu (`UNITS`,
+  `FORCE`…, výchozí hodnoty ze skriptu) a tlačítko Run. **Run core pipeline** zařadí
+  základní kroky za sebou.
+- **Konzole** dole: fronta běhů, živý výstup, průběh jednotek s odhadem času, Stop
+  (ukončí krok i jeho pracovní procesy).
+- **Results:** chráněná území A a B, úniky podle příčin, hráze na koruně, rychlost a odhad
+  času celé země, přehled z posledního reportu.
+- **Configuration:** formulář pro `defenses.toml` (cesty s kontrolou existence a výběrem
+  souboru, sloupec plochy povodí ze sloupců řek); záložka Raw TOML pro celý soubor.
+  Komentáře v souboru zůstanou.
+- **Logs:** logy skriptů s filtrem varování a chyb a hledáním.
+
+Běh z GUI je stejný jako ze shellu (stejný Python, proměnné `DEFENSES_*`). Zavření:
+tlačítko Quit nebo Ctrl+C v terminálu.
+
+**Shell:**
+
 - **Odkud:** vždy z kořene repozitáře: `pixi run <úloha>`.
 - **Proměnné běhu** (PowerShell):
 
