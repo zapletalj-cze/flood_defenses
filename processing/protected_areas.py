@@ -25,7 +25,7 @@ import gis
 # --- Run variables (no command-line parameters; DEFENSES_<NAME> environment variables override them) ---
 CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
-FORCE = False  # recompute units that already have a done marker
+FORCE = True  # recompute units that already have a done marker
 UNITS = []  # unit ids to process, e.g. ["012_034", "012_035"]; empty = all units
 
 KEYS = [
