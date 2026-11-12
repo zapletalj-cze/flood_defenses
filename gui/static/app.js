@@ -108,6 +108,12 @@ async function boot() {
     render();
   });
   window.addEventListener("hashchange", route);
+  $("#page").addEventListener("focusout", () => setTimeout(() => {
+    if (S.pendingRender && !$("#page").contains(document.activeElement)) {
+      S.pendingRender = false;
+      if (S.page === "pipeline" || S.page === "results") render();
+    }
+  }, 0));
   $("#consoleHead").addEventListener("click", (e) => { if (!e.target.closest("button")) toggleConsole(); });
   $("#consoleToggle").addEventListener("click", () => toggleConsole());
   $("#stopBtn").addEventListener("click", stopJob);
@@ -292,7 +298,7 @@ function bindPipeline() {
 async function openFolder(target) {
   try {
     const { ok } = await api("/api/open", { target, country: S.country });
-    if (!ok) toast("The folder does not exist yet", true);
+    if (!ok) toast("The folder does not exist yet or cannot be opened here", true);
   } catch (err) {
     toast(err.message, true);
   }
@@ -337,8 +343,17 @@ async function pollJobs() {
     toast(`${j.title}: ${STATUS[j.status].toLowerCase()} in ${duration(j.ended - j.started)}`, j.status !== "done");
     S.results = null;
     await loadState();
-    if (S.page === "pipeline" || S.page === "results") render();
+    if (S.page === "pipeline" || S.page === "results") renderSoon();
   }
+}
+// a re-render waits while a field of the page has the focus (typing is not interrupted)
+function renderSoon() {
+  const el = document.activeElement;
+  if (el && $("#page").contains(el) && el.matches("input, select, textarea")) {
+    S.pendingRender = true;
+    return;
+  }
+  render();
 }
 function renderQueue() {
   const html = S.jobs.slice().reverse().map((j) => `<div class="q-item ${j.id === S.job ? "active" : ""}" data-job="${j.id}">
@@ -590,7 +605,8 @@ function bindConfig(c, t) {
   page.querySelectorAll("[data-browse]").forEach((b) => (b.onclick = async () => {
     const [table, key, kind, multi] = b.dataset.browse.split("|");
     try {
-      const { paths } = await api("/api/browse", { kind, multiple: multi === "1" });
+      const { paths, error } = await api("/api/browse", { kind, multiple: multi === "1" });
+      if (error) toast(error, true);
       if (!paths.length) return;
       const value = multi === "1" ? [...readPathList(table, key, true), ...paths] : paths[0];
       setDirty(table, key, value);

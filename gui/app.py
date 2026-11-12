@@ -670,14 +670,17 @@ def results(country):
 
 
 def browse(kind, multiple):
-    # native file or folder dialog of the machine (tkinter), run in its own thread
+    # native file or folder dialog of the machine (tkinter); (paths, error text)
     try:
         import tkinter
         from tkinter import filedialog
     except ImportError:
-        return []
+        return [], "No file dialog on this computer (tkinter missing); type the path."
     with BROWSE_LOCK:
-        root = tkinter.Tk()
+        try:
+            root = tkinter.Tk()
+        except tkinter.TclError:
+            return [], "No file dialog without a display; type the path."
         root.withdraw()
         root.attributes("-topmost", True)
         if kind == "folder":
@@ -687,17 +690,20 @@ def browse(kind, multiple):
         else:
             paths = [filedialog.askopenfilename(parent=root)]
         root.destroy()
-    return [str(Path(p)).replace("\\", "/") for p in paths if p]
+    return [str(Path(p)).replace("\\", "/") for p in paths if p], ""
 
 
 def open_folder(path):
     path = Path(path)
     if not path.exists():
         return False
-    if os.name == "nt":
-        os.startfile(str(path))  # noqa: S606 - local folder chosen by the GUI
-    else:
-        subprocess.Popen(["xdg-open", str(path)])
+    try:
+        if os.name == "nt":
+            os.startfile(str(path))  # noqa: S606 - local folder chosen by the GUI
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except OSError:
+        return False
     return True
 
 
@@ -913,14 +919,10 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
             if url.path == "/api/browse":
-                return self.send(
-                    200,
-                    {
-                        "paths": browse(
-                            data.get("kind", "file"), bool(data.get("multiple"))
-                        )
-                    },
+                paths, error = browse(
+                    data.get("kind", "file"), bool(data.get("multiple"))
                 )
+                return self.send(200, {"paths": paths, "error": error})
             if url.path == "/api/open":
                 target = data.get("target", "")
                 out_dir, work_dir = folders(data.get("country", ""))

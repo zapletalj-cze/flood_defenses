@@ -116,6 +116,21 @@ by `pixi run make-figures` (`docs/make_figures.py`) from synthetic data.
 **Run variables of the GUI** (top of `gui/app.py`, or `DEFENSES_<NAME>`): `CONFIG_PATH`,
 `PORT` (0 = any free port), `OPEN_WINDOW`.
 
+**Tests.**
+- **Server:** `pixi run test-gui`, 15 checks of the server on a synthetic setup:
+  - security: token, host, paths outside the allowed folders;
+  - state and script defaults, results, logs;
+  - configuration editing (form with comments kept, raw text with invalid TOML refused);
+  - path and column checks;
+  - runs: queue, failure, console lines, progress and ETA, stop with the worker processes,
+    cancel, clear;
+  - folder and file dialog without errors;
+  - quit, refused while a step runs unless forced.
+- **Browser:** walked through every page and control with Playwright, with no JavaScript
+  errors. That walkthrough is not part of the repository; it needs a browser driver.
+- **Not tested on Windows:** the Browse dialog and the Edge app window (tests ran on Linux
+  without a display).
+
 ![Defenses GUI: results](docs/img/gui_results.png)
 
 ### 1.2 Shell
@@ -218,6 +233,7 @@ tests/
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
   test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7, E4: 8, E5: 7 checks)
   test_stage_f.py          Stage F on its own synthetic country T6 (16 checks)
+  test_gui.py              server of the GUI on a synthetic setup (15 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
