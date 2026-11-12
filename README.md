@@ -212,9 +212,9 @@ processing/
 tests/
   test_kernels.py          numba kernels on small grids (21 checks)
   test_pipeline.py         end-to-end synthetic countries for Stage A and G (45 checks)
-  test_stage_b.py          end-to-end synthetic country for Stage B (17 checks)
-  test_stage_c.py          end-to-end Stage C on the Stage B country (26 checks)
-  test_hand_yz.py          land cover exposure on the Stage B country (7 checks)
+  test_stage_b.py          end-to-end synthetic country for Stage B (18 checks)
+  test_stage_c.py          end-to-end Stage C on the Stage B country (27 checks)
+  test_hand_yz.py          land cover exposure on the Stage B country (8 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
   test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7, E4: 8, E5: 7 checks)
   test_stage_f.py          Stage F on its own synthetic country T6 (16 checks)
@@ -430,10 +430,9 @@ Run logs go to `output_dir/<country>/logs/<script>_<timestamp>.log`.
 - **Added columns:** `touches_dtm_edge` (B3) and `unit_label`, which points to the
   protected area's cells in the unit's `labels.tif`.
 - **`protected_areas_by_group.gpkg`** (file B, §8.3) has the same columns plus
-  `group_id`; its ids end with `_g<group>`. Its `unit_label` refers to the group's own
-  labels, which are not stored as rasters yet, so it does not point into `labels.tif`.
-- **Downstream steps** (`rp_index.py`, `gfm_evidence.py`, `rp_bounds.py`) read file A for
-  now.
+  `group_id`; its ids end with `_g<group>`. Its `unit_label` points into the group's own
+  `groups/labels_g<group>.tif` of the unit.
+- **Downstream steps for file B:** set `LAYER = "B"` (§8.4).
 
 ## 5. Method: from levee lines to protected areas
 
@@ -1040,6 +1039,47 @@ per group on a 30 M-cell unit, as long as HAND and both floods of file A togethe
 about 95 to about 119 bytes per window cell. The number of groups per unit is in each
 unit's log line; `performance.json` extrapolates from your test units with the groups
 included.
+
+### 8.4 Later steps with file A or B (`LAYER`)
+
+`rp_index.py`, `HAND_YZ.py`, `gfm_evidence.py`, `rp_bounds.py` and `validate.py` have the
+run variable **`LAYER`**: `"A"` (default) or `"B"`.
+
+**Files per layer:**
+
+| | File A | File B |
+|---|---|---|
+| Protected areas | `protected_areas.gpkg` | `protected_areas_by_group.gpkg` |
+| With return periods | `protected_areas_rp.gpkg` | `protected_areas_by_group_rp.gpkg` |
+| Unit rasters | `labels.tif`, `hand_undef.tif` | `groups/labels_g<id>.tif`, `groups/hand_undef_g<id>.tif` |
+| Other outputs | `exposure_lulc.csv`, `gfm_evidence.csv/.gpkg`, `event_rp(_combined).csv`, `discharge_matches.gpkg`, `validation*.…`, `plots/discharge/<RUN_ID>` | the same names with `_b`, `plots/discharge/<RUN_ID>_b` |
+
+**Group rasters.** `protected_areas.py` writes the labels and the HAND of every river group
+that protects something. They are cropped to its protected areas plus
+`evidence.comparison_distance_m`, the reach of the GFM comparison zones. Each group is
+valued and tested with its own HAND: the depth below the protection level and the
+comparison zone refer to the group's river.
+
+**Per group in the later steps:**
+- **`rp_index.py`, `HAND_YZ.py`:** one task per unit and group, with checkpoints per
+  group (`groups/rp_index_g<id>.json`, `groups/hand_yz_g<id>.json`).
+- **`gfm_evidence.py`:** one task per unit and group. Missing-barrier hints come from
+  file A only; `HINTS` is ignored for B.
+- **`rp_bounds.py`:** the implied protected areas of Stage E belong to file A and are not
+  added for B.
+- **`validate.py`:** areas of different groups overlap. The area recall and precision use
+  their union, so overlaps count once.
+
+**Order for file B:** `protected-areas` → `rp-index` with `LAYER=B` (and `hand-yz` first
+when land cover is enabled) → `gfm-evidence` and `rp-bounds` with `LAYER=B`. In the GUI,
+**File** on the cards of these steps.
+
+**Tests:**
+- **Stage B:** `rp_index` values all group areas with their own rasters; rings 1 and 2
+  in the town have value, ring 3 none.
+- **Stage C:** GFM tests of the group areas (ring 1 of the main river held in scene E)
+  and bounds in `event_rp_combined_b.csv`; file A unchanged.
+- **HAND_YZ:** land cover value of every group area.
 
 **Test** (Stage B country, crossings open):
 - the main river is group 1, the three tributaries group 0;
@@ -1814,7 +1854,7 @@ protected areas take seconds.
     - ring K with two 60 m gaps over a continuous embankment, bridged by the DTM, with the
       protection level of a closed ring;
     - the open gap of C_wide found as free line ends in `leaks.gpkg`.
-- **`pixi run test-stage-b`, 17 checks:**
+- **`pixi run test-stage-b`, 18 checks:**
   - **Water sources:** with `gated_crossings = false` the streams inside rings 1 and 2 are
     water sources, so only ring 3 is protected; with `true` all three rings are protected.
   - **River groups:** with crossings open, file B protects all three rings against the
@@ -1828,7 +1868,7 @@ protected areas take seconds.
   - **RP:** exposure inside and outside a town; cap, `min` rule and class values;
     interval; override; `v_rel`.
   - **Quantile mapping:** shares within 1/N; ties.
-- **`pixi run test-hand-yz`, 7 checks,** on the Stage B country:
+- **`pixi run test-hand-yz`, 8 checks,** on the Stage B country:
   - **`download_worldcover`:** tiles chosen from the grid (the corridor crosses 15° E,
     so two tiles), VRT, licence;
   - **land cover value** per protected area equal to an independent computation from the
@@ -1894,7 +1934,7 @@ protected areas take seconds.
     - `include_implied`: `defenses_clip.gpkg` features unchanged, implied parts added outside them only;
     - `include_in_review`: `review_implied.gpkg` with reasons;
     - `FORCE`: `protected_areas.py` snaps the rivers again (`rivers_channel.gpkg`) and recomputes all units.
-- **`pixi run test-stage-c`, 26 checks,** on the Stage B country. The Stage B test runs
+- **`pixi run test-stage-c`, 27 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
     - **GFM:** five scenes at 20 m in EPSG:3035, with flood extents drawn from the

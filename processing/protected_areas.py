@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -56,6 +57,7 @@ KEYS = [
     "levee_gaps.max_gap_m",
     "levee_gaps.crest_tolerance_m",
     "leaks.sample_spacing_m",
+    "evidence.comparison_distance_m",
     "river_snap.densify_m",
     "river_snap.guide_search_m",
     "river_snap.guide_max_shift_m",
@@ -1028,6 +1030,8 @@ def process_unit(task):
     # other rivers are terrain (a flood does not come from all rivers at once) ---
     t = time.perf_counter()
     list_grp = []
+    pad_g = int(math.ceil(p["comparison_distance_m"] / res)) + 1
+    shutil.rmtree(unit_dir / "groups", ignore_errors=True)
     if river_group is not None and stream.any():
         for value in np.setdiff1d(np.unique(river_group[seeds]), [0]):
             seeds_g = seeds & (river_group == value)
@@ -1044,8 +1048,8 @@ def process_unit(task):
             )
             spill_u, _, _ = gis.Hydro.priority_flood(hand_g, seeds_g)
             spill_d, seed_g, order_g = gis.Hydro.priority_flood(surface, seeds_g)
-            del surface, hand_g
-            _, gdf_g = protected_regions(
+            del surface
+            labels_g, gdf_g = protected_regions(
                 {
                     "margin": spill_d - spill_u,
                     "spill_undef": spill_u,
@@ -1063,6 +1067,33 @@ def process_unit(task):
             )
             del spill_u, spill_d, ref_g, seed_g, order_g
             gdf_g["group_id"] = int(value) - 1
+            if len(gdf_g):
+                # labels and HAND of the group for the later steps (file B), cropped to its protected areas and
+                # their comparison zones
+                rows_any = np.flatnonzero((labels_g > 0).any(axis=1))
+                cols_any = np.flatnonzero((labels_g > 0).any(axis=0))
+                r0, r1 = max(rows_any[0] - pad_g, 0), min(
+                    rows_any[-1] + 1 + pad_g, shape[0]
+                )
+                c0, c1 = max(cols_any[0] - pad_g, 0), min(
+                    cols_any[-1] + 1 + pad_g, shape[1]
+                )
+                gt_g = (gt[0] + c0 * res, res, 0.0, gt[3] - r0 * res, 0.0, -res)
+                gid = int(value) - 1
+                gis.Raster.write_array(
+                    gis.Run.unit_layer_path(unit_dir, "labels.tif", gid),
+                    labels_g[r0:r1, c0:c1].astype(np.int32),
+                    gt_g,
+                    wkt,
+                    nodata=0,
+                )
+                gis.Raster.write_array(
+                    gis.Run.unit_layer_path(unit_dir, "hand_undef.tif", gid),
+                    hand_g[r0:r1, c0:c1],
+                    gt_g,
+                    wkt,
+                )
+            del hand_g, labels_g
             list_grp.append(gdf_g)
     gdf_grp = (
         gpd.GeoDataFrame(pd.concat(list_grp, ignore_index=True), crs=wkt)
@@ -1179,6 +1210,7 @@ if __name__ == "__main__":
             "crest_box_size_m": country["crest_box_size_m"],
             "keep_intermediate": country["keep_intermediate"],
             "leak_spacing_m": cfg["leaks"]["sample_spacing_m"],
+            "comparison_distance_m": cfg["evidence"]["comparison_distance_m"],
             "id_rounding_m": country["id_rounding_m"],
         }
     )

@@ -2,7 +2,8 @@
 # Date: 2026-11-04
 # Estimates a return period of protection per protected area from exposure (GHSL building volume valued with JRC-based
 # maximum damages and depth-damage curves, plus the land cover value of HAND_YZ.py when enabled) per metre of levee
-# and from the river size (upstream area).
+# and from the river size (upstream area). LAYER "A": protected_areas.gpkg (all water sources together), "B":
+# protected_areas_by_group.gpkg (per river group, with the labels and HAND of each group).
 
 import json
 import logging
@@ -23,6 +24,7 @@ CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
 FORCE = False  # recompute the exposure of units that are already finished
 UNITS = []  # unit ids to process; empty = all units with protected areas
+LAYER = "A"  # "A": protected areas of all water sources together, "B": per river group
 
 KEYS = [
     "general.work_dir",
@@ -64,8 +66,7 @@ OBSERVATION_COLUMNS = {  # filled by rp_bounds.py (Stage C)
 
 def index_unit(task):
     start = time.perf_counter()
-    unit_dir = Path(task["unit_dir"])
-    labels_ds = gdal.Open(str(unit_dir / "labels.tif"))
+    labels_ds = gdal.Open(task["labels_path"])
     gt, wkt = labels_ds.GetGeoTransform(), labels_ds.GetProjection()
     labels = labels_ds.ReadAsArray()
     # Only the bounding box of the unit's kept protected areas is valued.
@@ -76,7 +77,7 @@ def index_unit(task):
     r0, r1, c0, c1 = rows_any[0], rows_any[-1] + 1, cols_any[0], cols_any[-1] + 1
     labels = np.where(kept, labels, 0)[r0:r1, c0:c1]
     hand = (
-        gdal.Open(str(unit_dir / "hand_undef.tif"))
+        gdal.Open(task["hand_path"])
         .ReadAsArray(int(c0), int(r0), int(c1 - c0), int(r1 - r0))
         .astype(np.float32)
     )
@@ -152,7 +153,7 @@ def index_unit(task):
             "value_exposed": exposed[list(task["levels"])],
         }
     )
-    df_res.to_csv(unit_dir / "rp_index.csv", index=False)
+    df_res.to_csv(task["csv_path"], index=False)
     seconds = time.perf_counter() - start
     done = {
         "unit_id": task["unit_id"],
@@ -160,23 +161,24 @@ def index_unit(task):
         "total_ratio": checks,
         "peak_rss_mb": gis.Run.peak_rss_mb(),
         "summary": (
-            f"unit {task['unit_id']}: {len(df_res)} protected areas valued in {seconds:.1f} s; warped/source "
+            f"unit {task['unit_id']}{task['group_text']}: {len(df_res)} protected areas valued in {seconds:.1f} s; warped/source "
             "volume " + ", ".join(f"{k} {v:.4f}" for k, v in checks.items())
         ),
     }
-    marker = unit_dir / "rp_index.json.tmp"
-    marker.write_text(json.dumps(done, indent=2))
-    os.replace(marker, unit_dir / "rp_index.json")
+    marker = task["marker_path"] + ".tmp"
+    Path(marker).write_text(json.dumps(done, indent=2))
+    os.replace(marker, task["marker_path"])
     logging.getLogger("rp_index").info(done["summary"])
     return done
 
 
 if __name__ == "__main__":
     run = gis.Run.env_overrides(
-        CONFIG_PATH=CONFIG_PATH, COUNTRY=COUNTRY, FORCE=FORCE, UNITS=UNITS
+        CONFIG_PATH=CONFIG_PATH, COUNTRY=COUNTRY, FORCE=FORCE, UNITS=UNITS, LAYER=LAYER
     )
     cfg = gis.Config.load(run["CONFIG_PATH"], run["COUNTRY"], KEYS)
     general, country, rp = cfg["general"], cfg["country"], cfg["country"]["rp"]
+    files = gis.Run.layer_files(run["LAYER"])
     work_dir = Path(general["work_dir"]) / run["COUNTRY"]
     out_dir = Path(general["output_dir"]) / run["COUNTRY"]
     log = gis.Run.logger("rp_index", out_dir / "logs", general["log_level"])
@@ -185,7 +187,7 @@ if __name__ == "__main__":
         general["gdal_cachemax_mb"], general["gdal_threads_per_worker"]
     )
     list_need = [
-        out_dir / "protected_areas.gpkg",
+        out_dir / files["areas"],
         out_dir / "barriers.gpkg",
         out_dir / "ghsl_total.vrt",
         out_dir / "ghsl_non_residential.vrt",
@@ -242,27 +244,41 @@ if __name__ == "__main__":
     )
 
     # --- Exposure per unit (parallel, checkpointed) ---
-    gdf_pa = gpd.read_file(out_dir / "protected_areas.gpkg")
+    gdf_pa = gpd.read_file(out_dir / files["areas"])
     wkt = gdf_pa.crs.to_wkt()
-    list_unit = sorted(gdf_pa["unit_id"].unique())
+    # one task per unit (file A) or per unit and river group (file B)
+    keys = ["unit_id", "group_id"] if files["layer"] == "B" else ["unit_id"]
+    list_key = sorted(gdf_pa[keys].drop_duplicates().itertuples(index=False, name=None))
     if run["UNITS"]:
-        list_unit = [u for u in list_unit if u in run["UNITS"]]
+        list_key = [k for k in list_key if k[0] in run["UNITS"]]
     list_task, list_skip = [], []
-    for unit_id in list_unit:
+    for key in list_key:
+        unit_id, group_id = key[0], (key[1] if len(key) > 1 else None)
         unit_dir = work_dir / "units" / unit_id
-        marker = unit_dir / "rp_index.json"
+        marker = gis.Run.unit_layer_path(unit_dir, "rp_index.json", group_id)
         if (
-            marker.exists()
+            Path(marker).exists()
             and not run["FORCE"]
-            and marker.stat().st_mtime >= (unit_dir / "done.json").stat().st_mtime
+            and Path(marker).stat().st_mtime >= (unit_dir / "done.json").stat().st_mtime
         ):
-            list_skip.append(unit_id)
+            list_skip.append(key)
             continue
-        gdf_mem = gdf_pa[gdf_pa["unit_id"] == unit_id]
+        gdf_mem = gdf_pa[
+            (gdf_pa["unit_id"] == unit_id)
+            & (gdf_pa["group_id"] == group_id if group_id is not None else True)
+        ]
         list_task.append(
             {
                 "unit_id": unit_id,
-                "unit_dir": str(unit_dir),
+                "group_text": f" group {group_id}" if group_id is not None else "",
+                "labels_path": gis.Run.unit_layer_path(
+                    unit_dir, "labels.tif", group_id
+                ),
+                "hand_path": gis.Run.unit_layer_path(
+                    unit_dir, "hand_undef.tif", group_id
+                ),
+                "csv_path": gis.Run.unit_layer_path(unit_dir, "rp_index.csv", group_id),
+                "marker_path": marker,
                 "levels": dict(
                     zip(
                         gdf_mem["unit_label"].astype(int),
@@ -283,7 +299,9 @@ if __name__ == "__main__":
             }
         )
     log.info(
-        "Units with protected areas: %d to process, %d finished and skipped.",
+        "File %s: units%s with protected areas: %d to process, %d finished and skipped.",
+        files["layer"],
+        " and river groups" if files["layer"] == "B" else "",
         len(list_task),
         len(list_skip),
     )
@@ -312,15 +330,23 @@ if __name__ == "__main__":
             100 * rp["value_total_tolerance"],
         )
 
-    df_val = pd.concat(
-        [
-            pd.read_csv(work_dir / "units" / u / "rp_index.csv").assign(unit_id=u)
-            for u in list_unit
-            if (work_dir / "units" / u / "rp_index.csv").exists()
-        ],
-        ignore_index=True,
+    list_val = []
+    for key in list_key:
+        group_id = key[1] if len(key) > 1 else None
+        path = gis.Run.unit_layer_path(
+            work_dir / "units" / key[0], "rp_index.csv", group_id
+        )
+        if Path(path).exists():
+            df_one = pd.read_csv(path).assign(unit_id=key[0])
+            if group_id is not None:
+                df_one["group_id"] = group_id
+            list_val.append(df_one)
+    df_val = (
+        pd.concat(list_val, ignore_index=True)
+        if list_val
+        else pd.DataFrame(columns=keys + ["unit_label", "value_exposed"])
     )
-    gdf_rp = gdf_pa.merge(df_val, on=["unit_id", "unit_label"], how="left")
+    gdf_rp = gdf_pa.merge(df_val, on=keys + ["unit_label"], how="left")
     if gdf_rp["value_exposed"].isna().any():
         log.warning(
             "%d protected areas have no exposure value (units not processed).",
@@ -330,12 +356,15 @@ if __name__ == "__main__":
     gdf_rp["value_ghsl"] = gdf_rp["value_exposed"]
     gdf_rp["value_lulc"] = 0.0
     if country["lulc"]["enabled"]:
-        lulc_path = out_dir / "exposure_lulc.csv"
+        lulc_path = out_dir / f"exposure_lulc{files['suffix']}.csv"
         if not lulc_path.exists():
             raise SystemExit(
-                "lulc.enabled is true but exposure_lulc.csv is missing; run HAND_YZ.py first."
+                f"lulc.enabled is true but {lulc_path.name} is missing; run HAND_YZ.py with LAYER = "
+                f"{files['layer']} first."
             )
-        df_lulc = pd.read_csv(lulc_path).drop(columns=["unit_id", "unit_label"])
+        df_lulc = pd.read_csv(lulc_path).drop(
+            columns=["unit_id", "unit_label", "group_id"], errors="ignore"
+        )
         gdf_rp = gdf_rp.drop(columns="value_lulc").merge(
             df_lulc, on="protected_area_id", how="left"
         )
@@ -478,7 +507,7 @@ if __name__ == "__main__":
         gdf_rp[column] = value
     for column in ["rp_model", "rp_cap", "rp", "rp_low", "rp_high"]:
         gdf_rp[column] = gdf_rp[column].astype(float)
-    gis.Vector.write_gpkg(gdf_rp, out_dir / "protected_areas_rp.gpkg")
+    gis.Vector.write_gpkg(gdf_rp, out_dir / files["rp"])
     shares = gdf_rp.loc[scored, "rp_model"].value_counts(normalize=True).sort_index()
     log.info(
         "Model classes (share of protected areas with levees): %s; targets %s.",
@@ -489,7 +518,8 @@ if __name__ == "__main__":
         ),
     )
     log.info(
-        "RP sources: %s. protected_areas_rp.gpkg written (%d protected areas).",
+        "RP sources: %s. %s written (%d protected areas).",
         ", ".join(f"{k} {v}" for k, v in gdf_rp["rp_source"].value_counts().items()),
+        files["rp"],
         len(gdf_rp),
     )

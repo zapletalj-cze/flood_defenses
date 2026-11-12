@@ -954,6 +954,51 @@ if report:
     )
 else:
     list_res.append(("validate runs", False))
+
+# --- File B: gfm_evidence.py and rp_bounds.py with LAYER = B (protected areas per river group) ---
+proc_e = run("processing.gfm_evidence", "gfm_evidence_b", LAYER="B")
+df_evb = (
+    pd.read_csv(out / "gfm_evidence_b.csv")
+    if proc_e.returncode == 0
+    else pd.DataFrame()
+)
+gdf_b = gpd.read_file(out / "protected_areas_by_group_rp.gpkg")
+ids_b = {
+    k: covering(gdf_b[gdf_b["group_id"] == 1], k).protected_area_id.iloc[0]
+    for k in probes
+}
+held_b = (
+    set(
+        df_evb[
+            (df_evb.item_id == "GFM_TEST_E") & (df_evb.protected_area_id == ids_b["R1"])
+        ].outcome
+    )
+    if len(df_evb)
+    else set()
+)
+proc_b = run("processing.rp_bounds", "rp_bounds_b", LAYER="B")
+gdf_rpb = (
+    gpd.read_file(out / "protected_areas_by_group_rp.gpkg")
+    if proc_b.returncode == 0
+    else gpd.GeoDataFrame()
+)
+list_res.append(
+    (
+        f"LAYER=B: GFM tests of the protected areas per river group ({len(df_evb)} tests, scene E ring 1 of the "
+        f"main river {held_b}); rp_bounds bounds them (event_rp_combined_b.csv) and leaves file A unchanged",
+        proc_e.returncode == 0
+        and len(df_evb) > 0
+        and set(df_evb.protected_area_id) <= set(gdf_b.protected_area_id)
+        and held_b == {"held"}
+        and proc_b.returncode == 0
+        and (out / "event_rp_combined_b.csv").exists()
+        and "obs_rp_low" in gdf_rpb.columns
+        and len(gdf_rpb) == len(gdf_b)
+        and gpd.read_file(out / "protected_areas_rp.gpkg")["rp"].equals(
+            gdf_final["rp"]
+        ),
+    )
+)
 server.shutdown()
 
 print("Timings (s): " + ", ".join(f"{k} {v:.1f}" for k, v in timings.items()))

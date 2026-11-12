@@ -379,6 +379,25 @@ else:
     list_res.append(("rp_index runs with land cover exposure", False))
 shutil.copy(stage_b, out / "protected_areas_rp.gpkg")
 
+# --- File B: land cover exposure of the protected areas per river group ---
+proc = run("processing.HAND_YZ", "hand_yz_b", LAYER="B")
+gdf_b = gpd.read_file(out / "protected_areas_by_group.gpkg")
+df_b = (
+    pd.read_csv(out / "exposure_lulc_b.csv")
+    if proc.returncode == 0 and (out / "exposure_lulc_b.csv").exists()
+    else pd.DataFrame(columns=["protected_area_id", "value_lulc"])
+)
+list_res.append(
+    (
+        f"HAND_YZ LAYER=B: exposure_lulc_b.csv values {len(df_b)} of {len(gdf_b)} protected areas per river group "
+        f"(land cover value {df_b['value_lulc'].sum():.3g})",
+        proc.returncode == 0
+        and len(df_b) == len(gdf_b) > 0
+        and set(df_b["protected_area_id"]) == set(gdf_b["protected_area_id"])
+        and df_b["value_lulc"].sum() > 0,
+    )
+)
+
 for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")
 sys.exit(0 if all(ok for _, ok in list_res) else 1)

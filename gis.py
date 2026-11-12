@@ -4653,6 +4653,8 @@ class Config:
         "levee_gaps.max_gap_m": 200.0,
         "levee_gaps.crest_tolerance_m": 0.5,
         "leaks.sample_spacing_m": 50.0,
+        # comparison zone of the GFM tests, also the margin of the group rasters of file B
+        "evidence.comparison_distance_m": 2000.0,
         # river snapping (Stage G): values of the snapping procedure the method follows
         "country.river_guides": [],
         "country.river_upstream_area_field": "",
@@ -5319,6 +5321,46 @@ class Run:
             root.addHandler(file_handler)
         logging.captureWarnings(True)
         return logging.getLogger(name)
+
+    @staticmethod
+    def layer_files(layer):
+        """
+        Files of a layer of protected areas: "A" with all water sources together, "B" per river group
+        :param layer: "A" or "B"
+        :return: dict layer, areas (protected areas), rp (with return periods), suffix (of derived outputs)
+        """
+        layer = str(layer).strip().upper()
+        if layer == "A":
+            return {
+                "layer": "A",
+                "areas": "protected_areas.gpkg",
+                "rp": "protected_areas_rp.gpkg",
+                "suffix": "",
+            }
+        if layer == "B":
+            return {
+                "layer": "B",
+                "areas": "protected_areas_by_group.gpkg",
+                "rp": "protected_areas_by_group_rp.gpkg",
+                "suffix": "_b",
+            }
+        raise SystemExit(f"LAYER must be A or B, not {layer!r}.")
+
+    @staticmethod
+    def unit_layer_path(unit_dir, name, group_id=None):
+        """
+        Path of a unit file of a layer: the file itself for file A (group_id None), groups/<stem>_g<id><ext> for
+        a river group of file B
+        :param unit_dir: unit folder
+        :param name: file name, e.g. "labels.tif"
+        :param group_id: river group, None or NaN for file A
+        :return: str
+        """
+        if group_id is None or (isinstance(group_id, float) and np.isnan(group_id)):
+            return join(str(unit_dir), name)
+        stem, ext = os.path.splitext(name)
+        os.makedirs(join(str(unit_dir), "groups"), exist_ok=True)
+        return join(str(unit_dir), "groups", f"{stem}_g{int(group_id)}{ext}")
 
     @staticmethod
     def peak_rss_mb():

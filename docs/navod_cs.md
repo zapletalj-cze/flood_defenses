@@ -91,7 +91,11 @@ tlačítko Quit nebo Ctrl+C v terminálu.
   Bez něj se B nepočítá (varování v logu).
 - **Čas:** každá skupina v jednotce přidá zhruba tolik, kolik trvá HAND a obě záplavy souboru A
   (na jednotce 30 M buněk asi 27–31 s). Počet skupin je v řádku každé jednotky v logu.
-- Další kroky (`rp-index`, `gfm-evidence`, `rp-bounds`) zatím čtou soubor A.
+- **Další kroky se souborem B:** `rp-index`, `hand-yz`, `gfm-evidence`, `rp-bounds` a
+  `validate` mají proměnnou `LAYER` (`"A"` výchozí, `"B"`). Pro B: nejdřív
+  `$env:DEFENSES_LAYER = "B"`, pak tyto kroky ve stejném pořadí; výstupy mají příponu
+  `_b` (např. `protected_areas_by_group_rp.gpkg`, `gfm_evidence_b.csv`). V GUI volba
+  **File** na kartách těchto kroků.
 
 **Hráze a úniky** (`protected-areas`, README §5.8–5.10):
 - **`levees_crest.gpkg`:** linie hrází posunuté na korunu z DTM (nejvýš 15 m). Sloupec

@@ -2,6 +2,7 @@
 # Date: 2026-11-05
 # Stage F: matches protected areas (and Stage E implied protected areas) to GloFAS and EFAS river cells, turns the GFM
 # tests into event return periods per source, combines the sources and bounds the model RP interval; plots.
+# LAYER "A": protected_areas_rp.gpkg, "B": protected_areas_by_group_rp.gpkg (outputs with the suffix _b, no implied areas).
 
 import json
 import time
@@ -32,6 +33,7 @@ COUNTRY = "XX"
 RUN_ID = "base"  # plots in <output_dir>/<country>/plots/discharge/<RUN_ID>
 IMPLIED_RUN = "base"  # Stage E run whose implied protected areas get event return periods too (when it exists)
 SHOW_PLOTS = False  # show up to implied.plots.show_max figures per type while running (needs a display)
+LAYER = "A"  # "A": protected areas of all water sources together, "B": per river group
 
 KEYS = [
     "general.work_dir",
@@ -82,14 +84,17 @@ if __name__ == "__main__":
         RUN_ID=RUN_ID,
         IMPLIED_RUN=IMPLIED_RUN,
         SHOW_PLOTS=SHOW_PLOTS,
+        LAYER=LAYER,
     )
     cfg = gis.Config.load(run["CONFIG_PATH"], run["COUNTRY"], KEYS)
     general, country, dis = cfg["general"], cfg["country"], cfg["discharge"]
+    files = gis.Run.layer_files(run["LAYER"])
+    sfx = files["suffix"]
     out_dir = Path(general["output_dir"]) / run["COUNTRY"]
     log = gis.Run.logger("rp_bounds", out_dir / "logs", general["log_level"])
     gis.Config.warn_placeholders(cfg)
     start = time.perf_counter()
-    list_need = [out_dir / "protected_areas_rp.gpkg", out_dir / "gfm_evidence.csv"]
+    list_need = [out_dir / files["rp"], out_dir / f"gfm_evidence{sfx}.csv"]
     if not all(p.exists() for p in list_need):
         raise SystemExit(
             f"Missing inputs {[str(p) for p in list_need if not p.exists()]}; run rp_index.py and gfm_evidence.py first."
@@ -144,7 +149,10 @@ if __name__ == "__main__":
             "y": gdf_pa["source_y"].astype(float),
         }
     )
+    # implied protected areas (Stage E) belong to file A
     imp_dir = out_dir / "implied" / run["IMPLIED_RUN"]
+    if files["layer"] == "B":
+        imp_dir = out_dir / "implied" / "_none_"
     if (imp_dir / "implied_protected_areas.gpkg").exists() and (
         out_dir / "river_points.gpkg"
     ).exists():
@@ -318,7 +326,7 @@ if __name__ == "__main__":
         crs=wkt,
     )
     gis.Vector.write_gpkg(
-        gdf_match.iloc[: len(list_match)], out_dir / "discharge_matches.gpkg"
+        gdf_match.iloc[: len(list_match)], out_dir / f"discharge_matches{sfx}.gpkg"
     )
     match_s = time.perf_counter() - t
 
@@ -392,7 +400,9 @@ if __name__ == "__main__":
             "match_quality",
         ],
     )
-    df_ev.drop(columns="match_quality").to_csv(out_dir / "event_rp.csv", index=False)
+    df_ev.drop(columns="match_quality").to_csv(
+        out_dir / f"event_rp{sfx}.csv", index=False
+    )
 
     # --- 3. One return period per test from the sources (source_mode) ---
     list_comb = []
@@ -454,7 +464,7 @@ if __name__ == "__main__":
             "rp_efas",
         ],
     )
-    df_comb.to_csv(out_dir / "event_rp_combined.csv", index=False)
+    df_comb.to_csv(out_dir / f"event_rp_combined{sfx}.csv", index=False)
     log.info(
         "Event return periods: %d per source and test, %d combined tests (%s), %d source disagreements.",
         len(df_ev),
@@ -563,7 +573,7 @@ if __name__ == "__main__":
         gdf_pa.loc[i, "rp_source"] = f"{row['rp_source_prior']}+obs"
     for column in ["rp", "rp_low", "rp_high"]:
         gdf_pa[column] = gdf_pa[column].astype(float)
-    gis.Vector.write_gpkg(gdf_pa, out_dir / "protected_areas_rp.gpkg")
+    gis.Vector.write_gpkg(gdf_pa, out_dir / files["rp"])
     narrowed = int(
         (
             (gdf_pa["rp_low"] > gdf_pa["rp_low_prior"])
@@ -571,7 +581,9 @@ if __name__ == "__main__":
         ).sum()
     )
     log.info(
-        "Observed bounds: %s; %d intervals narrowed. protected_areas_rp.gpkg updated (%d protected areas).",
+        "Observed bounds: %s; %d intervals narrowed. "
+        + files["rp"]
+        + " updated (%d protected areas).",
         ", ".join(f"{k} {v}" for k, v in cases.items()),
         narrowed,
         len(gdf_pa),
@@ -582,7 +594,7 @@ if __name__ == "__main__":
     settings = cfg["implied"]["plots"]
     if settings["enabled"]:
         plots = Plots(
-            out_dir / "plots" / "discharge" / run["RUN_ID"],
+            out_dir / "plots" / "discharge" / (run["RUN_ID"] + sfx),
             settings,
             run["SHOW_PLOTS"],
             log,
@@ -1116,5 +1128,7 @@ if __name__ == "__main__":
         "total_s": round(time.perf_counter() - start, 2),
         "peak_rss_mb": round(gis.Run.peak_rss_mb()),
     }
-    (out_dir / "rp_bounds_performance.json").write_text(json.dumps(perf, indent=1))
+    (out_dir / f"rp_bounds_performance{sfx}.json").write_text(
+        json.dumps(perf, indent=1)
+    )
     log.info("Timings: %s", json.dumps(perf))

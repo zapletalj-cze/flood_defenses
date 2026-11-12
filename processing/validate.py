@@ -1,7 +1,8 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-03
 # Compares the protected areas with reference protected-area polygons: area-based recall and precision, covered share of
-# each reference polygon and, with reference return periods, a confusion matrix of RP classes.
+# each reference polygon and, with reference return periods, a confusion matrix of RP classes. LAYER "A" or "B" (per
+# river group; overlapping areas count once, outputs with the suffix _b).
 
 import json
 from pathlib import Path
@@ -16,6 +17,7 @@ import gis
 # --- Run variables (no command-line parameters; DEFENSES_<NAME> environment variables override them) ---
 CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
+LAYER = "A"  # "A": protected areas of all water sources together, "B": per river group
 
 KEYS = [
     "general.output_dir",
@@ -27,7 +29,9 @@ KEYS = [
 ]
 
 if __name__ == "__main__":
-    run = gis.Run.env_overrides(CONFIG_PATH=CONFIG_PATH, COUNTRY=COUNTRY)
+    run = gis.Run.env_overrides(CONFIG_PATH=CONFIG_PATH, COUNTRY=COUNTRY, LAYER=LAYER)
+    files = gis.Run.layer_files(run["LAYER"])
+    sfx = files["suffix"]
     cfg = gis.Config.load(run["CONFIG_PATH"], run["COUNTRY"], KEYS)
     general, country = cfg["general"], cfg["country"]
     out_dir = Path(general["output_dir"]) / run["COUNTRY"]
@@ -37,9 +41,9 @@ if __name__ == "__main__":
         raise SystemExit(
             "countries.<code>.reference_protected_areas is empty; nothing to validate."
         )
-    result_path = out_dir / "protected_areas_rp.gpkg"
+    result_path = out_dir / files["rp"]
     if not result_path.exists():
-        result_path = out_dir / "protected_areas.gpkg"
+        result_path = out_dir / files["areas"]
     if not result_path.exists():
         raise SystemExit("No protected areas found; run protected_areas.py first.")
     gdf_pa = gpd.read_file(result_path)
@@ -90,7 +94,7 @@ if __name__ == "__main__":
         int((gdf_ref["covered_m2"] == 0).sum()),
         int((gdf_ref["covered_share"] > 0.5).sum()),
     )
-    gis.Vector.write_gpkg(gdf_ref, out_dir / "validation_coverage.gpkg")
+    gis.Vector.write_gpkg(gdf_ref, out_dir / f"validation_coverage{sfx}.gpkg")
     report = {
         "result": result_path.name,
         "reference_polygons": len(gdf_ref),
@@ -137,7 +141,7 @@ if __name__ == "__main__":
             pd.Series(gdf_cmp["rp"].to_numpy(), name="rp"),
             dropna=False,
         ).reindex(index=classes, columns=classes, fill_value=0)
-        df_cm.to_csv(out_dir / "validation_rp_confusion.csv")
+        df_cm.to_csv(out_dir / f"validation_rp_confusion{sfx}.csv")
         within = (gdf_cmp["rp_low"].to_numpy() <= reference_rp) & (
             reference_rp <= gdf_cmp["rp_high"].to_numpy()
         )
@@ -164,4 +168,4 @@ if __name__ == "__main__":
         log.warning(
             "The protected areas have no rp column (run rp_index.py); RP validation skipped."
         )
-    (out_dir / "validation.json").write_text(json.dumps(report, indent=2))
+    (out_dir / f"validation{sfx}.json").write_text(json.dumps(report, indent=2))

@@ -26,6 +26,7 @@ HINTS = (
 )
 DATE_FROM = ""  # optional scene date filter, YYYY-MM-DD (e.g. one flood event)
 DATE_TO = ""
+LAYER = "A"  # "A": protected areas of all water sources together, "B": per river group (no hints)
 
 KEYS = [
     "general.work_dir",
@@ -69,7 +70,7 @@ def evidence_unit(task):
     start = time.perf_counter()
     p = task["params"]
     unit_dir = Path(task["unit_dir"])
-    labels_ds = gdal.Open(str(unit_dir / "labels.tif"))
+    labels_ds = gdal.Open(task["labels_path"])
     gt, wkt = labels_ds.GetGeoTransform(), labels_ds.GetProjection()
     res = gt[1]
     labels = labels_ds.ReadAsArray()
@@ -90,7 +91,7 @@ def evidence_unit(task):
         )
     # Analysis window: the protected areas and their comparison zones (whole unit window with hints).
     labels = labels[r0:r1, c0:c1]
-    hand = gdal.Open(str(unit_dir / "hand_undef.tif")).ReadAsArray(
+    hand = gdal.Open(task["hand_path"]).ReadAsArray(
         int(c0), int(r0), int(c1 - c0), int(r1 - r0)
     )
     hand = hand.astype(np.float32)
@@ -178,9 +179,7 @@ def evidence_unit(task):
                 )
                 test_count += tested
                 dry_count += tested & ~wet
-    pd.DataFrame(list_rows, columns=COLUMNS).to_csv(
-        unit_dir / "gfm_evidence.csv", index=False
-    )
+    pd.DataFrame(list_rows, columns=COLUMNS).to_csv(task["csv_path"], index=False)
 
     if task["hints"]:
         share = np.where(test_count > 0, dry_count / np.maximum(test_count, 1), 0.0)
@@ -201,7 +200,7 @@ def evidence_unit(task):
         gdf_hint["unit_id"] = task["unit_id"]
         gis.Vector.write_gpkg(gdf_hint, unit_dir / "missing_barrier_hints.gpkg")
     seconds = time.perf_counter() - start
-    summary = f"unit {task['unit_id']}: {len(task['scenes'])} scenes x {len(kept)} protected areas tested in {seconds:.1f} s"
+    summary = f"unit {task['unit_id']}{task['group_text']}: {len(task['scenes'])} scenes x {len(kept)} protected areas tested in {seconds:.1f} s"
     logging.getLogger("gfm_evidence").info(summary)
     return {"unit_id": task["unit_id"], "seconds": seconds, "summary": summary}
 
@@ -214,8 +213,10 @@ if __name__ == "__main__":
         HINTS=HINTS,
         DATE_FROM=DATE_FROM,
         DATE_TO=DATE_TO,
+        LAYER=LAYER,
     )
     cfg = gis.Config.load(run["CONFIG_PATH"], run["COUNTRY"], KEYS)
+    files = gis.Run.layer_files(run["LAYER"])
     general, evidence, sources = cfg["general"], cfg["evidence"], cfg["sources"]
     work_dir = Path(general["work_dir"]) / run["COUNTRY"]
     out_dir = Path(general["output_dir"]) / run["COUNTRY"]
@@ -226,11 +227,16 @@ if __name__ == "__main__":
     )
     if (
         not (out_dir / "gfm_index.csv").exists()
-        or not (out_dir / "protected_areas.gpkg").exists()
+        or not (out_dir / files["areas"]).exists()
     ):
         raise SystemExit(
-            "gfm_index.csv or protected_areas.gpkg is missing; run protected_areas.py and download_gfm.py."
+            f"gfm_index.csv or {files['areas']} is missing; run protected_areas.py and download_gfm.py."
         )
+    if run["HINTS"] and files["layer"] == "B":
+        log.warning(
+            "Missing-barrier hints come from file A; HINTS is ignored for LAYER = B."
+        )
+        run["HINTS"] = False
     df_idx = pd.read_csv(out_dir / "gfm_index.csv", dtype={"unit_id": str}).fillna("")
     if len(df_idx):
         dates = pd.to_datetime(df_idx["datetime"], utc=True, format="ISO8601").dt.date
@@ -242,7 +248,7 @@ if __name__ == "__main__":
                 df_idx = df_idx[compare(datetime.date.fromisoformat(bound)).to_numpy()]
     if run["UNITS"]:
         df_idx = df_idx[df_idx["unit_id"].isin(run["UNITS"])]
-    gdf_pa = gpd.read_file(out_dir / "protected_areas.gpkg")
+    gdf_pa = gpd.read_file(out_dir / files["areas"])
     params = {
         **{
             k: evidence[k]
@@ -268,24 +274,48 @@ if __name__ == "__main__":
     }
     list_task = []
     for unit_id, df_scn in df_idx.groupby("unit_id"):
-        gdf_mem = gdf_pa[gdf_pa["unit_id"] == unit_id]
-        if gdf_mem.empty and not run["HINTS"]:
+        unit_dir = work_dir / "units" / unit_id
+        gdf_unit = gdf_pa[gdf_pa["unit_id"] == unit_id]
+        if gdf_unit.empty and not run["HINTS"]:
             continue
-        list_task.append(
-            {
-                "unit_id": unit_id,
-                "unit_dir": str(work_dir / "units" / unit_id),
-                "protected_areas": list(
-                    zip(gdf_mem["unit_label"].astype(int), gdf_mem["protected_area_id"])
-                ),
-                "scenes": df_scn.to_dict("records"),
-                "hints": run["HINTS"],
-                "rivers_used": str(work_dir / "rivers_used.gpkg"),
-                "barrier_lines": str(work_dir / "barrier_lines.gpkg"),
-                "warp_memory_mb": general["warp_memory_limit_mb"],
-                "params": params,
-            }
+        # file A: one task per unit; file B: one per river group of the unit (its own labels and HAND)
+        list_group = (
+            sorted(gdf_unit["group_id"].unique()) if files["layer"] == "B" else [None]
         )
+        for group_id in list_group:
+            gdf_mem = (
+                gdf_unit
+                if group_id is None
+                else gdf_unit[gdf_unit["group_id"] == group_id]
+            )
+            list_task.append(
+                {
+                    "unit_id": unit_id,
+                    "group_text": f" group {group_id}" if group_id is not None else "",
+                    "labels_path": gis.Run.unit_layer_path(
+                        unit_dir, "labels.tif", group_id
+                    ),
+                    "hand_path": gis.Run.unit_layer_path(
+                        unit_dir, "hand_undef.tif", group_id
+                    ),
+                    "csv_path": gis.Run.unit_layer_path(
+                        unit_dir, "gfm_evidence.csv", group_id
+                    ),
+                    "unit_dir": str(unit_dir),
+                    "protected_areas": list(
+                        zip(
+                            gdf_mem["unit_label"].astype(int),
+                            gdf_mem["protected_area_id"],
+                        )
+                    ),
+                    "scenes": df_scn.to_dict("records"),
+                    "hints": run["HINTS"],
+                    "rivers_used": str(work_dir / "rivers_used.gpkg"),
+                    "barrier_lines": str(work_dir / "barrier_lines.gpkg"),
+                    "warp_memory_mb": general["warp_memory_limit_mb"],
+                    "params": params,
+                }
+            )
     log.info(
         "Evidence: %d scene windows in %d units with protected areas%s.",
         len(df_idx),
@@ -308,24 +338,25 @@ if __name__ == "__main__":
     if list_fail:
         raise SystemExit(f"Units failed: {list_fail}; rerun to retry them.")
 
-    list_ev = [pd.read_csv(Path(t["unit_dir"]) / "gfm_evidence.csv") for t in list_task]
+    list_ev = [pd.read_csv(t["csv_path"]) for t in list_task]
     df_ev = (
         pd.concat(list_ev, ignore_index=True)
         if list_ev
         else pd.DataFrame(columns=COLUMNS)
     )
-    df_ev.to_csv(out_dir / "gfm_evidence.csv", index=False)
+    df_ev.to_csv(out_dir / f"gfm_evidence{files['suffix']}.csv", index=False)
     # One feature per protected area and scene, for visual checks in QGIS.
     gdf_ev = gdf_pa[["protected_area_id", "geometry"]].merge(
         df_ev, on="protected_area_id", how="inner"
     )
     gis.Vector.write_gpkg(
         gpd.GeoDataFrame(gdf_ev, geometry="geometry", crs=gdf_pa.crs),
-        out_dir / "gfm_evidence.gpkg",
+        out_dir / f"gfm_evidence{files['suffix']}.gpkg",
     )
     counts = df_ev["outcome"].value_counts()
     log.info(
-        "gfm_evidence.csv: %d tests (%s) for %d protected areas.",
+        "gfm_evidence%s.csv: %d tests (%s) for %d protected areas.",
+        files["suffix"],
         len(df_ev),
         ", ".join(f"{k} {v}" for k, v in counts.items()),
         df_ev["protected_area_id"].nunique() if len(df_ev) else 0,
@@ -336,6 +367,7 @@ if __name__ == "__main__":
         list_hint = [
             gpd.read_file(Path(t["unit_dir"]) / "missing_barrier_hints.gpkg")
             for t in list_task
+            if (Path(t["unit_dir"]) / "missing_barrier_hints.gpkg").exists()
         ]
         list_hint = [f for f in list_hint if len(f)]
         if list_hint:

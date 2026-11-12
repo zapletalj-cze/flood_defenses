@@ -65,6 +65,14 @@ OUTPUTS = {
         "protection_level_m",
         "unit_id",
     ],
+    "protected_areas_by_group_rp.gpkg": [
+        "protected_area_id",
+        "group_id",
+        "area_m2",
+        "rp",
+        "rp_low",
+        "rp_high",
+    ],
     "leaks.gpkg": [
         "leak_id",
         "cause",

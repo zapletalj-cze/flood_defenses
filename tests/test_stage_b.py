@@ -534,6 +534,47 @@ if not (
     and all(int(gdf_rp.covers(world(Point(*xy))).sum()) == 1 for xy in probes.values())
 ):
     list_res.append(("protected_areas_rp contains the three rings", False))
+# File B downstream: rp_index with LAYER = B values the protected areas of every river group with the labels and HAND
+# of that group (gated crossings: all three rings in group 1)
+proc = run("processing.rp_index", LAYER="B")
+gdf_b = gpd.read_file(out / "protected_areas_by_group.gpkg")
+gdf_rpb = (
+    gpd.read_file(out / "protected_areas_by_group_rp.gpkg")
+    if (out / "protected_areas_by_group_rp.gpkg").exists()
+    else gpd.GeoDataFrame(
+        columns=["group_id", "value_exposed", "rp", "geometry"], geometry="geometry"
+    )
+)
+rasters_ok = all(
+    Path(gis.Run.unit_layer_path(root / "work" / "T4" / "units" / u, name, g)).exists()
+    for u, g in gdf_b[["unit_id", "group_id"]].drop_duplicates().itertuples(index=False)
+    for name in ("labels.tif", "hand_undef.tif")
+)
+
+
+def value_b(label, group):
+    hit = gdf_rpb[
+        (gdf_rpb["group_id"] == group) & gdf_rpb.covers(world(Point(*probes[label])))
+    ]
+    return float(hit["value_exposed"].iloc[0]) if len(hit) else float("nan")
+
+
+list_res.append(
+    (
+        f"rp_index LAYER=B: {len(gdf_rpb)} of {len(gdf_b)} protected areas per river group valued with the rasters "
+        f"of their group (group rasters {'present' if rasters_ok else 'missing'}); rings 1 and 2 in the town have "
+        f"value ({value_b('R1_gate', 1):.3g}, {value_b('R2_pump', 1):.3g}), ring 3 none ({value_b('R3_plain', 1):.3g})",
+        proc.returncode == 0
+        and rasters_ok
+        and len(gdf_rpb) == len(gdf_b) > 0
+        and gdf_rpb["value_exposed"].notna().all()
+        and gdf_rpb["rp"].notna().all()
+        and value_b("R1_gate", 1) > 0
+        and value_b("R2_pump", 1) > 0
+        and value_b("R3_plain", 1) == 0,
+    )
+)
+
 for label, ok in list_res:
     print(f"{'PASS' if ok else 'FAIL'}  {label}")
 sys.exit(0 if all(ok for _, ok in list_res) else 1)

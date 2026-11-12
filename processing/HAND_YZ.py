@@ -2,6 +2,7 @@
 # Date: 2026-11-04
 # HAND_YZ: land use / land cover exposure of each protected area (ESA WorldCover; Urban Atlas where available), valued
 # with category damages at the HAND depth of the protection level. Supplements the GHSL value of rp_index.py.
+# LAYER "A": protected_areas.gpkg, "B": protected_areas_by_group.gpkg (labels and HAND of each river group).
 
 import hashlib
 import json
@@ -22,6 +23,7 @@ CONFIG_PATH = "config/defenses.toml"
 COUNTRY = "XX"
 FORCE = False  # recompute units whose land cover exposure is up to date
 UNITS = []  # unit ids to process; empty = all units with protected areas
+LAYER = "A"  # "A": protected areas of all water sources together, "B": per river group
 
 KEYS = [
     "general.work_dir",
@@ -44,8 +46,7 @@ KEYS = [
 
 def exposure_unit(task):
     start = time.perf_counter()
-    unit_dir = Path(task["unit_dir"])
-    labels_ds = gdal.Open(str(unit_dir / "labels.tif"))
+    labels_ds = gdal.Open(task["labels_path"])
     gt, wkt = labels_ds.GetGeoTransform(), labels_ds.GetProjection()
     labels = labels_ds.ReadAsArray()
     # Only the bounding box of the unit's kept protected areas is valued.
@@ -57,7 +58,7 @@ def exposure_unit(task):
     labels = np.where(kept, labels, 0)[r0:r1, c0:c1]
     del kept
     hand = (
-        gdal.Open(str(unit_dir / "hand_undef.tif"))
+        gdal.Open(task["hand_path"])
         .ReadAsArray(int(c0), int(r0), int(c1 - c0), int(r1 - r0))
         .astype(np.float32)
     )
@@ -142,7 +143,7 @@ def exposure_unit(task):
             },
         }
     )
-    df_res.to_csv(unit_dir / "hand_yz.csv", index=False)
+    df_res.to_csv(task["csv_path"], index=False)
     seconds = time.perf_counter() - start
     done = {
         "unit_id": task["unit_id"],
@@ -152,23 +153,24 @@ def exposure_unit(task):
         "cells": int(labels.size),
         "urban_atlas_cells": ua_cells,
         "summary": (
-            f"unit {task['unit_id']}: {len(df_res)} protected areas, land cover value "
+            f"unit {task['unit_id']}{task['group_text']}: {len(df_res)} protected areas, land cover value "
             f"{df_res['value_lulc'].sum():.3g}, Urban Atlas cells {ua_cells}, {seconds:.1f} s"
         ),
     }
-    marker = unit_dir / "hand_yz.json.tmp"
-    marker.write_text(json.dumps(done, indent=2))
-    os.replace(marker, unit_dir / "hand_yz.json")
+    marker = task["marker_path"] + ".tmp"
+    Path(marker).write_text(json.dumps(done, indent=2))
+    os.replace(marker, task["marker_path"])
     logging.getLogger("HAND_YZ").info(done["summary"])
     return done
 
 
 if __name__ == "__main__":
     run = gis.Run.env_overrides(
-        CONFIG_PATH=CONFIG_PATH, COUNTRY=COUNTRY, FORCE=FORCE, UNITS=UNITS
+        CONFIG_PATH=CONFIG_PATH, COUNTRY=COUNTRY, FORCE=FORCE, UNITS=UNITS, LAYER=LAYER
     )
     cfg = gis.Config.load(run["CONFIG_PATH"], run["COUNTRY"], KEYS)
     general, lulc = cfg["general"], cfg["country"]["lulc"]
+    files = gis.Run.layer_files(run["LAYER"])
     work_dir = Path(general["work_dir"]) / run["COUNTRY"]
     out_dir = Path(general["output_dir"]) / run["COUNTRY"]
     log = gis.Run.logger("HAND_YZ", out_dir / "logs", general["log_level"])
@@ -176,10 +178,8 @@ if __name__ == "__main__":
     gis.Run.configure_gdal(
         general["gdal_cachemax_mb"], general["gdal_threads_per_worker"]
     )
-    if not (out_dir / "protected_areas.gpkg").exists():
-        raise SystemExit(
-            "protected_areas.gpkg is missing; run protected_areas.py first."
-        )
+    if not (out_dir / files["areas"]).exists():
+        raise SystemExit(f"{files['areas']} is missing; run protected_areas.py first.")
     if not lulc["max_damage_csv"] or not lulc["depth_damage_csv"]:
         raise SystemExit(
             "Set countries.<code>.lulc.max_damage_csv and depth_damage_csv (values per category)."
@@ -239,7 +239,7 @@ if __name__ == "__main__":
     )
 
     # --- Urban Atlas: single-layer copies, class codes to category ids, only polygons touching protected areas ---
-    gdf_pa = gpd.read_file(out_dir / "protected_areas.gpkg")
+    gdf_pa = gpd.read_file(out_dir / files["areas"])
     wkt = gdf_pa.crs.to_wkt()
     urban_atlas, list_ua = "", []
     if lulc["urban_atlas"]:
@@ -314,26 +314,40 @@ if __name__ == "__main__":
     phash = hashlib.sha256(
         json.dumps([parameters, stamp], sort_keys=True, default=str).encode()
     ).hexdigest()
-    list_unit = sorted(gdf_pa["unit_id"].unique())
+    # one task per unit (file A) or per unit and river group (file B)
+    keys = ["unit_id", "group_id"] if files["layer"] == "B" else ["unit_id"]
+    list_key = sorted(gdf_pa[keys].drop_duplicates().itertuples(index=False, name=None))
     if run["UNITS"]:
-        list_unit = [u for u in list_unit if u in run["UNITS"]]
+        list_key = [k for k in list_key if k[0] in run["UNITS"]]
     list_task, list_skip = [], []
-    for unit_id in list_unit:
+    for key in list_key:
+        unit_id, group_id = key[0], (key[1] if len(key) > 1 else None)
         unit_dir = work_dir / "units" / unit_id
-        marker = unit_dir / "hand_yz.json"
+        marker = Path(gis.Run.unit_layer_path(unit_dir, "hand_yz.json", group_id))
         if (
             marker.exists()
             and not run["FORCE"]
             and json.loads(marker.read_text()).get("parameters") == phash
             and marker.stat().st_mtime >= (unit_dir / "done.json").stat().st_mtime
         ):
-            list_skip.append(unit_id)
+            list_skip.append(key)
             continue
-        gdf_mem = gdf_pa[gdf_pa["unit_id"] == unit_id]
+        gdf_mem = gdf_pa[
+            (gdf_pa["unit_id"] == unit_id)
+            & (gdf_pa["group_id"] == group_id if group_id is not None else True)
+        ]
         list_task.append(
             {
                 "unit_id": unit_id,
-                "unit_dir": str(unit_dir),
+                "group_text": f" group {group_id}" if group_id is not None else "",
+                "labels_path": gis.Run.unit_layer_path(
+                    unit_dir, "labels.tif", group_id
+                ),
+                "hand_path": gis.Run.unit_layer_path(
+                    unit_dir, "hand_undef.tif", group_id
+                ),
+                "csv_path": gis.Run.unit_layer_path(unit_dir, "hand_yz.csv", group_id),
+                "marker_path": str(marker),
                 "levels": dict(
                     zip(
                         gdf_mem["unit_label"].astype(int),
@@ -362,19 +376,27 @@ if __name__ == "__main__":
     if list_fail:
         raise SystemExit(f"Units failed: {list_fail}; rerun to retry them.")
 
-    list_exp = [
-        pd.read_csv(work_dir / "units" / u / "hand_yz.csv").assign(unit_id=u)
-        for u in list_unit
-        if (work_dir / "units" / u / "hand_yz.csv").exists()
-    ]
-    df_exp = gdf_pa[["protected_area_id", "unit_id", "unit_label"]].merge(
+    list_exp = []
+    for key in list_key:
+        group_id = key[1] if len(key) > 1 else None
+        path = gis.Run.unit_layer_path(
+            work_dir / "units" / key[0], "hand_yz.csv", group_id
+        )
+        if Path(path).exists():
+            df_one = pd.read_csv(path).assign(unit_id=key[0])
+            if group_id is not None:
+                df_one["group_id"] = group_id
+            list_exp.append(df_one)
+    df_exp = gdf_pa[["protected_area_id"] + keys + ["unit_label"]].merge(
         pd.concat(list_exp, ignore_index=True),
-        on=["unit_id", "unit_label"],
+        on=keys + ["unit_label"],
         how="inner",
     )
-    df_exp.to_csv(out_dir / "exposure_lulc.csv", index=False)
+    name = f"exposure_lulc{files['suffix']}.csv"
+    df_exp.to_csv(out_dir / name, index=False)
     log.info(
-        "exposure_lulc.csv: %d protected areas, land cover value %.4g (%s).",
+        "%s: %d protected areas, land cover value %.4g (%s).",
+        name,
         len(df_exp),
         df_exp["value_lulc"].sum(),
         ", ".join(f"{n} {df_exp[f'lulc_{n}'].sum():.3g}" for n in list_cat),

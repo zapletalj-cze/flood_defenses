@@ -38,6 +38,7 @@ const OPTION_TEXT = {
   RUN_ID: ["text", "Run id", "base"],
   DATE_FROM: ["text", "From", "YYYY-MM-DD"],
   DATE_TO: ["text", "To", "YYYY-MM-DD"],
+  LAYER: ["choice", "File", ["A", "B"]],
 };
 const PAGES = {
   pipeline: ["Pipeline", "Run the steps in order. Every card shows what the step has written."],
@@ -166,6 +167,10 @@ function optionsHtml(step) {
     const [kind, label, ph] = OPTION_TEXT[opt.name] || ["text", opt.name, ""];
     const value = optionValue(step, opt);
     const id = `${step.module}|${opt.name}`;
+    if (kind === "choice") {
+      const titles = { A: "A · all rivers", B: "B · per river group" };
+      return `<label class="opt-text">${esc(label)}<div class="select-wrap"><select class="input small" data-opt="${esc(id)}">${ph.map((o) => `<option value="${esc(o)}" ${String(value) === o ? "selected" : ""}>${esc(titles[o] || o)}</option>`).join("")}</select></div></label>`;
+    }
     if (kind === "switch") {
       return `<label class="switch" title="${esc(opt.name)}"><input type="checkbox" data-opt="${esc(id)}" ${value ? "checked" : ""}><span class="track"></span>${esc(label)}</label>`;
     }
