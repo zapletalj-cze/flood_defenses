@@ -46,6 +46,16 @@ KEYS = [
     "river_groups.max_join_ratio",
     "river_groups.max_length_m",
     "river_groups.min_upstream_area_km2",
+    "levee_snap.densify_m",
+    "levee_snap.max_shift_m",
+    "levee_snap.side_m",
+    "levee_snap.min_height_m",
+    "levee_snap.level_tolerance_m",
+    "levee_snap.smooth_vertices",
+    "levee_snap.min_ridge_share",
+    "levee_gaps.max_gap_m",
+    "levee_gaps.crest_tolerance_m",
+    "leaks.sample_spacing_m",
     "river_snap.densify_m",
     "river_snap.guide_search_m",
     "river_snap.guide_max_shift_m",
@@ -100,6 +110,17 @@ UNIT_COLUMNS = {
     "truncated": "bool",
     "touches_corridor_edge": "bool",
     "touches_dtm_edge": "bool",
+}
+LEAK_COLUMNS = {
+    "cause": "str",
+    "x": "float64",
+    "y": "float64",
+    "levee_length_m": "float64",
+    "n_samples": "int64",
+    "line_ids": "str",
+    "crest_hand_median_m": "float64",
+    "level_behind_median_m": "float64",
+    "lost_margin_median_m": "float64",
 }
 OUTPUT_COLUMNS = [
     "protected_area_id",
@@ -697,7 +718,6 @@ def process_unit(task):
     inner_labels = np.zeros(shape, np.int32)
     for k, zone in enumerate(inner_zones, start=1):
         inner_labels[zones == zone] = k
-    del zones
     gdf_encl = gis.Raster.polygonize_labels(inner_labels, gt, wkt).rename(
         columns={"label": "zone"}
     )
@@ -814,6 +834,196 @@ def process_unit(task):
     counts["protected_areas"] = len(gdf_pa)
     times["protected_areas"] = time.perf_counter() - t
 
+    # --- Leak diagnostics (all water sources together): levees checked every leak_spacing_m inside the core. A
+    # levee holds water back where one side is protected. Otherwise, when the terrain behind it lies above its
+    # crest, it is not needed; else the flood path to the cell behind it is followed back to where the water gets
+    # past the levee: an open river crossing, a low crest, the free end of a line, or a water source behind it. ---
+    t = time.perf_counter()
+    list_rows = []
+    status = {"protected": 0, "terrain_above_crest": 0, "leak": 0, "unclear": 0}
+    gdf_bl_core = gdf_bl[gdf_bl.intersects(core)] if len(gdf_bl) else gdf_bl
+    if stream.any() and len(gdf_bl_core):
+        owner, s_xy, s_norm, weight = gis.Vector.line_samples(
+            shapely.intersection(gdf_bl_core.geometry.values, core),
+            p["leak_spacing_m"],
+            res,
+        )
+        side = p["barrier_removal_width_m"] + 2 * res
+        list_cell = []
+        for xy in (s_xy, s_xy + side * s_norm, s_xy - side * s_norm):
+            cols = np.floor((xy[:, 0] - gt[0]) / res).astype(np.int64)
+            rows = np.floor((gt[3] - xy[:, 1]) / res).astype(np.int64)
+            inside = (rows >= 0) & (rows < shape[0]) & (cols >= 0) & (cols < shape[1])
+            list_cell.append(np.where(inside, rows * shape[1] + cols, -1))
+        i0, ia, ib = list_cell
+        flat_zone = zones.ravel()
+        use = (i0 >= 0) & (ia >= 0) & (ib >= 0)
+        use[use] = (
+            barrier.ravel()[i0[use]]
+            & (flat_zone[ia[use]] > 0)
+            & (flat_zone[ib[use]] > 0)
+        )
+        owner, s_xy, weight = owner[use], s_xy[use], weight[use]
+        i0, ia, ib = i0[use], ia[use], ib[use]
+        crest_h = (crest - river_ref).ravel()[i0]
+        flat_margin = margin.ravel()
+        protected = (flat_margin[ia] >= p["min_margin_m"]) | (
+            flat_margin[ib] >= p["min_margin_m"]
+        )
+        # behind = the side not reached by rivers entering the window; else the side farther from them
+        is_outer = np.zeros(int(flat_zone.max()) + 1, bool)
+        is_outer[outer_zones] = True
+        outer_seeds = seeds & is_outer[zones]
+        to_river = gis.Hydro.distance_cells(
+            outer_seeds if outer_seeds.any() else seeds, float(sum(shape))
+        ).ravel()
+        out_a, out_b = is_outer[flat_zone[ia]], is_outer[flat_zone[ib]]
+        behind = np.where(
+            out_a != out_b,
+            np.where(out_b, ia, ib),
+            np.where(to_river[ia] >= to_river[ib], ia, ib),
+        )
+        del to_river, outer_seeds
+        level = spill_def.ravel()[behind]
+        terrain = ~protected & (
+            hand_undef.ravel()[behind] >= crest_h - p["min_margin_m"]
+        )
+        leak = ~protected & ~terrain & np.isfinite(level)
+        status["protected"] = int(protected.sum())
+        status["terrain_above_crest"] = int(terrain.sum())
+        # events on the flood path: 1 = open river crossing, 2 = raised barrier cell, 3 = free end of a line
+        event = np.zeros(shape, np.int8)
+        event[barrier_full & ~barrier] = 1
+        event[barrier] = 2
+        list_g = list(gdf_bl.geometry)
+        ends = shapely.points([g.coords[k] for g in list_g for k in (0, -1)])
+        end_owner = np.repeat(np.arange(len(list_g)), 2)
+        e_idx, l_idx = gdf_bl.sindex.query(
+            ends, predicate="dwithin", distance=p["touch_tolerance_m"]
+        )
+        tied = np.zeros(len(ends), bool)
+        tied[e_idx[l_idx != end_owner[e_idx]]] = True
+        closed = shapely.distance(ends[0::2], ends[1::2]) <= p["touch_tolerance_m"]
+        tied |= np.repeat(closed, 2)
+        free_xy = shapely.get_coordinates(ends[~tied])
+        end_id = np.zeros(shape, np.int32)
+        if len(free_xy):
+            end_id = gis.Raster.rasterize_geometries(
+                shapely.buffer(shapely.points(free_xy), side),
+                np.arange(1, len(free_xy) + 1),
+                shape,
+                gt,
+                wkt,
+                True,
+                np.int32,
+            )
+            event[(end_id > 0) & (event == 0)] = 3
+        code, cell = gis.Hydro.first_event_on_path(
+            order_def, seeds, event, behind[leak]
+        )
+        del event
+        # open crossings next to each zone, for paths that start at a water source inside a closed zone
+        cross = np.flatnonzero((barrier_full & stream).ravel())
+        c_rows, c_cols = np.divmod(cross, shape[1])
+        list_cz = []
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            r, c = c_rows + dr, c_cols + dc
+            ok = (r >= 0) & (r < shape[0]) & (c >= 0) & (c < shape[1])
+            list_cz.append(
+                pd.DataFrame(
+                    {"cell": cross[ok], "zone": flat_zone[r[ok] * shape[1] + c[ok]]}
+                )
+            )
+        df_cz = pd.concat(list_cz).query("zone > 0").drop_duplicates()
+        cause = np.full(len(code), "", dtype=object)
+        loc = np.full(len(code), -1, np.int64)
+        loc_xy = np.full((len(code), 2), np.nan)
+        cause[code == 1], loc[code == 1] = "river_crossing", cell[code == 1]
+        cause[code == 2], loc[code == 2] = "low_crest", cell[code == 2]
+        at_end = code == 3
+        cause[at_end] = "line_end"
+        loc_xy[at_end] = free_xy[end_id.ravel()[cell[at_end]] - 1]
+        zone_b = flat_zone[behind[leak]]
+        for k in np.flatnonzero(code == -1):
+            if is_outer[zone_b[k]]:
+                continue  # the side choice or an opening not found on the path: unclear
+            near = df_cz.loc[df_cz.zone == zone_b[k], "cell"].to_numpy()
+            if len(near):
+                sr, sc = divmod(int(cell[k]), shape[1])
+                nr, nc = np.divmod(near, shape[1])
+                cause[k] = "river_crossing"
+                loc[k] = near[np.argmin((nr - sr) ** 2 + (nc - sc) ** 2)]
+            else:
+                cause[k], loc[k] = "water_source_behind", cell[k]
+        has_cell = loc >= 0
+        lr, lc = np.divmod(loc[has_cell], shape[1])
+        loc_xy[has_cell, 0] = gt[0] + (lc + 0.5) * res
+        loc_xy[has_cell, 1] = gt[3] - (lr + 0.5) * res
+        status["leak"] = int((cause != "").sum())
+        status["unclear"] = int(leak.sum()) - status["leak"]
+        line_ids = gdf_bl_core["line_id"].to_numpy()[owner]
+        known = cause != ""
+        df_leak = pd.DataFrame(
+            {
+                "cause": cause[known],
+                "x": loc_xy[known, 0],
+                "y": loc_xy[known, 1],
+                "line_id": line_ids[leak][known],
+                "weight": weight[leak][known],
+                "crest_h": crest_h[leak][known],
+                "level": level[leak][known],
+            }
+        )
+        df_terr = pd.DataFrame(
+            {
+                "cause": "terrain_above_crest",
+                "x": s_xy[terrain, 0],
+                "y": s_xy[terrain, 1],
+                "line_id": line_ids[terrain],
+                "weight": weight[terrain],
+                "crest_h": crest_h[terrain],
+                "level": hand_undef.ravel()[behind[terrain]],
+            }
+        )
+        # terrain above the crest: one record per line, at its first such sample
+        df_terr[["x", "y"]] = df_terr.groupby("line_id")[["x", "y"]].transform("first")
+        df_s = pd.concat([df_leak, df_terr], ignore_index=True)
+        if len(df_s):
+            step = p["id_rounding_m"]
+            df_s["kx"] = np.round(df_s["x"] / step)
+            df_s["ky"] = np.round(df_s["y"] / step)
+            df_s["lost"] = df_s["crest_h"] - df_s["level"]
+            list_rows.append(
+                df_s.groupby(["cause", "kx", "ky"], sort=False)
+                .agg(
+                    x=("x", "first"),
+                    y=("y", "first"),
+                    levee_length_m=("weight", "sum"),
+                    n_samples=("weight", "size"),
+                    line_ids=("line_id", lambda v: ",".join(map(str, sorted(set(v))))),
+                    crest_hand_median_m=("crest_h", "median"),
+                    level_behind_median_m=("level", "median"),
+                    lost_margin_median_m=("lost", "median"),
+                )
+                .reset_index()
+                .drop(columns=["kx", "ky"])
+            )
+    df_lk = (
+        pd.concat(list_rows, ignore_index=True)
+        if list_rows
+        else pd.DataFrame({c: pd.Series(dtype=d) for c, d in LEAK_COLUMNS.items()})
+    )
+    gdf_leaks = gpd.GeoDataFrame(
+        df_lk.astype(LEAK_COLUMNS),
+        geometry=gpd.points_from_xy(df_lk["x"], df_lk["y"]),
+        crs=wkt,
+    )
+    gdf_leaks["unit_id"] = unit_id
+    counts.update({f"levee_samples_{k}": v for k, v in status.items()})
+    counts["leaks"] = len(gdf_leaks)
+    del zones
+    times["leaks"] = time.perf_counter() - t
+
     # --- Protected areas per river group: water sources and drainage outlets are the cells of one group; the
     # other rivers are terrain (a flood does not come from all rivers at once) ---
     t = time.perf_counter()
@@ -922,6 +1132,7 @@ def process_unit(task):
     if river_group is not None:
         gis.Vector.write_gpkg(gdf_grp, unit_dir / "protected_areas_by_group.gpkg")
     gis.Vector.write_gpkg(gdf_encl, unit_dir / "enclosed_streams.gpkg")
+    gis.Vector.write_gpkg(gdf_leaks, unit_dir / "leaks.gpkg")
     pd.DataFrame(
         list_crest, columns=["line_id", "crest_min_m", "crest_hand_min_m"]
     ).to_csv(unit_dir / "barrier_crest.csv", index=False)
@@ -942,7 +1153,8 @@ def process_unit(task):
     done["summary"] = (
         f"unit {unit_id}: {len(gdf_pa)} protected areas in {seconds:.0f} s (read {times['read_terrain']:.1f} s, "
         f"crest {times['crest_read']:.1f} s in {counts['crest_boxes']} boxes, hand {times.get('hand', 0):.1f} s, "
-        f"flood {times.get('flood', 0):.1f} s, {counts['river_groups']} river groups {times['groups']:.1f} s, "
+        f"flood {times.get('flood', 0):.1f} s, {counts['leaks']} leaks {times['leaks']:.1f} s, "
+        f"{counts['river_groups']} river groups {times['groups']:.1f} s, "
         f"write {times['write']:.1f} s), peak RSS {peak_mb / 1024:.2f} GB "
         f"({done['bytes_per_cell']:.0f} B per window cell)"
     )
@@ -966,6 +1178,8 @@ if __name__ == "__main__":
         {
             "crest_box_size_m": country["crest_box_size_m"],
             "keep_intermediate": country["keep_intermediate"],
+            "leak_spacing_m": cfg["leaks"]["sample_spacing_m"],
+            "id_rounding_m": country["id_rounding_m"],
         }
     )
     work_dir = Path(general["work_dir"]) / run["COUNTRY"]
@@ -1004,15 +1218,57 @@ if __name__ == "__main__":
         df_units.win_ymax.max(),
     )
 
-    # --- Barrier lines for the whole country: merge, bridge gaps (deterministic, shared by all units) ---
+    # --- Levee lines moved onto the crest seen in the DTM (once per country, shared by all units) ---
     t = time.perf_counter()
     gap, touch = params["gap_tolerance_m"], params["touch_tolerance_m"]
-    gdf_lv = gis.Vector.read_merged(country["levees"], wkt, bbox=all_windows).explode(
-        index_parts=False
-    )
-    gdf_lv = gdf_lv[
-        (gdf_lv.geom_type == "LineString") & (gdf_lv.length > 0)
-    ].reset_index(drop=True)
+    snap, lg = cfg["levee_snap"], cfg["levee_gaps"]
+    crest_path = out_dir / "levees_crest.gpkg"
+    if crest_path.exists() and not run["FORCE"]:
+        gdf_lv = gpd.read_file(crest_path).to_crs(wkt)
+        log.info(
+            "Levee lines: %d from levees_crest.gpkg (set FORCE to snap again).",
+            len(gdf_lv),
+        )
+    else:
+        gdf_lv = gis.Vector.read_merged(
+            country["levees"], wkt, bbox=all_windows
+        ).explode(index_parts=False)
+        gdf_lv = gdf_lv[
+            (gdf_lv.geom_type == "LineString") & (gdf_lv.length > 0)
+        ].reset_index(drop=True)
+        geoms, df_ridge, crest_stats = gis.Hydro.snap_to_crest(
+            gdf_lv.geometry.values, str(vrt_path), snap, touch=touch
+        )
+        df_ridge["no_ridge"] = df_ridge["ridge_share"] < snap["min_ridge_share"]
+        gdf_lv = gpd.GeoDataFrame(
+            pd.concat([gdf_lv[["source"]], df_ridge], axis=1),
+            geometry=gpd.GeoSeries(geoms, crs=wkt),
+        )
+        gis.Vector.write_gpkg(gdf_lv, crest_path)
+        length_km = gdf_lv.geometry.length / 1000
+        log.info(
+            "Levee lines onto the DTM crest (levees_crest.gpkg): %d lines, %d vertices, %.0f %% of them on a ridge "
+            "at least %.1f m high; shift mean %.1f m, p95 %.1f m (at most %.0f m); %d lines moved; %d lines "
+            "(%.1f km) with a ridge on less than %.0f %% of their length (no_ridge), %d of them (%.1f km) without "
+            "any; %.1f s.",
+            crest_stats["lines"],
+            crest_stats["vertices"],
+            100 * crest_stats.get("ridge_share", 0.0),
+            snap["min_height_m"],
+            crest_stats.get("shift_mean_m", 0.0),
+            crest_stats.get("shift_p95_m", 0.0),
+            snap["max_shift_m"],
+            crest_stats.get("lines_moved", 0),
+            int(gdf_lv["no_ridge"].sum()),
+            length_km[gdf_lv["no_ridge"]].sum(),
+            100 * snap["min_ridge_share"],
+            crest_stats.get("lines_without_ridge", 0),
+            length_km[gdf_lv["ridge_share"] == 0].sum(),
+            time.perf_counter() - t,
+        )
+
+    # --- Barrier lines for the whole country: bridge gaps (deterministic, shared by all units) ---
+    t = time.perf_counter()
     geoms = gdf_lv.geometry.values
     starts, ends = shapely.get_point(geoms, 0), shapely.get_point(geoms, -1)
     bridges = {}
@@ -1032,13 +1288,18 @@ if __name__ == "__main__":
                 ]
             )
         )
-        bridges[key] = (gdf_lv.at[i, "source"], LineString([starts[i], ends[i]]))
+        bridges[key] = (
+            gdf_lv.at[i, "source"],
+            LineString([starts[i], ends[i]]),
+            "short",
+        )
     open_lines = np.flatnonzero(~self_close)
     points = np.concatenate([starts[open_lines], ends[open_lines]])
     owners = np.concatenate([open_lines, open_lines])
+    n_long_cand = n_long = 0
     if len(points):
         point_idx, line_idx = gdf_lv.sindex.query(
-            points, predicate="dwithin", distance=gap
+            points, predicate="dwithin", distance=max(lg["max_gap_m"], gap)
         )
         other = line_idx != owners[point_idx]
         df_pairs = pd.DataFrame({"point": point_idx[other], "line": line_idx[other]})
@@ -1046,8 +1307,9 @@ if __name__ == "__main__":
             points[df_pairs.point], geoms[df_pairs.line]
         )
         connected = df_pairs.groupby("point")["distance"].min() <= touch
+        df_pairs = df_pairs[~df_pairs.point.map(connected).astype(bool).to_numpy()]
         df_near = df_pairs.loc[df_pairs.groupby("point")["distance"].idxmin()]
-        df_near = df_near[~df_near.point.map(connected).astype(bool).to_numpy()]
+        df_near = df_near[df_near["distance"] <= gap]
         for point, line in zip(df_near.point, df_near.line):
             endpoint, other_line = points[point], geoms[line]
             list_ends = [starts[line], ends[line]]
@@ -1071,13 +1333,70 @@ if __name__ == "__main__":
             list_src = sorted(
                 {gdf_lv.at[owners[point], "source"], gdf_lv.at[line, "source"]}
             )
-            bridges[key] = ("|".join(list_src), LineString([endpoint, target]))
+            bridges[key] = (
+                "|".join(list_src),
+                LineString([endpoint, target]),
+                "short",
+            )
+        # Longer gaps up to max_gap_m are bridged where the DTM holds the crest along the gap (the levee exists,
+        # its line is missing); otherwise the removal of the levee next to the line ends would open the levee.
+        # Candidates of a free end in order of distance; the first that passes is taken.
+        df_long = df_pairs[~df_pairs.point.isin(df_near.point)].sort_values(
+            ["point", "distance"], kind="stable"
+        )
+        if len(df_long):
+            pts = points[df_long.point.to_numpy()]
+            lines_c = geoms[df_long.line.to_numpy()]
+            targets = shapely.line_interpolate_point(
+                lines_c, shapely.line_locate_point(lines_c, pts)
+            )
+            segs = shapely.linestrings(
+                np.stack(
+                    [shapely.get_coordinates(pts), shapely.get_coordinates(targets)],
+                    axis=1,
+                )
+            )
+            end_low, along_min = gis.Hydro.bridge_profile(
+                segs, str(vrt_path), snap["max_shift_m"]
+            )
+            passed = np.isfinite(end_low) & (
+                along_min >= end_low - lg["crest_tolerance_m"]
+            )
+            n_long_cand = int(df_long.point.nunique())
+            first_ok = (
+                df_long.assign(k=np.arange(len(df_long)))[passed]
+                .groupby("point")["k"]
+                .first()
+                .to_numpy()
+            )
+            # the bridge follows the crest between the two fixed ends
+            snapped, _, _ = gis.Hydro.snap_to_crest(
+                segs[first_ok], str(vrt_path), snap, fix_ends=True
+            )
+            for k, geometry in zip(first_ok, snapped):
+                a, b = shapely.get_coordinates(segs[k])
+                key = tuple(sorted([tuple(np.round(a, 3)), tuple(np.round(b, 3))]))
+                if key in bridges:
+                    continue
+                list_src = sorted(
+                    {
+                        gdf_lv.at[owners[df_long.point.iat[k]], "source"],
+                        gdf_lv.at[df_long.line.iat[k], "source"],
+                    }
+                )
+                bridges[key] = ("|".join(list_src), geometry, "dtm")
+                n_long += 1
     gdf_bl = gpd.GeoDataFrame(
         pd.concat(
             [
-                gdf_lv[["source"]].assign(bridged=False),
+                gdf_lv.drop(columns="geometry").assign(bridged=False, bridge_type=""),
                 pd.DataFrame(
-                    {"source": [b[0] for b in bridges.values()], "bridged": True}
+                    {
+                        "source": [b[0] for b in bridges.values()],
+                        "bridged": True,
+                        "bridge_type": [b[2] for b in bridges.values()],
+                        "no_ridge": False,
+                    }
                 ),
             ],
             ignore_index=True,
@@ -1085,13 +1404,18 @@ if __name__ == "__main__":
         geometry=list(geoms) + [b[1] for b in bridges.values()],
         crs=wkt,
     )
+    gdf_bl["no_ridge"] = gdf_bl["no_ridge"].astype(bool)
     gdf_bl.insert(0, "line_id", np.arange(len(gdf_bl)))
     gis.Vector.write_gpkg(gdf_bl, work_dir / "barrier_lines.gpkg")
     log.info(
-        "Barrier lines: %d levee lines, %d bridged gaps (%d self-closed rings) in %.1f s.",
+        "Barrier lines: %d levee lines, %d bridged gaps (%d self-closed rings; %d gaps longer than gap_tolerance_m, "
+        "up to %.0f m, where the DTM holds the crest, of %d free ends with such a candidate) in %.1f s.",
         len(gdf_lv),
         len(bridges),
         int(self_close.sum()),
+        n_long,
+        lg["max_gap_m"],
+        n_long_cand,
         time.perf_counter() - t,
     )
 
@@ -1348,6 +1672,60 @@ if __name__ == "__main__":
     )
     gdf_bar = gdf_bl.merge(df_crest, left_on="line_id", right_index=True, how="left")
     gis.Vector.write_gpkg(gdf_bar, out_dir / "barriers.gpkg")
+
+    # --- Leaks: the same place found from several units counted once; largest first ---
+    list_lk = [
+        gpd.read_file(work_dir / "units" / u / "leaks.gpkg")
+        for u in list_done
+        if (work_dir / "units" / u / "leaks.gpkg").exists()
+    ]
+    list_lk = [f for f in list_lk if len(f)]
+    if list_lk:
+        df_lk = pd.concat(list_lk, ignore_index=True)
+        step = country["id_rounding_m"]
+        df_lk["kx"], df_lk["ky"] = np.round(df_lk["x"] / step), np.round(
+            df_lk["y"] / step
+        )
+        grouped = df_lk.sort_values("levee_length_m", ascending=False).groupby(
+            ["cause", "kx", "ky"], sort=False
+        )
+        df_lk = grouped.first()
+        df_lk["levee_length_m"] = grouped["levee_length_m"].sum()
+        df_lk["n_samples"] = grouped["n_samples"].sum()
+        df_lk["line_ids"] = grouped["line_ids"].agg(
+            lambda v: ",".join(
+                sorted({i for s in v for i in str(s).split(",") if i}, key=int)
+            )
+        )
+        df_lk = df_lk.reset_index().sort_values(
+            "levee_length_m", ascending=False, ignore_index=True
+        )
+    else:
+        df_lk = pd.DataFrame({c: pd.Series(dtype=d) for c, d in LEAK_COLUMNS.items()})
+        df_lk["unit_id"] = pd.Series(dtype=str)
+    df_lk.insert(
+        0, "leak_id", [f"{run['COUNTRY']}_L{k + 1}" for k in range(len(df_lk))]
+    )
+    gdf_leaks = gpd.GeoDataFrame(
+        df_lk[["leak_id"] + list(LEAK_COLUMNS) + ["unit_id"]],
+        geometry=gpd.points_from_xy(df_lk["x"], df_lk["y"]),
+        crs=wkt,
+    )
+    gis.Vector.write_gpkg(gdf_leaks, out_dir / "leaks.gpkg")
+    by_cause = gdf_leaks.groupby("cause")["levee_length_m"].agg(["size", "sum"])
+    log.info(
+        "Levees that protect nothing (leaks.gpkg), by cause: %s. Largest: %s.",
+        ", ".join(
+            f"{c} {int(r['size'])} places, {r['sum'] / 1000:.1f} km of levee"
+            for c, r in by_cause.sort_values("sum", ascending=False).iterrows()
+        )
+        or "none",
+        "; ".join(
+            f"{r.leak_id} {r.cause} at ({r.x:.0f}, {r.y:.0f}), {r.levee_length_m:.0f} m"
+            for r in gdf_leaks.head(5).itertuples()
+        )
+        or "-",
+    )
 
     list_encl = [
         gpd.read_file(work_dir / "units" / u / "enclosed_streams.gpkg")

@@ -51,7 +51,7 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`. Schémata po
 |---|---|---|
 | 1 | `prepare-dtm` | `dtm_inspection.csv`, `dtm_benchmark.csv` (s DSM i `dsm_*`) |
 | 2 | `build-units` | `corridor.gpkg`, `units_core.gpkg` |
-| 3 | `protected-areas`: nejdřív dvě jednotky (`DEFENSES_UNITS`), pak vše | `rivers_channel.gpkg` (řeky v korytě), `river_groups.gpkg`, `protected_areas.gpkg` (soubor A), `protected_areas_by_group.gpkg` (soubor B), `barriers.gpkg`, `performance.json` |
+| 3 | `protected-areas`: nejdřív dvě jednotky (`DEFENSES_UNITS`), pak vše | `rivers_channel.gpkg` (řeky v korytě), `levees_crest.gpkg` (hráze na koruně), `river_groups.gpkg`, `protected_areas.gpkg` (soubor A), `protected_areas_by_group.gpkg` (soubor B), `leaks.gpkg` (úniky), `barriers.gpkg`, `performance.json` |
 | 4 | `download-ghsl`, `rp-index` | `protected_areas_rp.gpkg` (`rp`, `rp_low`, `rp_high`) |
 | volitelně | `download-worldcover`, `hand-yz`, `lulc.enabled = true`, znovu `rp-index` | `exposure_lulc.csv` |
 | volitelně | `download-gfm`, `gfm-evidence` | `gfm_evidence.gpkg` |
@@ -74,6 +74,25 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`. Schémata po
 - **Čas:** každá skupina v jednotce přidá zhruba tolik, kolik trvá HAND a obě záplavy souboru A
   (na jednotce 30 M buněk asi 27–31 s). Počet skupin je v řádku každé jednotky v logu.
 - Další kroky (`rp-index`, `gfm-evidence`, `rp-bounds`) zatím čtou soubor A.
+
+**Hráze a úniky** (`protected-areas`, README §5.8–5.10):
+- **`levees_crest.gpkg`:** linie hrází posunuté na korunu z DTM (nejvýš 15 m). Sloupec
+  `no_ridge` označí linie, které v DTM jako hráz nejsou vidět (chyba mapy, násep, který
+  není hráz, nebo hráz pod rozlišením DTM).
+- **Mezery:** mezery mezi linkami do 200 m se spojí jen tam, kde DTM drží korunu.
+  V `barriers.gpkg` mají `bridge_type = "dtm"`.
+- **`leaks.gpkg`:** u hrází, které nic nechrání, místo a příčina:
+  - `river_crossing`: otevřený průchod toku hrází;
+  - `low_crest`: voda přeteče nízkou korunou;
+  - `line_end`: voda obteče volný konec linie;
+  - `water_source_behind`: tok uvnitř, který hrází neprochází;
+  - `terrain_above_crest`: terén za hrází je výš než koruna (hráz tam není potřeba,
+    nebo je koruna podhodnocená).
+
+  `levee_length_m` je délka hráze, která tím místem uniká, `lost_margin_median_m` ochrana,
+  kterou únik bere. Shrnutí podle příčin a pět největších úniků je v logu. Začněte
+  největšími úniky.
+- **Po změně linií hrází** spusťte `protected-areas` s FORCE (stejně jako u řek).
 
 **Stage E** je experimentální a nejdřív se pouští na pilotní jednotky (`[implied] units`). Výsledky se do
 `defenses_clip.gpkg` nedostanou, dokud není `include_implied = true`.

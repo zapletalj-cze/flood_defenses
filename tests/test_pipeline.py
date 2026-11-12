@@ -80,6 +80,23 @@ levees = {
     "H_bank": (LineString([(100, 1008), (500, 1008)]), 2.5),
     # B3/B4: U-shaped levee open towards a strip without DTM coverage (x >= 2960).
     "U_open": (LineString([(2960, 600), (2700, 600), (2700, 800), (2960, 800)]), 2.5),
+    # Stage G: lines with 60 m gaps where the embankment continues in the DTM (bridged by the DTM check)
+    "K_gap_1": (
+        LineString([(2620, 1220), (2620, 1150), (2820, 1150), (2820, 1220)]),
+        2.5,
+    ),
+    "K_gap_2": (
+        LineString([(2820, 1280), (2820, 1350), (2620, 1350), (2620, 1280)]),
+        2.5,
+    ),
+    # Stage G: line 8 m inside its embankment (moved onto the crest)
+    "M_offset": (ring(408, 648, 642, 872), 2.5),
+}
+# Embankments of the DTM where they differ from the lines above
+embankments = {
+    "K_gap_1": (ring(2620, 1150, 2820, 1350), 2.5),
+    "K_gap_2": (LineString([(2620, 1350), (2620, 1351)]), 0.0),
+    "M_offset": (ring(400, 640, 650, 880), 2.5),
 }
 probes = {  # local point -> expected number of protected areas covering it
     "A_seam": ((1020, 1250), 1),
@@ -93,6 +110,8 @@ probes = {  # local point -> expected number of protected areas covering it
     "G_long": ((1500, 1440), 1),
     "U_open": ((2830, 700), 1),
     "L1_hole_artifact": ((2700, 1550), 0),
+    "K_dtm_gap": ((2720, 1250), 1),
+    "M_offset": ((525, 760), 1),
 }
 
 # Terrain: valley rising 0.5 % away from the river and 0.1 % downstream to upstream, 2 m deep channel,
@@ -107,7 +126,7 @@ dtm = (
     + 0.005 * np.abs(yy - RIVER_Y)
     - 2.0 * (np.abs(yy - RIVER_Y) <= 5)
 ).astype(np.float32)
-for name, (line, height) in levees.items():
+for name, (line, height) in (levees | embankments).items():
     xmin, ymin, xmax, ymax = line.bounds
     c0, c1 = int(max(xmin - 3, 0)), int(min(xmax + 3, WIDTH_M))
     r0, r1 = int(max(HEIGHT_M - ymax - 3, 0)), int(min(HEIGHT_M - ymin + 3, HEIGHT_M))
@@ -344,7 +363,62 @@ for label, ((px, py), expected) in probes.items():
         )
     )
 list_res.append(
-    (f"T1: total protected areas 9, found {len(gdf_final)}", len(gdf_final) == 9)
+    (f"T1: total protected areas 11, found {len(gdf_final)}", len(gdf_final) == 11)
+)
+# Stage G: lines onto the crest, gaps bridged by the DTM, leaks
+gdf_crest = gpd.read_file(root / "output" / "T1" / "levees_crest.gpkg")
+gdf_bar = gpd.read_file(root / "output" / "T1" / "barriers.gpkg")
+gdf_leak = gpd.read_file(root / "output" / "T1" / "leaks.gpkg")
+m_ring = world(ring(400, 640, 650, 880))
+m_line = gdf_crest.geometry[
+    gdf_crest.geometry.centroid.distance(m_ring.centroid) < 1
+].iloc[0]
+m_dev = shapely.get_coordinates(shapely.segmentize(m_line, 5.0))
+m_dev = shapely.distance(shapely.points(m_dev), m_ring)
+list_res.append(
+    (
+        f"M_offset: the line 8 m inside its embankment (top 1.5 m either side of the axis) moved onto the crest "
+        f"(median {np.median(m_dev):.1f} m, max {m_dev.max():.1f} m at the corners from the axis, within one "
+        "pixel); other lines stay",
+        np.median(m_dev) <= 1.5 + 2 * NATIVE
+        and m_dev.max() <= 5.0
+        and (gdf_crest["shift_median_m"] > 1).sum() == 1,
+    )
+)
+dtm_bridges = gdf_bar[gdf_bar["bridge_type"] == "dtm"]
+level = {
+    k: gdf_final.loc[
+        gdf_final.covers(world(Point(*probes[k][0]))), "protection_level_m"
+    ].max()
+    for k in ["K_dtm_gap", "A_seam"]
+}
+list_res.append(
+    (
+        f"K_gap: the two 60 m gaps with the embankment in the DTM are bridged ({len(dtm_bridges)} DTM bridges), "
+        f"the 40 m gap of C_wide without one is not; protection level {level['K_dtm_gap']:.2f} m as the closed "
+        f"ring A_seam of the same crest ({level['A_seam']:.2f} m)",
+        len(dtm_bridges) == 2
+        and dtm_bridges.geometry.within(world(Point(2720, 1250)).buffer(150)).all()
+        and abs(level["K_dtm_gap"] - level["A_seam"]) <= 0.05,
+    )
+)
+c_ends = [
+    world(Point(xy)) for xy in [(2300, 1230), (2300, 1270), (2500, 1230), (2500, 1270)]
+]
+leak_c = gdf_leak[
+    (gdf_leak["cause"] == "line_end")
+    & gdf_leak.geometry.apply(lambda g: min(g.distance(e) for e in c_ends) < 1)
+]
+list_res.append(
+    (
+        f"leaks.gpkg: the open gap of C_wide is found as free line ends ({len(leak_c)} leaks, "
+        f"{leak_c['levee_length_m'].sum():.0f} m of levee); no leak inside the protected rings",
+        len(leak_c) >= 1
+        and leak_c["levee_length_m"].sum() >= 300
+        and not gdf_leak.geometry.within(
+            shapely.union_all([gdf_final.geometry.union_all()])
+        ).any(),
+    )
 )
 gdf_uopen = gdf_final[gdf_final.covers(world(Point(2830, 700)))]
 list_res.append(
@@ -551,7 +625,7 @@ list_res.append(
     (
         f"T3 river entirely nodata: same protected areas as T1 ({len(gdf_water)}; probes "
         f"{'ok' if water_ok else water_hits})",
-        proc.returncode == 0 and water_ok and len(gdf_water) == 9,
+        proc.returncode == 0 and water_ok and len(gdf_water) == 11,
     )
 )
 

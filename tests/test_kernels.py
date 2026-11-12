@@ -1,7 +1,8 @@
 # Author: Jakub Zapletal
 # Date: 2026-11-04
 # Checks of the numba kernels in gis.py on small synthetic grids: closed ring, gap, diagonal leak,
-# nested rings, seed propagation and breaching; river snapping into a channel of a small DTM file.
+# nested rings, seed propagation and breaching; river snapping into a channel of a small DTM file; levee lines onto
+# the crest, gap profiles, flood paths, river groups.
 # Run: pixi run python -m tests.test_kernels
 
 import sys
@@ -229,6 +230,90 @@ list_res.append(
         and out_n[0].equals(river)
         and np.median(off_d) < 10.0
         and st_g["guided_share"] == 1.0,
+    )
+)
+
+# Levee crest: 1 m DTM with a 1.8 m high embankment (4 m top) along a sine and a 40 m gap without it; a levee
+# line 9 m beside the crest, one on the crest axis and one on flat ground.
+nx, ny = 600, 400
+gx, gy = np.meshgrid(np.arange(nx) + 0.5, 400 - (np.arange(ny) + 0.5))
+axis_y = 200 + 30 * np.sin(gx / 80)
+across = np.abs(gy - axis_y) * np.cos(np.arctan(30 / 80 * np.cos(gx / 80)))
+z = 100 + 0.002 * gx + np.clip(1.8 - np.maximum(across - 2, 0) / 2, 0, None)
+z[:, 280:320] = 100 + 0.002 * gx[:, 280:320]
+gis.Raster.write_array(
+    tmp / "levee.tif",
+    z.astype(np.float32),
+    (0, 1.0, 0, 400, 0, -1.0),
+    srs.ExportToWkt(),
+    nodata=-9999,
+)
+xs = np.arange(10, 590, 5.0)
+crest_xy = np.c_[xs, 200 + 30 * np.sin(xs / 80)]
+crest_p = {
+    k.split(".")[1]: v
+    for k, v in gis.Config.DEFAULTS.items()
+    if k.startswith("levee_snap.")
+}
+moved, df_ridge, _ = gis.Hydro.snap_to_crest(
+    [
+        shapely.linestrings(crest_xy - [0, 9]),
+        shapely.linestrings(crest_xy),
+        shapely.linestrings([[50, 50], [550, 60]]),
+    ],
+    str(tmp / "levee.tif"),
+    crest_p,
+)
+pts = shapely.get_coordinates(shapely.segmentize(moved[0], 2.0))
+dev = np.abs(pts[:, 1] - (200 + 30 * np.sin(pts[:, 0] / 80)))
+on_axis = shapely.get_coordinates(shapely.segmentize(moved[1], 2.0))
+dev_axis = np.abs(on_axis[:, 1] - (200 + 30 * np.sin(on_axis[:, 0] / 80)))
+list_res.append(
+    (
+        f"snap_to_crest: a levee line 9 m beside the crest moves onto it (median {np.median(dev):.1f} m, max "
+        f"{dev.max():.1f} m from the axis, top 2 m either side), one on the axis stays within "
+        f"{dev_axis.max():.1f} m, one on flat ground stays (ridge share {df_ridge['ridge_share'].iloc[2]:.0%})",
+        np.median(dev) <= 2.0
+        and dev.max() <= 3.0
+        and dev_axis.max() <= 1.0
+        and moved[2].equals(shapely.linestrings([[50, 50], [550, 60]]))
+        and df_ridge["ridge_share"].iloc[2] == 0,
+    )
+)
+end_low, along_min = gis.Hydro.bridge_profile(
+    [shapely.linestrings(crest_xy[[52, 64]]), shapely.linestrings(crest_xy[[18, 30]])],
+    str(tmp / "levee.tif"),
+    15.0,
+)
+list_res.append(
+    (
+        f"bridge_profile: across the gap without the embankment the terrain drops {end_low[0] - along_min[0]:.1f} m "
+        f"below the crest, along the embankment {end_low[1] - along_min[1]:.2f} m",
+        end_low[0] - along_min[0] > 1.5 and end_low[1] - along_min[1] < 0.1,
+    )
+)
+
+# Flood paths: water from column 0 reaches the cells behind a wall in column 10 through its gap in row 15.
+surface = np.zeros((20, 20), np.float32)
+surface[:, 10] = 5.0
+surface[15, 10] = 0.0
+left = np.zeros((20, 20), bool)
+left[:, 0] = True
+_, _, order = gis.Hydro.priority_flood(surface, left)
+event = np.zeros((20, 20), np.int8)
+event[:, 10] = 2
+event[15, 10] = 3
+code, cell = gis.Hydro.first_event_on_path(
+    order, left, event, [5 * 20 + 18, 5 * 20 + 5]
+)
+list_res.append(
+    (
+        f"first_event_on_path: the path behind the wall leads back through the gap ({code[0]}, cell "
+        f"{divmod(int(cell[0]), 20)}), the one in front to its seed ({code[1]})",
+        code[0] == 3
+        and cell[0] == 15 * 20 + 10
+        and code[1] == -1
+        and cell[1] % 20 == 0,
     )
 )
 

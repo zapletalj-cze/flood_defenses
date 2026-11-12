@@ -41,9 +41,9 @@ flowchart TD
     CHK["pixi run check: keys, files, columns, CRS"]
     PD["prepare_dtm: inspection, footprint, read benchmark"]
     BU["build_units: corridor along the rivers, units with a halo"]
-    PA["protected_areas: rivers snapped into the channel, barriers,
-    HAND and spill levels with and without barriers per unit (diagram in §5);
-    A: all rivers at once, B: per river group (§8.3)"]
+    PA["protected_areas: rivers snapped into the channel, levee lines onto the crest,
+    barriers, HAND and spill levels with and without barriers per unit (diagram in §5);
+    A: all rivers at once, B: per river group (§8.3); leak diagnostics (§5.10)"]
     GH["download_ghsl: building volume"]
     RI["rp_index: exposed value, score, return period class"]
     OBS["optional observations: GFM scenes (gfm_evidence),
@@ -289,6 +289,11 @@ The tables of `advanced.toml`:
 - `[implied]`: Stage E (§18).
 - `[discharge]`, `[discharge.glofas]`, `[discharge.efas]`: Stage F (§11).
 
+**Keys only in `gis.Config.DEFAULTS`** (not in the toml files): `river_groups.*` (§8.3),
+`levee_snap.*` (§5.8), `levee_gaps.*` (§5.9) and `leaks.sample_spacing_m` (§5.10). A
+table of the same name in `defenses.toml`, e.g. `[levee_snap]` with `max_shift_m = 0.0`,
+overrides them.
+
 All path keys accept a string or a list. Every script validates exactly the keys it uses,
 before doing any work:
 - **presence and type;**
@@ -365,7 +370,7 @@ Keys beyond the original schema, with the reason for each:
 | 1 | `prepare_dtm.py` | `dtm_inspection.csv`, `dtm_footprint.gpkg`, `dtm_benchmark.csv`, `dtm_estimates.json`, `work/<c>/dtm/dtm.vrt` |
 | 2 | `build_units.py` | `corridor.gpkg`, `units_core.gpkg`, `units_window.gpkg`, `units.csv`, `work/<c>/units_domain.gpkg` |
 | 3 (optional) | `prepare_dtm.py` with `convert_dtm = true` | tiled copies in `work/<c>/dtm/`; `dtm.vrt` repointed to them |
-| 6 | `protected_areas.py` (first two units, then all) | `rivers_channel.gpkg`, `river_groups.gpkg`; per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `protected_areas.gpkg`, `protected_areas_by_group.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `protected_areas.gpkg` (file A), `protected_areas_by_group.gpkg` (file B), `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
+| 6 | `protected_areas.py` (first two units, then all) | `rivers_channel.gpkg`, `river_groups.gpkg`, `levees_crest.gpkg`; per unit in `work/<c>/units/<id>/`: `hand_undef.tif`, `labels.tif`, `protected_areas.gpkg`, `protected_areas_by_group.gpkg`, `leaks.gpkg`, `barrier_crest.csv`, `done.json`, `unit.log`; merged: `protected_areas.gpkg` (file A), `protected_areas_by_group.gpkg` (file B), `leaks.gpkg`, `barriers.gpkg`, `enclosed_streams.gpkg`, `performance.json` |
 | 7 | `download_ghsl.py` | `ghsl_total.vrt`, `ghsl_non_residential.vrt`, `ghsl_sources.json` |
 | D1 (Stage D) | `prepare_dtm.py` with `dsm`; `download_ghsl.py` with `smod`, `pop` | `dsm_inspection.csv`, `dsm_benchmark.csv`, `dsm_footprint.gpkg`; `ghsl_smod.vrt`, `ghsl_pop.vrt` |
 | D1 (Stage D) | `download_clms.py`, then `context_zones.py` | `corine_codes.tif`, `urban_atlas.gpkg`, `clms_sources.json`; `zones.gpkg` |
@@ -405,7 +410,9 @@ flowchart TD
     subgraph C["Once per country, shared by all units"]
         S1["Snap the rivers into their channel (§8) → rivers_channel.gpkg"]
         S3["Group the river reaches by topology and upstream area (§8.3) → river_groups.gpkg"]
-        S2["Merge the levee lines, bridge gaps up to gap_tolerance_m → barrier_lines.gpkg"]
+        S4["Levee lines onto the DTM crest (§5.8) → levees_crest.gpkg"]
+        S2["Bridge gaps up to gap_tolerance_m, longer ones up to 200 m
+        where the DTM holds the crest (§5.9) → barrier_lines.gpkg"]
     end
     subgraph U["Per unit (core plus halo window), in parallel, with checkpoints"]
         U1["Read the DTM at the working cell"]
@@ -419,16 +426,17 @@ flowchart TD
         U7["margin = spill_def − spill_undef"]
         U8["protected = margin ≥ min_margin_m and spill_undef ≤ max_level_m;
         4-connected regions of at least min_area_m2"]
+        UL["Leak diagnostics (§5.10): where levees protect nothing, and why"]
         U9["Per river group (§8.3): U5–U8 again with the group's rivers
         as the only water sources; the other rivers are terrain"]
     end
     M["Merge the units: one area seen by two windows kept once,
     truncated areas checked against the neighbours, ids
-    → protected_areas.gpkg (A), barriers.gpkg"]
+    → protected_areas.gpkg (A), barriers.gpkg, leaks.gpkg"]
     MB["The same merge group by group
     → protected_areas_by_group.gpkg (B)"]
-    C --> U1 --> U2 --> U3 --> U4 --> U5 --> U6 --> U7 --> U8 --> M
-    U8 --> U9 --> MB
+    C --> U1 --> U2 --> U3 --> U4 --> U5 --> U6 --> U7 --> U8 --> UL --> M
+    UL --> U9 --> MB
 ```
 
 ![From terrain to protected areas on one unit](docs/img/unit_steps.png)
@@ -464,21 +472,26 @@ Consequences that look odd at first but are correct:
 ### 5.2 Barriers
 
 1. **Merging.** All levee files are read, reprojected and split into single lines;
-   `source` holds the file stem. Bridging and line ids are computed **once per country**
-   (`work/<c>/barrier_lines.gpkg`), so all units see identical barriers.
-2. **Bridging** (vectorised with a spatial index):
+   `source` holds the file stem. Snapping, bridging and line ids are computed **once per
+   country** (`levees_crest.gpkg`, `work/<c>/barrier_lines.gpkg`), so all units see
+   identical barriers.
+2. **Lines onto the crest** (§5.8): every line is moved onto the crest seen in the DTM,
+   within 15 m.
+3. **Bridging** (vectorised with a spatial index):
    - **Rule.** Each endpoint with another line within `gap_tolerance_m` is joined to the
      nearest such line: to its endpoint if one is within the tolerance, otherwise to its
      nearest point (T-junctions).
+   - **Longer gaps** up to 200 m are bridged only where the DTM holds the crest along the
+     gap (§5.9).
    - **Already connected.** Endpoints within `touch_tolerance_m` of another line count as
      connected.
    - **Self-closing.** A single line whose own ends are within the tolerance closes on
      itself if it is longer than `self_close_min_length_factor × gap_tolerance_m`.
-3. **Rasterization** on the working grid uses `ALL_TOUCHED`. Diagonal-only contacts are
+4. **Rasterization** on the working grid uses `ALL_TOUCHED`. Diagonal-only contacts are
    then closed by adding the higher corner cell. A 4-connected flood cannot pass between
    two cells touching only at a corner anyway; the closing also guarantees that a river
    crossing a staircase levee cuts a barrier cell.
-4. **Crest elevation** is the maximum of the *native* DTM near the line, because line
+5. **Crest elevation** is the maximum of the *native* DTM near the line, because line
    geometry can be offset from the real crest:
    - **Where native pixels are read.** Only in boxes of `crest_box_size_m` around the
      levees; boxes in one row separated by at most one empty box are read together.
@@ -487,9 +500,9 @@ Consequences that look odd at first but are correct:
    - **Search radius.** A circular maximum filter with `crest_search_radius_m` follows.
      The effective search radius is up to one working cell larger than configured, which
      favours recall.
-5. **Bridged cells** get crests interpolated linearly along the bridge between the crests
+6. **Bridged cells** get crests interpolated linearly along the bridge between the crests
    at its ends.
-6. **Rivers crossing barriers.** By default the river wins: crossing cells are not
+7. **Rivers crossing barriers.** By default the river wins: crossing cells are not
    barrier. With `gated_crossings = true` crossings stay closed (§8.2).
 
 ### 5.3 Undefended DTM
@@ -577,6 +590,133 @@ For each protected area:
 | `touches_corridor_edge` | Adjacent to cells outside the processing domain (corridor + halo) |
 | `touches_dtm_edge` | Adjacent to missing DTM coverage, which closes it as a wall |
 | `no_levee` | No barrier line within `levee_adjacent_distance_m` of its boundary |
+
+### 5.8 Levee lines onto the crest
+
+Levee lines (OSM or other sources) often lie a few metres beside the crest seen in the DTM.
+The crest search radius (5 m) then misses the crest, and the removal zone of the undefended
+DTM (10 m) leaves part of the levee in place: both lower the margin. `protected_areas.py`
+therefore moves the lines onto the crest once per country (`gis.Hydro.snap_to_crest`) and
+writes **`levees_crest.gpkg`**.
+
+1. **Profiles.** Vertices every 10 m; at each, a profile across the line every native
+   pixel, 45 m to both sides. The DTM is read in blocks of 2048² pixels, only where
+   vertices lie, in an order that reads each block about once.
+2. **Crest.** The highest cell within 15 m of the line. Of the cells within 0.1 m of it,
+   the nearest to the line is taken, so a line already on a flat crest does not move.
+3. **Ridge test.** The crest must stand at least 0.5 m above the lowest cell within 30 m
+   on both sides. Vertices without a ridge take the offset interpolated from their
+   neighbours.
+4. **Smoothing.** A running median of 5 vertices removes single jumps.
+5. **Connectivity.** Ends shared by several lines move to the mean of their positions,
+   so connected lines stay connected. Lines in which nothing moves keep their geometry.
+
+**Columns of `levees_crest.gpkg`** (also in `barriers.gpkg`):
+- `ridge_share`: share of vertices on a ridge;
+- `crest_height_m`: median height of the ridge above the higher side;
+- `shift_median_m`: median shift of the vertices;
+- `no_ridge`: ridge on less than half of the line. Such lines are not visible as levees
+  in the DTM. They may be mapping errors, embankments that are not levees, or levees the
+  DTM does not resolve.
+
+**Rerun.** The file is reused until you run with `FORCE`, as `rivers_channel.gpkg` is.
+
+**Test** (pipeline, ring M): a line 8 m inside its 3 m wide embankment moves onto the
+crest (median 2 m from the axis, within one pixel of the top). Without the move the ring
+protects nothing and the leak diagnostics report `terrain_above_crest`.
+
+### 5.9 Longer gaps verified by the DTM
+
+Gaps longer than `gap_tolerance_m` are often missing pieces of a mapped levee that exists
+in the terrain. Unbridged, they leak twice:
+- **No barrier.** The gap has no barrier line.
+- **Removal holes.** The removal zone of the undefended DTM eats `barrier_removal_width_m`
+  into the levee body beyond each line end, and the defended surface shows these holes too.
+
+**Rule.**
+- **Candidates.** A free end (not touching another line) gets candidates up to 200 m away,
+  in order of distance: the nearest point of every other line.
+- **Profile.** For each candidate, `gis.Hydro.bridge_profile` takes the highest DTM cell
+  within 15 m across the gap, every native pixel along it.
+- **Acceptance.** The first candidate whose profile never drops more than 0.5 m below the
+  lower of its two ends is bridged.
+- **Geometry.** The bridge then follows the crest between its fixed ends.
+- **Output.** These bridges have `bridge_type = "dtm"` in `barriers.gpkg`; bridges within
+  `gap_tolerance_m` have `"short"`.
+
+A gap without a levee body in the DTM (a road at grade, a river, a missing piece of the
+levee) is not bridged. It stays an opening and appears in the leak diagnostics.
+
+**Test** (pipeline, ring K): lines with two 60 m gaps over a continuous embankment.
+- **Bridged.** Both gaps are bridged. The protection level is 5.26 m, as for the closed
+  ring A_seam of the same crest (5.25 m).
+- **Not bridged** (checked once by hand): the level is 3.89 m and the median margin
+  0.73 m instead of 2.01 m.
+- **C_wide.** Its 40 m gap has no embankment in the DTM and is not bridged.
+
+### 5.10 Leak diagnostics: where levees protect nothing, and why
+
+Every unit checks its levees (file A, all water sources together) and writes
+**`leaks.gpkg`**; the merge keeps one record per place.
+
+```mermaid
+flowchart TD
+    S["Sample every 50 m along the barrier lines in the core;
+    cells 2 working cells beyond the removal zone on both sides"]
+    P{"margin ≥ min_margin_m on one side?"}
+    OK["protected: the levee holds water back"]
+    B["Behind side: the side not reached by rivers entering the window,
+    else the side farther from them"]
+    T{"HAND behind ≥ crest − min_margin_m?"}
+    TA["terrain_above_crest (one record per line):
+    the levee is not needed there, or its crest is underestimated"]
+    W["Follow the defended flood path from the cell behind
+    back towards its river cell"]
+    E{"First on the path"}
+    RC["river_crossing: open crossing of a river through the levee"]
+    LC["low_crest: the water passes over a barrier cell"]
+    LE["line_end: around the free end of a line"]
+    SE{"river cell reached: in a zone closed by barriers?"}
+    WS["water_source_behind: a stream inside, not crossing the levee"]
+    RC2["river_crossing: a stream inside that crosses the levee"]
+    UN["unclear (counted in the log only)"]
+    S --> P
+    P -- yes --> OK
+    P -- no --> B --> T
+    T -- yes --> TA
+    T -- no --> W --> E
+    E -- "open crossing cell" --> RC
+    E -- "barrier cell" --> LC
+    E -- "near a free end (removal width + 2 cells)" --> LE
+    E -- "river cell" --> SE
+    SE -- "no (connected to the incoming rivers)" --> UN
+    SE -- "yes, zone touches a crossing" --> RC2
+    SE -- "yes, no crossing" --> WS
+```
+
+**Path back.** The flood path is recovered from the order of `priority_flood`: the
+predecessor of a cell is its 4-neighbour taken first from the queue, the cell that reached
+it (`gis.Hydro.first_event_on_path`, numba). The first event on the way back is where the
+water gets behind the levee.
+
+**Columns of `leaks.gpkg`:**
+- `leak_id`, `cause`;
+- `x`, `y`: the place (crossing cell, overtopped cell, free end, stream cell, or the first
+  sample of the line for `terrain_above_crest`);
+- `levee_length_m`, `n_samples`: the levee that leaks there;
+- `line_ids`: the `line_id`s of `barriers.gpkg`;
+- `crest_hand_median_m`, `level_behind_median_m`, `lost_margin_median_m`: the crest and the
+  water level behind, above the river, and their difference, i.e. the protection the leak
+  costs.
+
+The log lists the causes with their levee length, and the five largest leaks.
+
+**Values.** Sample spacing 50 m (`leaks.sample_spacing_m`, `Config.DEFAULTS`); the side
+offset and tolerances come from the existing keys.
+
+**Test** (Stage B, crossings open): rings 1 and 2 leak through the streams inside them
+(`water_source_behind` at the stream cells, 1400 m of levee each, 2.5 m of protection
+lost); ring 3 does not leak. Pipeline: the open gap of C_wide is found as free line ends.
 
 ## 6. Large DTMs: corridors, storage layout, units
 
@@ -1545,6 +1685,11 @@ Remaining potential:
 | **Total** | **76–81 s** | **56–61 s** |
 | Peak RSS | 3.0 GB (106–108 B/cell) | **2.6–2.7 GB (93–95 B/cell)** |
 
+Levee lines onto the crest (§5.8): 1.8 s for 57 km of lines on the 1 m benchmark DTM
+(once per country; profiles of 91 native pixels per vertex, fewer on coarser DTMs). Leak
+diagnostics (§5.10): 0.9 s on a 30 M-cell unit with 17 km of levee in its core; peak memory
+of that unit 3.7 GB (131 B per window cell, before 118).
+
 With river groups (§8.3), each group adds about 27–31 s per unit (measured on two
 benchmark units with 2 groups each: 91 and 101 s in total, 3.3 GB peak).
 
@@ -1605,7 +1750,7 @@ protected areas take seconds.
 
 ## 14. Tests
 
-- **`pixi run test-kernels`, 18 checks:**
+- **`pixi run test-kernels`, 21 checks:**
   - closed ring, gap, diagonal barrier;
   - nested rings in both crest orders;
   - seed and order propagation, entry cell;
@@ -1613,8 +1758,12 @@ protected areas take seconds.
   - B1 reproduced without burning and fixed with it;
   - river snapping into a channel, with and without a guide line (§8.1);
   - river groups: a main stem of five 10 km reaches split at 30 km and at a jump in
-    upstream area, tributaries in their own groups, a minor stream in group 0 (§8.3).
-- **`pixi run test-pipeline`, 40 checks:** synthetic countries in two strip-layout files.
+    upstream area, tributaries in their own groups, a minor stream in group 0 (§8.3);
+  - levee lines onto the crest: a line 9 m beside a 1.8 m embankment ends on its 4 m top,
+    one on the axis stays, one on flat ground stays (§5.8);
+  - gap profile: 1.8 m drop across a gap without the embankment, none along it (§5.9);
+  - flood path: the path behind a wall leads back through its gap (§5.10).
+- **`pixi run test-pipeline`, 45 checks:** synthetic countries in two strip-layout files.
   - **Pipeline mechanics:** inspection, footprint, benchmark; conversions A and B;
     units; unit selection and checkpoints.
   - **Protected areas and merging:** a seam ring kept once; bridged and wide gaps;
@@ -1626,11 +1775,18 @@ protected areas take seconds.
   - **Gaps:** a river gap (river profile, no artifact); T3, the whole river without DTM
     data, giving the same protected areas.
   - **T0, empty levees:** margin exactly 0.
-- **`pixi run test-stage-b`, 16 checks:**
+  - **Stage G:**
+    - ring M with its line 8 m beside the embankment, moved onto the crest and protected;
+    - ring K with two 60 m gaps over a continuous embankment, bridged by the DTM, with the
+      protection level of a closed ring;
+    - the open gap of C_wide found as free line ends in `leaks.gpkg`.
+- **`pixi run test-stage-b`, 17 checks:**
   - **Water sources:** with `gated_crossings = false` the streams inside rings 1 and 2 are
     water sources, so only ring 3 is protected; with `true` all three rings are protected.
   - **River groups:** with crossings open, file B protects all three rings against the
     main river and only ring 3 against the tributaries (§8.3).
+  - **Leaks:** with crossings open, rings 1 and 2 leak through the streams inside them
+    (`water_source_behind`), ring 3 does not (§5.10).
   - **Snapping:** `rivers_channel.gpkg` is written once per country; without guide lines
     the lines stay unchanged.
   - **GHSL:** zipped tiles and schema; latest-epoch probing.
@@ -1887,6 +2043,15 @@ from outside.**
 - **L14. Land cover classes are coarse proxies for asset value.** A WorldCover
   "built-up" pixel can be a road, a yard or a building. Category values are national
   averages per m² and need your calibration (§9.3).
+- **L15. Levee lines onto the crest** (§5.8) take the highest ridge within 15 m. A road or
+  railway embankment higher than the levee and closer than 15 m can attract the line.
+  Lines on a ridge narrower than the DTM resolution are flagged `no_ridge`.
+- **L16. Leak diagnostics are a heuristic** (§5.10).
+  - **Behind side.** It is chosen from the barrier zones and the distance to the incoming
+    rivers; between two rivers it can be the wrong side (then `unclear`).
+  - **Path.** A path that passes near the free end of an unrelated line within the removal
+    width is attributed to that end.
+  - **Scope.** The diagnostics describe file A only.
 
 ### 15.4 Open decisions (assumptions taken, please confirm)
 

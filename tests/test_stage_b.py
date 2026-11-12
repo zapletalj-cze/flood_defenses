@@ -313,6 +313,27 @@ list_res.append(
         and hits(gdf_before, "R3_plain") == 1,
     )
 )
+gdf_leak = (
+    gpd.read_file(out / "leaks.gpkg")
+    if (out / "leaks.gpkg").exists()
+    else gpd.GeoDataFrame(columns=["cause", "geometry"], geometry="geometry")
+)
+
+
+def leaks_in(name):
+    inside = gdf_leak.within(world(shapely.Polygon(levees[name].coords)))
+    return sorted(gdf_leak.loc[inside, "cause"])
+
+
+list_res.append(
+    (
+        "leaks.gpkg, crossings open: rings 1 and 2 leak through the stream inside them (water_source_behind), "
+        f"ring 3 does not ({leaks_in('R1_gate')}, {leaks_in('R2_pump')}, {leaks_in('R3_plain')})",
+        leaks_in("R1_gate") == ["water_source_behind"]
+        and leaks_in("R2_pump") == ["water_source_behind"]
+        and leaks_in("R3_plain") == [],
+    )
+)
 gdf_byg = (
     gpd.read_file(out / "protected_areas_by_group.gpkg")
     if (out / "protected_areas_by_group.gpkg").exists()

@@ -1228,6 +1228,45 @@ class Raster:
         gdal.Translate(str(path), mem, format="GTiff", creationOptions=list_opt)
 
     @staticmethod
+    def sample_points(path, x, y, block=2048):
+        """
+        Values of a raster at points (the cell containing each point) at native resolution. The raster is read
+        block by block, only where points lie, so scattered points over a large raster need little memory.
+        :param path: raster path
+        :param x: x coordinates in the raster CRS
+        :param y: y coordinates in the raster CRS
+        :param block: block size in pixels
+        :return: float64 array, NaN outside the raster or at nodata
+        """
+        ds = gdal.Open(str(path))
+        band = ds.GetRasterBand(1)
+        gt, nodata = ds.GetGeoTransform(), band.GetNoDataValue()
+        n_cols, n_rows = ds.RasterXSize, ds.RasterYSize
+        col = np.floor((np.asarray(x, float) - gt[0]) / gt[1]).astype(np.int64)
+        row = np.floor((np.asarray(y, float) - gt[3]) / gt[5]).astype(np.int64)
+        out = np.full(len(col), np.nan)
+        inside = np.flatnonzero(
+            (col >= 0) & (col < n_cols) & (row >= 0) & (row < n_rows)
+        )
+        if len(inside):
+            key = (row[inside] // block) * (n_cols // block + 1) + col[inside] // block
+            order = np.argsort(key, kind="stable")
+            inside, key = inside[order], key[order]
+            first = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
+            for idx in np.split(inside, first[1:]):
+                r0 = int(row[idx[0]] // block) * block
+                c0 = int(col[idx[0]] // block) * block
+                arr = band.ReadAsArray(
+                    c0, r0, min(block, n_cols - c0), min(block, n_rows - r0)
+                ).astype(np.float64)
+                values = arr[row[idx] - r0, col[idx] - c0]
+                if nodata is not None:
+                    values[values == nodata] = np.nan
+                out[idx] = values
+        ds = None
+        return out
+
+    @staticmethod
     def rasterize_geometries(
         geometries, values, shape, geotransform, wkt, all_touched=False, dtype=np.int32
     ):
@@ -2332,6 +2371,37 @@ class Vector:
         return group
 
     @staticmethod
+    def line_samples(geoms, spacing, step):
+        """
+        Points spread evenly along lines, about spacing apart (at least one per part), with the unit normal of the
+        line at each point (left of the direction of digitising)
+        :param geoms: array of LineString or MultiLineString
+        :param spacing: approximate distance between samples
+        :param step: distance before and after a sample of the two points that give the direction
+        :return: (owner index per sample, xy (n, 2), normal (n, 2), length of line represented by each sample)
+        """
+        parts, owner = shapely.get_parts(
+            np.asarray(geoms, dtype=object), return_index=True
+        )
+        keep = (shapely.get_type_id(parts) == 1) & (shapely.length(parts) > 0)
+        parts, owner = parts[keep], owner[keep]
+        length = shapely.length(parts)
+        count = np.maximum(1, np.floor(length / spacing + 0.5)).astype(np.int64)
+        idx = np.repeat(np.arange(len(parts)), count)
+        k = np.arange(len(idx)) - np.repeat(np.cumsum(count) - count, count)
+        weight = length[idx] / count[idx]
+        dist = (k + 0.5) * weight
+        xy = shapely.get_coordinates(shapely.line_interpolate_point(parts[idx], dist))
+        d = shapely.get_coordinates(
+            shapely.line_interpolate_point(parts[idx], dist + step)
+        ) - shapely.get_coordinates(
+            shapely.line_interpolate_point(parts[idx], dist - step)
+        )
+        norm = np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-12)
+        normal = np.column_stack([-d[:, 1] / norm, d[:, 0] / norm])
+        return owner[idx], xy, normal, weight
+
+    @staticmethod
     def dominant_nearby(points, geoms, weights, tolerance):
         """
         Per point, the feature with the largest weight among those within the distance of
@@ -2806,6 +2876,227 @@ class Hydro:
         for i, sub in zip(owner[order][first], np.split(new_parts[order], first[1:])):
             out[i] = shapely.multilinestrings(sub) if multi[i] else sub[0]
         return out, stats
+
+    @staticmethod
+    def crest_profiles(xy, normal, dtm_path, half_width, block=2048):
+        """
+        DTM profiles across lines: native DTM values every native pixel along the normal of each point, within
+        half_width on both sides
+        :param xy: (n, 2) points
+        :param normal: (n, 2) unit normals
+        :param dtm_path: DTM at native resolution
+        :param half_width: profile half-width
+        :param block: block size of the DTM reads
+        :return: (offsets along the normal, float64 values (n, offsets), NaN = nodata or outside the DTM)
+        """
+        ds = gdal.Open(str(dtm_path))
+        step = abs(ds.GetGeoTransform()[1])
+        ds = None
+        k = int(np.ceil(half_width / step - 1e-9))
+        t = np.arange(-k, k + 1) * step
+        px = xy[:, 0, None] + t[None, :] * normal[:, 0, None]
+        py = xy[:, 1, None] + t[None, :] * normal[:, 1, None]
+        z = Raster.sample_points(dtm_path, px.ravel(), py.ravel(), block)
+        return t, z.reshape(len(xy), len(t))
+
+    @staticmethod
+    def _block_order(xy, dtm_path, block=2048):
+        # order of points by DTM block, so that chunks of points read few blocks
+        ds = gdal.Open(str(dtm_path))
+        gt, n_cols = ds.GetGeoTransform(), ds.RasterXSize
+        ds = None
+        key = (np.floor((xy[:, 1] - gt[3]) / gt[5]) // block) * (
+            n_cols // block + 1
+        ) + np.floor((xy[:, 0] - gt[0]) / gt[1]) // block
+        return np.argsort(key, kind="stable")
+
+    @staticmethod
+    def snap_to_crest(
+        lines, dtm_path, params, fix_ends=False, touch=0.01, chunk=100000
+    ):
+        """
+        Moves levee lines onto the crest seen in the DTM. Every vertex (densified to densify_m) looks along its
+        normal within max_shift_m for the highest DTM cell; of the cells within level_tolerance_m of the highest,
+        the nearest to the line is taken, so a flat crest does not move the line. It is a ridge when it stands at
+        least min_height_m above the lowest cell within side_m on both sides. Vertices without a ridge take the
+        offset interpolated from their neighbours; offsets are smoothed by a running median of smooth_vertices.
+        Ends shared by several lines move together (connected lines stay connected); with fix_ends every end
+        stays. Lines in which nothing moves keep their geometry.
+        :param lines: array of LineString in the DTM CRS
+        :param dtm_path: DTM at native resolution
+        :param params: dict densify_m, max_shift_m, side_m, min_height_m, level_tolerance_m, smooth_vertices
+        :param fix_ends: keep the end points of every line
+        :param touch: distance within which end points are one shared end
+        :param chunk: vertices per DTM sampling pass
+        :return: (array of geometries, DataFrame per line with ridge_share, crest_height_m (median height of the
+                  ridge above the higher side) and shift_median_m, dict of statistics)
+        """
+        p = params
+        lines = np.asarray(lines, dtype=object)
+        n_lines = len(lines)
+        df = pd.DataFrame(
+            {
+                "ridge_share": np.zeros(n_lines),
+                "crest_height_m": np.full(n_lines, np.nan),
+                "shift_median_m": np.zeros(n_lines),
+            }
+        )
+        stats = {"lines": n_lines, "vertices": 0}
+        if not n_lines:
+            return lines.copy(), df, stats
+        xy, part = shapely.get_coordinates(
+            shapely.segmentize(lines, p["densify_m"]), return_index=True
+        )
+        n = len(xy)
+        stats["vertices"] = n
+        first = np.r_[True, part[1:] != part[:-1]]
+        last = np.r_[part[1:] != part[:-1], True]
+        prev_i, next_i = np.arange(n) - 1, np.arange(n) + 1
+        prev_i[first], next_i[last] = np.flatnonzero(first), np.flatnonzero(last)
+        d = xy[next_i] - xy[prev_i]
+        norm = np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-12)
+        normal = np.column_stack([-d[:, 1] / norm, d[:, 0] / norm])
+        # --- profiles across the line: highest cell near the line, lowest cells on both sides of it ---
+        offset, height, ridge = np.zeros(n), np.full(n, np.nan), np.zeros(n, bool)
+        order = Hydro._block_order(xy, dtm_path)
+        for s in range(0, n, chunk):
+            sel = order[s : s + chunk]
+            t, z = Hydro.crest_profiles(
+                xy[sel], normal[sel], dtm_path, p["max_shift_m"] + p["side_m"]
+            )
+            z_near = np.where(
+                np.isnan(z) | (np.abs(t) > p["max_shift_m"] + 1e-9)[None, :], -np.inf, z
+            )
+            top = z_near.max(axis=1)
+            dist = np.where(
+                z_near >= top[:, None] - p["level_tolerance_m"],
+                np.abs(t)[None, :],
+                np.inf,
+            )
+            k = np.argmin(dist, axis=1)
+            off = t[k]
+            rel = t[None, :] - off[:, None]
+            z_low = np.where(np.isnan(z), np.inf, z)
+            left = np.where((rel < 0) & (rel >= -p["side_m"]), z_low, np.inf).min(1)
+            right = np.where((rel > 0) & (rel <= p["side_m"]), z_low, np.inf).min(1)
+            with np.errstate(invalid="ignore"):
+                h = z_near[np.arange(len(sel)), k] - np.maximum(left, right)
+            ok = np.isfinite(h) & (h >= p["min_height_m"])
+            offset[sel], ridge[sel] = off, ok
+            height[sel] = np.where(np.isfinite(h), h, np.nan)
+        # --- offsets per line: interpolated over vertices without a ridge, running median ---
+        shift = np.zeros(n)
+        starts = np.flatnonzero(first)
+        size = max(1, int(p["smooth_vertices"]))
+        for s0, e0 in zip(starts, np.r_[starts[1:], n]):
+            good = ridge[s0:e0]
+            if not good.any():
+                continue
+            idx = np.arange(e0 - s0)
+            o = np.interp(idx, idx[good], offset[s0:e0][good])
+            if size > 1 and len(o) > 2:
+                o = ndimage.median_filter(o, size=size, mode="nearest")
+            if fix_ends:
+                o[0] = o[-1] = 0.0
+            shift[s0:e0] = o
+        moved = xy + shift[:, None] * normal
+        if not fix_ends:
+            # ends at the same place move to the mean of their positions
+            end_idx = np.flatnonzero(first | last)
+            grid = np.round(xy[end_idx] / max(touch, 1e-6)).astype(np.int64)
+            inv = np.unique(grid, axis=0, return_inverse=True)[1].ravel()
+            cnt = np.bincount(inv)
+            shared = cnt[inv] > 1
+            for axis in (0, 1):
+                mean = np.bincount(inv, moved[end_idx, axis]) / cnt
+                moved[end_idx[shared], axis] = mean[inv[shared]]
+        moved_dist = np.hypot(*(moved - xy).T)
+        out = lines.copy()
+        shapely.linestrings(moved, indices=part, out=out)
+        still = np.bincount(part, weights=moved_dist > 1e-9, minlength=n_lines) == 0
+        bad = still | ~(shapely.length(out) > 0)
+        out[bad] = lines[bad]
+        # --- statistics per line ---
+        cnt = np.bincount(part, minlength=n_lines)
+        df["ridge_share"] = np.bincount(part, weights=ridge, minlength=n_lines) / (
+            np.maximum(cnt, 1)
+        )
+        df_v = pd.DataFrame(
+            {"part": part, "h": np.where(ridge, height, np.nan), "s": moved_dist}
+        ).groupby("part")
+        df["crest_height_m"] = df_v["h"].median().reindex(range(n_lines)).to_numpy()
+        df["shift_median_m"] = (
+            df_v["s"].median().reindex(range(n_lines)).fillna(0.0).to_numpy()
+        )
+        stats.update(
+            {
+                "ridge_share": float(ridge.mean()),
+                "shift_mean_m": float(moved_dist.mean()),
+                "shift_p95_m": float(np.percentile(moved_dist, 95)),
+                "lines_moved": int((~bad).sum()),
+                "lines_without_ridge": int((df["ridge_share"] == 0).sum()),
+            }
+        )
+        return out, df, stats
+
+    @staticmethod
+    def bridge_profile(segments, dtm_path, half_width, chunk=2000):
+        """
+        Crest the terrain holds in straight gaps: the highest DTM cell across the segment (within half_width on
+        both sides) every native pixel along it
+        :param segments: array of LineStrings from one end of the gap to the other
+        :param dtm_path: DTM at native resolution
+        :param half_width: half-width of the band across the segment
+        :param chunk: segments per DTM sampling pass
+        :return: (lower of the two end values, lowest value along the segment); -inf where the DTM is missing
+        """
+        segments = np.asarray(segments, dtype=object)
+        n = len(segments)
+        end_low, along_min = np.full(n, -np.inf), np.full(n, -np.inf)
+        if not n:
+            return end_low, along_min
+        ds = gdal.Open(str(dtm_path))
+        step = abs(ds.GetGeoTransform()[1])
+        ds = None
+        a = shapely.get_coordinates(shapely.get_point(segments, 0))
+        d = shapely.get_coordinates(shapely.get_point(segments, -1)) - a
+        norm = np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-12)
+        normal = np.column_stack([-d[:, 1] / norm, d[:, 0] / norm])
+        order = Hydro._block_order(a, dtm_path)
+        for s in range(0, n, chunk):
+            sel = order[s : s + chunk]
+            xy, idx = shapely.get_coordinates(
+                shapely.segmentize(segments[sel], step), return_index=True
+            )
+            _, z = Hydro.crest_profiles(xy, normal[sel][idx], dtm_path, half_width)
+            top = np.where(np.isnan(z), -np.inf, z).max(axis=1)
+            first = np.r_[True, idx[1:] != idx[:-1]]
+            last = np.r_[idx[1:] != idx[:-1], True]
+            end_low[sel[idx[first]]] = np.minimum(top[first], top[last])
+            along_min[sel] = (
+                pd.Series(top).groupby(idx).min().reindex(range(len(sel))).to_numpy()
+            )
+        return end_low, along_min
+
+    @staticmethod
+    def first_event_on_path(order, seeds, event, starts):
+        """
+        Follows the paths of a priority flood back from start cells towards their seed and reports the first cell
+        with an event code on the way. The predecessor of a cell is its 4-neighbour taken first from the queue
+        (the cell that reached it), recovered from the order array of priority_flood.
+        :param order: order array of priority_flood (-1 = not reached)
+        :param seeds: seed cells of the flood
+        :param event: int8 array, 0 = no event, > 0 = event code
+        :param starts: flat indices of the start cells
+        :return: (int8 code per start: the event code, 0 = start not reached, -1 = seed reached without an event;
+                  int64 flat index of the event cell or of the seed, -1 if none)
+        """
+        return _first_event(
+            np.ascontiguousarray(order, dtype=np.int32),
+            np.ascontiguousarray(seeds, dtype=np.bool_),
+            np.ascontiguousarray(event, dtype=np.int8),
+            np.asarray(starts, dtype=np.int64),
+        )
 
 
 class MosaicRasters:
@@ -3579,6 +3870,47 @@ def _priority_flood(surface, seeds):
 
 
 @njit(cache=True)
+def _first_event(order, seeds, event, starts):
+    # Walks back along the flood path: the predecessor is the 4-neighbour with the smallest order.
+    rows, cols = order.shape
+    o = order.ravel()
+    s = seeds.ravel()
+    ev = event.ravel()
+    m = len(starts)
+    code = np.zeros(m, np.int8)
+    cell = np.full(m, -1, np.int64)
+    for k in range(m):
+        c = starts[k]
+        if o[c] < 0:
+            continue
+        while True:
+            if ev[c] > 0:
+                code[k] = ev[c]
+                cell[k] = c
+                break
+            if s[c]:
+                code[k] = -1
+                cell[k] = c
+                break
+            ci = c // cols
+            cj = c - ci * cols
+            best = -1
+            best_o = o[c]
+            if ci > 0 and 0 <= o[c - cols] < best_o:
+                best, best_o = c - cols, o[c - cols]
+            if ci < rows - 1 and 0 <= o[c + cols] < best_o:
+                best, best_o = c + cols, o[c + cols]
+            if cj > 0 and 0 <= o[c - 1] < best_o:
+                best, best_o = c - 1, o[c - 1]
+            if cj < cols - 1 and 0 <= o[c + 1] < best_o:
+                best, best_o = c + 1, o[c + 1]
+            if best < 0:
+                break
+            c = best
+    return code, cell
+
+
+@njit(cache=True)
 def _least_cost_path(cost, start, end):
     # Dijkstra on an 8-connected grid; a step costs its length (1 or sqrt 2 cells) times the mean cost of its cells.
     rows, cols = cost.shape
@@ -4003,6 +4335,16 @@ class Config:
         "river_groups.max_join_ratio": "float",
         "river_groups.max_length_m": "float",
         "river_groups.min_upstream_area_km2": "float",
+        "levee_snap.densify_m": "float",
+        "levee_snap.max_shift_m": "float",
+        "levee_snap.side_m": "float",
+        "levee_snap.min_height_m": "float",
+        "levee_snap.level_tolerance_m": "float",
+        "levee_snap.smooth_vertices": "int",
+        "levee_snap.min_ridge_share": "float",
+        "levee_gaps.max_gap_m": "float",
+        "levee_gaps.crest_tolerance_m": "float",
+        "leaks.sample_spacing_m": "float",
         "river_snap.densify_m": "float",
         "river_snap.guide_search_m": "float",
         "river_snap.guide_max_shift_m": "float",
@@ -4300,6 +4642,17 @@ class Config:
         "river_groups.max_join_ratio": 2.0,
         "river_groups.max_length_m": 30000.0,
         "river_groups.min_upstream_area_km2": 100.0,
+        # levee lines onto the DTM crest, DTM-verified gaps, leak diagnostics (Stage G; defaults only)
+        "levee_snap.densify_m": 10.0,
+        "levee_snap.max_shift_m": 15.0,
+        "levee_snap.side_m": 30.0,
+        "levee_snap.min_height_m": 0.5,
+        "levee_snap.level_tolerance_m": 0.1,
+        "levee_snap.smooth_vertices": 5,
+        "levee_snap.min_ridge_share": 0.5,
+        "levee_gaps.max_gap_m": 200.0,
+        "levee_gaps.crest_tolerance_m": 0.5,
+        "leaks.sample_spacing_m": 50.0,
         # river snapping (Stage G): values of the snapping procedure the method follows
         "country.river_guides": [],
         "country.river_upstream_area_field": "",
