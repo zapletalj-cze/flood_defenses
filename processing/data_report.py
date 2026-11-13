@@ -110,6 +110,7 @@ OUTPUTS = {
 }
 TABLES = [
     "units.csv",
+    "event_evidence.csv",
     "gfm_evidence.csv",
     "event_rp.csv",
     "validation_rp_confusion.csv",
@@ -395,6 +396,222 @@ if __name__ == "__main__":
         if path.exists():
             text = json.dumps(json.loads(path.read_text()), separators=(", ", ": "))
             L += [f"### {name}", "", "```", text[:3000], "```", ""]
+
+    # --- Stage H checks on the real data: discharge series, river groups and events, GFM scenes per event ---
+    L += ["## Stage H checks (discharge, events, GFM scenes)", ""]
+    work_dir = Path(general.get("work_dir", "")) / code
+    sources_cfg = raw.get("sources", {})
+    gfm_from = np.datetime64(sources_cfg.get("gfm_date_from") or "2015-01-01")
+    dis_cfg = raw.get("discharge", {})
+    list_src = [
+        s
+        for s in dis_cfg.get("sources", [])
+        if (out_dir / f"discharge_{s}.npz").exists()
+    ]
+    if not list_src:
+        L.append(
+            "- no discharge_<source>.npz: discharge not prepared (download_discharge.py, discharge_prepare.py)"
+        )
+    for src in list_src:
+        try:
+            with np.load(out_dir / f"discharge_{src}.npz") as f:
+                days = f["dates"].astype("datetime64[D]")
+                values = f["values"]
+                area = f["upstream_area_km2"]
+            cells = gpd.read_file(out_dir / f"discharge_cells_{src}.gpkg")
+            L.append(
+                f"- **{src}**: {values.shape[1]:,} cells, {len(days):,} days {days[0]} to {days[-1]}, missing values "
+                f"{100 * float(np.isnan(values).mean()):.2f} %; upstream area km2 {pct_row(area)}"
+            )
+            L.append(
+                f"  - Gumbel fits: years {pct_row(cells['n_years'])}; fit RMSE relative to the mean annual maximum "
+                f"{pct_row(cells['fit_rmse'] / (cells['gumbel_xi'] + 0.5772 * cells['gumbel_alpha']))}"
+            )
+            # the days since the first GFM scenes on which most cells had a high return period: do known floods
+            # appear on the right dates (time convention of the files)?
+            recent = days >= gfm_from
+            if recent.any():
+                q10 = gis.Stats.gumbel_q(
+                    10.0,
+                    cells["gumbel_xi"].to_numpy(),
+                    cells["gumbel_alpha"].to_numpy(),
+                )
+                share = np.nanmean(values[recent] >= q10[None, :], axis=1)
+                order = np.argsort(-share)
+                picked, list_day = [], []
+                for k in order:
+                    day = days[recent][k]
+                    if all(abs((day - d).astype(int)) > 15 for d in picked):
+                        picked.append(day)
+                        list_day.append(f"{day} ({100 * share[k]:.1f} % of cells)")
+                    if len(picked) == 8:
+                        break
+                L.append(
+                    f"  - days since {gfm_from} with the largest share of cells above RP 10 (at least 15 days apart): "
+                    + ", ".join(list_day)
+                )
+            del values
+        except Exception as exc:  # noqa: BLE001 - reported
+            L.append(f"- {src}: cannot read ({str(exc)[:150]})")
+    path = out_dir / "event_groups.csv"
+    if path.exists():
+        df_g = pd.read_csv(path, keep_default_na=False)
+        matched = df_g[df_g["source"] != ""]
+        L.append(
+            f"- **event_groups.csv**: {len(df_g):,} river groups, {len(matched):,} with a discharge cell "
+            f"({', '.join(f'{k} {v}' for k, v in matched['source'].value_counts().items()) or '-'}); match quality "
+            f"{', '.join(f'{k} {v}' for k, v in matched['match_quality'].value_counts().items())}; events per matched group {pct_row(matched['events'])}"
+        )
+        L.append(
+            f"  - upstream area km2 of groups with a cell {pct_row(matched['area_km2'])}; without one "
+            f"{pct_row(df_g.loc[df_g['source'] == '', 'area_km2'])}"
+        )
+    gdf_events = None
+    path = out_dir / "events.gpkg"
+    if path.exists():
+        try:
+            gdf_events = gpd.read_file(path)
+            peak = pd.to_datetime(gdf_events["peak_date"])
+            since = gdf_events[peak >= pd.Timestamp(str(gfm_from))]
+            per_year = peak.dt.year.value_counts().sort_index()
+            L.append(
+                f"- **events.gpkg**: {len(gdf_events):,} events in {gdf_events['group_id'].nunique():,} groups; "
+                f"{len(since):,} since {gfm_from} (with possible GFM scenes); peak RP {pct_row(gdf_events['peak_rp'])}; "
+                f"merged from several peaks {int((gdf_events['n_peaks'] > 1).sum()):,}; extrapolated "
+                f"{int(gdf_events['extrapolated'].sum()):,}"
+            )
+            L.append(
+                "  - events per year since "
+                + str(gfm_from)[:4]
+                + ": "
+                + ", ".join(
+                    f"{y} {n}"
+                    for y, n in per_year.items()
+                    if y >= int(str(gfm_from)[:4])
+                )
+            )
+            month = (
+                peak[peak >= pd.Timestamp(str(gfm_from))]
+                .dt.strftime("%Y-%m")
+                .value_counts()
+                .head(8)
+            )
+            L.append(
+                "  - months with most events: "
+                + ", ".join(f"{m} ({n})" for m, n in month.items())
+            )
+        except Exception as exc:  # noqa: BLE001 - reported
+            L.append(f"- events.gpkg: cannot read ({str(exc)[:150]})")
+    scr_path = work_dir / "gfm" / "screening.csv"
+    df_idx = None
+    if scr_path.exists():
+        df_scr = pd.read_csv(scr_path, dtype={"unit_id": str}, keep_default_na=False)
+        kept = df_scr[df_scr["kept"].astype(str).str.lower().isin(["true", "1"])]
+        years = pd.to_datetime(df_scr["datetime"], utc=True, format="ISO8601").dt.year
+        L.append(
+            f"- **GFM screening**: {len(df_scr):,} scene-unit pairs screened ({df_scr['item_id'].nunique():,} scenes, "
+            f"{df_scr['unit_id'].nunique():,} units), {len(kept):,} kept ({kept['unit_id'].nunique():,} units); "
+            f"flooded pixels of the kept {pct_row(pd.to_numeric(kept['flooded_pixels'], errors='coerce'))}"
+        )
+        L.append(
+            "  - pairs per year: "
+            + ", ".join(
+                f"{y} {n}" for y, n in years.value_counts().sort_index().items()
+            )
+        )
+    else:
+        L.append("- no GFM screening (download_gfm.py not run)")
+    if (out_dir / "gfm_index.csv").exists():
+        df_idx = pd.read_csv(
+            out_dir / "gfm_index.csv", dtype={"unit_id": str}, keep_default_na=False
+        )
+        adv = (
+            int((df_idx["advisory_path"] != "").sum())
+            if "advisory_path" in df_idx.columns
+            else 0
+        )
+        L.append(
+            f"- **gfm_index.csv**: {len(df_idx):,} scene windows in {df_idx['unit_id'].nunique():,} units; with the "
+            f"advisory layer {adv:,}"
+        )
+    # the largest events since the first GFM scenes with the scene windows of their units and window
+    if gdf_events is not None and len(gdf_events):
+        peak = pd.to_datetime(gdf_events["peak_date"])
+        top = (
+            gdf_events[peak >= pd.Timestamp(str(gfm_from))]
+            .sort_values(["peak_rp", "peak_discharge"], ascending=False)
+            .head(15)
+        )
+        cores = (
+            gpd.read_file(out_dir / "units_core.gpkg").to_crs(gdf_events.crs)
+            if (out_dir / "units_core.gpkg").exists()
+            else None
+        )
+        stamps = (
+            pd.to_datetime(
+                df_idx["datetime"], utc=True, format="ISO8601"
+            ).dt.tz_localize(None)
+            if df_idx is not None and len(df_idx)
+            else None
+        )
+        L += [
+            "",
+            f"Largest events since {gfm_from} with the kept GFM scene windows of the units their group crosses "
+            "(scene days = distinct acquisition days in the window; first and last relative to the peak):",
+            "",
+            "| event_id | source | peak_date | peak_rp | peak m3/s | window | units | scene windows | scene days | "
+            "first day | last day | days after peak |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        for e in top.itertuples():
+            units = (
+                list(cores.loc[cores.intersects(e.geometry), "unit_id"])
+                if cores is not None
+                else []
+            )
+            n_win = n_day = n_after = 0
+            first = last = "-"
+            if stamps is not None and units:
+                sel = (
+                    df_idx["unit_id"].isin(units).to_numpy()
+                    & (stamps >= pd.Timestamp(e.window_start)).to_numpy()
+                    & (
+                        stamps <= pd.Timestamp(e.window_end) + pd.Timedelta(days=1)
+                    ).to_numpy()
+                )
+                if sel.any():
+                    rel = (
+                        stamps[sel].dt.normalize() - pd.Timestamp(e.peak_date)
+                    ).dt.days
+                    n_win, n_day, n_after = (
+                        int(sel.sum()),
+                        int(rel.nunique()),
+                        int(rel[rel > 0].nunique()),
+                    )
+                    first, last = f"{int(rel.min()):+d}", f"{int(rel.max()):+d}"
+            L.append(
+                f"| {e.event_id} | {e.source} | {e.peak_date} | {fmt(e.peak_rp)} | {fmt(e.peak_discharge)} | "
+                f"{e.window_start} to {e.window_end} | {len(units)} | {n_win} | {n_day} | {first} | {last} | {n_after} |"
+            )
+        L.append("")
+    for path in gis.Config.as_list(raw.get("evidence", {}).get("max_extent_files")):
+        try:
+            ds = gdal.Open(str(path))
+            band = ds.GetRasterBand(1)
+            srs = osr.SpatialReference(wkt=ds.GetProjection())
+            sample = band.ReadAsArray(
+                buf_xsize=min(ds.RasterXSize, 1000), buf_ysize=min(ds.RasterYSize, 1000)
+            )
+            vals, cnt = np.unique(sample, return_counts=True)
+            L.append(
+                f"- **maximum flood extent** {Path(path).name}: {ds.RasterXSize} x {ds.RasterYSize} px, pixel "
+                f"{ds.GetGeoTransform()[1]:g}, CRS {srs.GetName()} ({srs.GetAuthorityName(None)}:"
+                f"{srs.GetAuthorityCode(None)}), nodata {band.GetNoDataValue()}, values (coarse read) "
+                f"{dict(zip(vals.tolist()[:8], cnt.tolist()[:8]))}"
+            )
+        except Exception as exc:  # noqa: BLE001 - reported
+            L.append(f"- maximum flood extent {path}: cannot read ({str(exc)[:150]})")
+    L.append("")
 
     # --- Logs: the newest log of every script, its end and its distinct warnings and errors ---
     L += ["## Logs (newest per script)", ""]

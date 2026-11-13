@@ -328,6 +328,12 @@ The configuration has two files:
     - DTM storage and elevation statistics from 24 random windows;
     - levees and rivers inside the DTM footprint (counts, lengths, columns);
     - every output layer and table (counts, areas, percentiles, the largest features);
+    - **Stage H checks:** discharge series per source (cells, period, missing values, Gumbel
+      fit quality, the days with most cells above RP 10 since the first GFM scenes: do
+      known floods fall on the right dates?); river groups with a discharge cell; events
+      per year; GFM screening; the 15 largest events with the GFM scene windows in their
+      window (count, acquisition days, first and last day relative to the peak); the
+      maximum flood extent files;
     - the newest log of every script (distinct warnings and errors, last lines);
   - **`overview.png`:** the footprint, the levees and the protected areas.
 
