@@ -97,7 +97,7 @@ by `pixi run make-figures` (`docs/make_figures.py`) from synthetic data.
 
 | Page | What it does |
 |---|---|
-| **Pipeline** | Every step as a card in run order: status, the outputs it has written, its run variables (`UNITS`, `FORCE`, `RUN_ID`…; they start from the values at the top of the script) and a Run button. **Run core pipeline** queues the core steps in order |
+| **Pipeline** | Every step as a card in run order: status, the outputs it has written, its run variables (`UNITS`, `FORCE`, `RUN_ID`…; they start from the values at the top of the script) and a Run button. The running step shows a progress bar on its card (units done, %, ETA; a moving bar for steps without units), also in the window title. **Run core pipeline** queues the core steps in order |
 | **Console** (bottom) | Runs one step at a time from a queue, streams its output and shows the progress of the units (`[k/N]`, ETA), warnings and errors. **Stop** ends the step with its worker processes |
 | **Results** | Protected areas (files A and B), leaks by cause with the largest places, levee lines on the crest, units, speed and extrapolated country time, the overview of the latest report, output files |
 | **Configuration** | Form for the short `defenses.toml`: folders, workers, input files of each country with a check that they exist and a Browse dialog. The upstream area column is picked from the numeric columns of the rivers file. A Raw TOML tab edits the whole file. Saving keeps comments and layout (`gis.Config.set_toml_value`) and checks the TOML first |
@@ -691,7 +691,10 @@ in the terrain. Unbridged, they leak twice:
 - **Profile.** For each candidate, `gis.Hydro.bridge_profile` takes the highest DTM cell
   within 15 m across the gap, every native pixel along it.
 - **Acceptance.** The first candidate whose profile never drops more than 0.5 m below the
-  lower of its two ends is bridged.
+  lower of its two ends, and whose crest stands at least `levee_snap.min_height_m` above
+  the terrain within `levee_snap.side_m` on both sides along the whole gap, is bridged.
+  High ground alone is not a levee: without the ridge condition the first POL run bridged
+  33,997 gaps, more than one per levee line.
 - **Geometry.** The bridge then follows the crest between its fixed ends.
 - **Output.** These bridges have `bridge_type = "dtm"` in `barriers.gpkg`; bridges within
   `gap_tolerance_m` have `"short"`.
@@ -1142,12 +1145,25 @@ large river and also against a stream.
 - **`protected_areas_by_group.gpkg`:** the columns of file A plus `group_id`.
 - **Log:** the area of file B (overlaps counted per group) against file A.
 
-**Cost.** Every group repeats HAND and the two floods on the whole window: about 27–31 s
-per group on a 30 M-cell unit, as long as HAND and both floods of file A together
-(§13.4). A unit with 2 groups took 91–101 s instead of about 37–40 s. Peak memory grew from
-about 95 to about 119 bytes per window cell. The number of groups per unit is in each
-unit's log line; `performance.json` extrapolates from your test units with the groups
-included.
+**Cost and the crop.** Every group repeats HAND and the two floods. In the first POL run
+they took 79 % of the time (10.7 µs per domain cell instead of 2.4).
+- **Crop.** A group is therefore computed only in a crop around its river cells, extended
+  by `river_groups.crop_margin_m` (default 5 km, `Config.DEFAULTS`). Areas touching the crop
+  edge are flagged `truncated`, as at a window edge.
+- **Trade-off**, measured on two benchmark units with 2 groups each:
+
+  | Crop margin | Group time per unit | File B area |
+  |---|---|---|
+  | none (whole window) | 47–52 s | 2.02 km² |
+  | 5 km (default) | 36–43 s | 1.84 km² |
+  | 3.5 km | 29–36 s | 1.66 km² |
+  | 2 km | 18–28 s | 1.66 km² |
+
+  The loss is protection against a tributary near its confluence, more than the margin
+  away from it. Windows of 26 km with many short tributaries (POL) gain more than the
+  11 km benchmark windows.
+- **Full computation.** A very large value, e.g. `[river_groups]` `crop_margin_m =
+  100000.0` in `defenses.toml`, computes every group on the whole window again.
 
 ### 8.4 Later steps with file A or B (`LAYER`)
 

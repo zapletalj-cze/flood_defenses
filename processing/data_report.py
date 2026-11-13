@@ -264,9 +264,17 @@ if __name__ == "__main__":
         except Exception as exc:  # noqa: BLE001 - reported
             L.append(f"- {path}: cannot read ({str(exc)[:150]})")
     fp_path = out_dir / "dtm_footprint.gpkg"
+    area_name = "DTM footprint"
     if fp_path.exists():
         footprint = gpd.read_file(fp_path)
         L.append(f"- dtm_footprint.gpkg: area {fmt(footprint.area.sum() / 1e6)} km2")
+    elif (out_dir / "corridor.gpkg").exists():
+        # without the footprint the corridor limits the inputs and the map
+        footprint = gpd.read_file(out_dir / "corridor.gpkg")
+        area_name = "corridor"
+        L.append(
+            f"- no dtm_footprint.gpkg: inputs and map limited to corridor.gpkg ({fmt(footprint.area.sum() / 1e6)} km2)"
+        )
     L.append("")
 
     # --- Levees and rivers within the DTM footprint ---
@@ -290,7 +298,7 @@ if __name__ == "__main__":
                 if footprint is not None and len(gdf):
                     gdf = gdf[gdf.intersects(footprint.to_crs(gdf.crs).union_all())]
                 L.append(
-                    f"- inside the DTM footprint{'' if footprint is not None else ' (no footprint yet: whole file)'}:"
+                    f"- inside the {area_name}{'' if footprint is not None else ' (no footprint yet: whole file)'}:"
                 )
                 profile(gdf, L)
                 if kind == "levees":
@@ -327,6 +335,29 @@ if __name__ == "__main__":
             gdf = gpd.read_file(path)
             layers[name] = gdf
             profile(gdf, L, cols)
+            if name == "protected_areas_by_group.gpkg" and len(gdf):
+                # areas of different river groups overlap: the union counts every place once
+                union_b = shapely.union_all(gdf.geometry.values)
+                gdf_a = layers.get("protected_areas.gpkg")
+                union_a = (
+                    shapely.union_all(gdf_a.geometry.values)
+                    if gdf_a is not None and len(gdf_a)
+                    else shapely.Polygon()
+                )
+                L.append(
+                    f"- union of all groups (overlaps counted once): {fmt(union_b.area / 1e6)} km2; file A "
+                    f"{fmt(union_a.area / 1e6)} km2; in B but not in A {fmt(union_b.difference(union_a).area / 1e6)} "
+                    f"km2; in A but not in B {fmt(union_a.difference(union_b).area / 1e6)} km2"
+                )
+            if name == "leaks.gpkg" and len(gdf):
+                by = gdf.groupby("cause")["levee_length_m"].agg(["size", "sum"])
+                L.append(
+                    "- levee length per cause: "
+                    + ", ".join(
+                        f"{c} {int(r['size']):,} places {fmt(r['sum'] / 1000)} km"
+                        for c, r in by.sort_values("sum", ascending=False).iterrows()
+                    )
+                )
         except Exception as exc:  # noqa: BLE001 - reported
             L.append(f"- cannot read ({str(exc)[:150]})")
         L.append("")
@@ -392,6 +423,9 @@ if __name__ == "__main__":
         )
         if footprint is not None:
             footprint.boundary.plot(ax=ax, color=INK["muted"], lw=0.6)
+        gdf_b_map = layers.get("protected_areas_by_group.gpkg")
+        if gdf_b_map is not None and len(gdf_b_map):
+            gdf_b_map.plot(ax=ax, color=CATEGORICAL[2], alpha=0.35, lw=0)
         gdf_pa_map = layers.get(
             "protected_areas_rp.gpkg", layers.get("protected_areas.gpkg")
         )
@@ -405,11 +439,17 @@ if __name__ == "__main__":
         if gdf_lv is not None and len(gdf_lv):
             gdf_lv.simplify(50).plot(ax=ax, color=CATEGORICAL[1], lw=0.8)
         ax.set_title(
-            f"{code}: DTM footprint (grey), levees in the footprint (orange), protected areas (blue)",
+            f"{code}: {area_name} (grey), levees in it (orange), protected areas A (blue), per river group B (green)",
             loc="left",
             fontsize=9,
         )
         ax.set_aspect("equal")
+        if footprint is not None:
+            # the map shows the processed area, not the whole extent of the input files
+            x0, y0, x1, y1 = footprint.total_bounds
+            pad = 0.03 * max(x1 - x0, y1 - y0)
+            ax.set_xlim(x0 - pad, x1 + pad)
+            ax.set_ylim(y0 - pad, y1 + pad)
         ax.ticklabel_format(style="plain", useOffset=False)
         ax.tick_params(labelsize=7)
         fig.savefig(rep_dir / "overview.png", dpi=100)

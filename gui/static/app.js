@@ -243,8 +243,9 @@ async function renderPipeline() {
     const cards = steps.map((s) => {
       n += 1;
       const outs = s.outputs.map((o) => `<span class="out ${o.found ? "found" : ""}">${esc(o.name)}</span>`).join("");
-      return `<article class="step ${s.status} ${s.status === "running" ? "is-running" : ""}">
+      return `<article class="step ${s.status} ${s.status === "running" ? "is-running" : ""}" data-module="${esc(s.module)}">
         <div class="step-head"><div class="step-num">${n}</div><div><div class="step-title">${esc(s.title)}</div><div class="step-about">${esc(s.about)}</div></div>${chip(s.status)}</div>
+        <div class="card-progress" hidden><div class="pbar"><span></span></div><span class="ptext"></span></div>
         ${outs ? `<div class="outputs">${outs}</div>` : ""}
         ${s.options.length ? `<div class="options">${optionsHtml(s)}</div>` : ""}
         <div class="step-foot"><span class="when">${s.last ? `Last written ${ago(s.last)}` : "Nothing written yet"}</span>
@@ -370,6 +371,34 @@ function renderQueue() {
   }));
   const running = S.jobs.some((j) => j.status === "running");
   $("#consolePulse").classList.toggle("on", running);
+  updateProgress();
+}
+// progress of the running step on its card and in the window title; a moving bar while no counts are known
+function progressText(j) {
+  const p = j.progress;
+  const elapsed = j.started ? duration(Date.now() / 1000 - j.started) : "";
+  return p ? `${Math.round((100 * p[0]) / p[1])} % · ${p[0]} / ${p[1]} units${j.eta ? ` · ETA ${j.eta}` : ""}` : `running ${elapsed}`;
+}
+function setBar(bar, j) {
+  const p = j.progress;
+  bar.classList.toggle("indet", !p);
+  bar.firstElementChild.style.width = p ? `${(100 * p[0]) / p[1]}%` : "";
+}
+function updateProgress() {
+  const run = S.jobs.find((j) => j.status === "running");
+  document.querySelectorAll("article.step .card-progress").forEach((box) => {
+    const card = box.closest("article.step");
+    const mine = run && run.module === card.dataset.module && run.country === S.country;
+    box.hidden = !mine;
+    card.classList.toggle("is-running", !!mine);
+    if (mine) {
+      setBar(box.querySelector(".pbar"), run);
+      box.querySelector(".ptext").textContent = progressText(run);
+    }
+  });
+  const waiting = S.jobs.filter((j) => j.status === "queued").length;
+  document.title = run ? `${run.progress ? Math.round((100 * run.progress[0]) / run.progress[1]) + " % · " : ""}${run.title} · Defenses` : "Defenses";
+  S.waiting = waiting;
 }
 const lineClass = (line) => (/ ERROR |Traceback|Error:/.test(line) ? "ln-err" : / WARNING /.test(line) ? "ln-warn" : "ln-info");
 const lineHtml = (line) => `<span class="${lineClass(line)}">${esc(line)}</span>`;
@@ -393,11 +422,13 @@ async function pollLines() {
   $("#consoleStatus").className = `chip ${j.status}`;
   $("#consoleStatus").textContent = STATUS[j.status] || j.status;
   const elapsed = j.started ? (j.ended || Date.now() / 1000) - j.started : null;
-  $("#consoleMeta").textContent = [elapsed != null ? duration(elapsed) : "", j.warnings ? `${j.warnings} warnings` : "", j.errors ? `${j.errors} errors` : ""].filter(Boolean).join(" · ");
+  $("#consoleMeta").textContent = [elapsed != null ? duration(elapsed) : "", j.warnings ? `${j.warnings} warnings` : "", j.errors ? `${j.errors} errors` : "", S.waiting ? `${S.waiting} waiting in the queue` : ""].filter(Boolean).join(" · ");
   const p = j.progress;
   const frac = j.status === "done" ? 1 : p ? p[0] / p[1] : 0;
-  $("#consoleBar").style.width = `${Math.round(frac * 100)}%`;
-  $("#consoleEta").textContent = p && j.status === "running" ? `${p[0]} / ${p[1]}${j.eta ? ` · ETA ${j.eta}` : ""}` : j.status === "done" ? "finished" : "";
+  const bar = $("#consoleBar").parentElement;
+  bar.classList.toggle("indet", j.status === "running" && !p);
+  $("#consoleBar").style.width = j.status === "running" && !p ? "" : `${Math.round(frac * 100)}%`;
+  $("#consoleEta").textContent = j.status === "running" ? progressText(j) : j.status === "done" ? "finished" : "";
   $("#stopBtn").disabled = !["running", "queued"].includes(j.status);
 }
 async function stopJob() {

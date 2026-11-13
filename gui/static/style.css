@@ -316,6 +316,13 @@ body.console-open .main { padding-bottom: calc(44vh + 30px); }
 .console-progress .bar { flex: 1; height: 8px; border-radius: 999px; background: var(--bg-2); overflow: hidden; }
 .console-progress .bar span { display: block; height: 100%; width: 0; border-radius: 999px; background: linear-gradient(90deg, #6fb2f1, var(--accent)); transition: width 0.4s ease; }
 .console-actions { display: flex; align-items: center; gap: 8px; }
+/* progress of the running step on its card; .indet = a moving bar while no counts are known */
+.card-progress { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--accent-2); font-variant-numeric: tabular-nums; }
+.card-progress[hidden] { display: none; }
+.pbar { flex: 1; height: 8px; border-radius: 999px; background: var(--accent-soft); overflow: hidden; position: relative; }
+.pbar span, .console-progress .bar span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #6fb2f1, var(--accent)); transition: width 0.4s ease; }
+.pbar.indet span, .console-progress .bar.indet span { width: 35% !important; animation: indet 1.3s ease-in-out infinite; }
+@keyframes indet { 0% { transform: translateX(-100%); } 100% { transform: translateX(290%); } }
 .console-actions .ico[data-icon="chevron"] svg { transition: transform 0.2s; }
 .console.collapsed .console-actions .ico[data-icon="chevron"] svg { transform: rotate(180deg); }
 .console-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 280px minmax(0, 1fr); border-top: 1px solid var(--border); }

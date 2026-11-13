@@ -35,6 +35,7 @@ Metoda, klíče konfigurace a výstupy jsou popsané v `README.md`. Schémata po
 - **Pipeline:** kroky v pořadí; u každého stav, zapsané výstupy, proměnné běhu (`UNITS`,
   `FORCE`…, výchozí hodnoty ze skriptu) a tlačítko Run. **Run core pipeline** zařadí
   základní kroky za sebou.
+- **Průběh:** běžící krok má na své kartě lištu průběhu (jednotky, %, odhad času); totéž je v titulku okna.
 - **Konzole** dole: fronta běhů, živý výstup, průběh jednotek s odhadem času, Stop
   (ukončí krok i jeho pracovní procesy).
 - **Results:** chráněná území A a B, úniky podle příčin, hráze na koruně, rychlost a odhad

@@ -3041,21 +3041,67 @@ class Hydro:
         return out, df, stats
 
     @staticmethod
-    def bridge_profile(segments, dtm_path, half_width, chunk=2000):
+    def bridge_profile(segments, dtm_path, half_width, side_m=0.0, chunk=2000):
         """
-        Crest the terrain holds in straight gaps: the highest DTM cell across the segment (within half_width on
-        both sides) every native pixel along it
+        Crest the terrain holds in straight gaps, every native pixel along the segment: the highest DTM cell across
+        it (within half_width on both sides) and how far that crest stands above the lowest cell within side_m
+        beyond it on both sides (the ridge height: a levee body, not merely high ground)
         :param segments: array of LineStrings from one end of the gap to the other
         :param dtm_path: DTM at native resolution
-        :param half_width: half-width of the band across the segment
+        :param half_width: half-width of the band across the segment searched for the crest
+        :param side_m: width of the terrain looked at beyond the crest on both sides (0: no ridge height)
         :param chunk: segments per DTM sampling pass
-        :return: (lower of the two end values, lowest value along the segment); -inf where the DTM is missing
+        :return: (lower of the two end values, lowest value along the segment, lowest ridge height along the
+                  segment); -inf where the DTM is missing
         """
         segments = np.asarray(segments, dtype=object)
         n = len(segments)
         end_low, along_min = np.full(n, -np.inf), np.full(n, -np.inf)
+        ridge_min = np.full(n, -np.inf)
         if not n:
-            return end_low, along_min
+            return end_low, along_min, ridge_min
+        ds = gdal.Open(str(dtm_path))
+        step = abs(ds.GetGeoTransform()[1])
+        ds = None
+        a = shapely.get_coordinates(shapely.get_point(segments, 0))
+        d = shapely.get_coordinates(shapely.get_point(segments, -1)) - a
+        norm = np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-12)
+        normal = np.column_stack([-d[:, 1] / norm, d[:, 0] / norm])
+        order = Hydro._block_order(a, dtm_path)
+        for s in range(0, n, chunk):
+            sel = order[s : s + chunk]
+            xy, idx = shapely.get_coordinates(
+                shapely.segmentize(segments[sel], step), return_index=True
+            )
+            t, z = Hydro.crest_profiles(
+                xy, normal[sel][idx], dtm_path, half_width + side_m
+            )
+            z_band = np.where(
+                np.isnan(z) | (np.abs(t) > half_width + 1e-9)[None, :], -np.inf, z
+            )
+            top = z_band.max(axis=1)
+            k = np.argmax(z_band, axis=1)
+            # ridge height: crest above the higher of the lowest cells within side_m on both sides of it
+            rel = t[None, :] - t[k][:, None]
+            z_low = np.where(np.isnan(z), np.inf, z)
+            left = np.where((rel < 0) & (rel >= -side_m), z_low, np.inf).min(axis=1)
+            right = np.where((rel > 0) & (rel <= side_m), z_low, np.inf).min(axis=1)
+            with np.errstate(invalid="ignore"):
+                ridge = np.where(
+                    np.isfinite(left) & np.isfinite(right) & np.isfinite(top),
+                    top - np.maximum(left, right),
+                    -np.inf,
+                )
+            first = np.r_[True, idx[1:] != idx[:-1]]
+            last = np.r_[idx[1:] != idx[:-1], True]
+            end_low[sel[idx[first]]] = np.minimum(top[first], top[last])
+            along_min[sel] = (
+                pd.Series(top).groupby(idx).min().reindex(range(len(sel))).to_numpy()
+            )
+            ridge_min[sel] = (
+                pd.Series(ridge).groupby(idx).min().reindex(range(len(sel))).to_numpy()
+            )
+        return end_low, along_min, ridge_min
         ds = gdal.Open(str(dtm_path))
         step = abs(ds.GetGeoTransform()[1])
         ds = None
@@ -4400,6 +4446,7 @@ class Config:
         "river_groups.max_join_ratio": "float",
         "river_groups.max_length_m": "float",
         "river_groups.min_upstream_area_km2": "float",
+        "river_groups.crop_margin_m": "float",
         "levee_snap.densify_m": "float",
         "levee_snap.max_shift_m": "float",
         "levee_snap.side_m": "float",
@@ -4723,6 +4770,7 @@ class Config:
         "river_groups.max_join_ratio": 2.0,
         "river_groups.max_length_m": 30000.0,
         "river_groups.min_upstream_area_km2": 100.0,
+        "river_groups.crop_margin_m": 5000.0,
         # levee lines onto the DTM crest, DTM-verified gaps, leak diagnostics (Stage G; defaults only)
         "levee_snap.densify_m": 10.0,
         "levee_snap.max_shift_m": 15.0,

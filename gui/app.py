@@ -945,8 +945,11 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/quit":
                 if JOBS.busy() and not data.get("force"):
                     return self.send(409, {"error": "a step is running"})
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
-                return self.send(200, {"ok": True})
+                # answer first; the server stops a moment later, so that the answer is not cut off
+                self.send(200, {"ok": True})
+                self.wfile.flush()
+                threading.Timer(0.5, self.server.shutdown).start()
+                return None
             return self.send(404, {"error": "not found"})
         except tomllib.TOMLDecodeError as exc:
             return self.send(400, {"error": f"TOML error: {exc}"})

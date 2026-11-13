@@ -280,16 +280,27 @@ list_res.append(
         and df_ridge["ridge_share"].iloc[2] == 0,
     )
 )
-end_low, along_min = gis.Hydro.bridge_profile(
-    [shapely.linestrings(crest_xy[[52, 64]]), shapely.linestrings(crest_xy[[18, 30]])],
+end_low, along_min, ridge_min = gis.Hydro.bridge_profile(
+    [
+        shapely.linestrings(crest_xy[[52, 64]]),
+        shapely.linestrings(crest_xy[[18, 30]]),
+        shapely.linestrings([[60, 60], [200, 60]]),
+    ],
     str(tmp / "levee.tif"),
     15.0,
+    30.0,
 )
 list_res.append(
     (
         f"bridge_profile: across the gap without the embankment the terrain drops {end_low[0] - along_min[0]:.1f} m "
-        f"below the crest, along the embankment {end_low[1] - along_min[1]:.2f} m",
-        end_low[0] - along_min[0] > 1.5 and end_low[1] - along_min[1] < 0.1,
+        f"below the crest; along the embankment {end_low[1] - along_min[1]:.2f} m with a ridge of "
+        f"{ridge_min[1]:.1f} m; on flat ground the height holds ({end_low[2] - along_min[2]:.2f} m) but there is "
+        f"no ridge ({ridge_min[2]:.2f} m), so it is not a levee",
+        end_low[0] - along_min[0] > 1.5
+        and end_low[1] - along_min[1] < 0.1
+        and ridge_min[1] >= 1.5
+        and end_low[2] - along_min[2] < 0.5
+        and ridge_min[2] < 0.5,
     )
 )
 

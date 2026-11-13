@@ -47,6 +47,7 @@ KEYS = [
     "river_groups.max_join_ratio",
     "river_groups.max_length_m",
     "river_groups.min_upstream_area_km2",
+    "river_groups.crop_margin_m",
     "levee_snap.densify_m",
     "levee_snap.max_shift_m",
     "levee_snap.side_m",
@@ -1031,20 +1032,33 @@ def process_unit(task):
     t = time.perf_counter()
     list_grp = []
     pad_g = int(math.ceil(p["comparison_distance_m"] / res)) + 1
+    pad_c = int(math.ceil(p["crop_margin_m"] / res))
     shutil.rmtree(unit_dir / "groups", ignore_errors=True)
     if river_group is not None and stream.any():
         for value in np.setdiff1d(np.unique(river_group[seeds]), [0]):
-            seeds_g = seeds & (river_group == value)
+            # the group is computed in a crop around its river cells, extended by crop_margin_m; areas touching the
+            # crop edge are flagged truncated like at a window edge
+            in_group = seeds & (river_group == value)
+            rows_s = np.flatnonzero(in_group.any(axis=1))
+            cols_s = np.flatnonzero(in_group.any(axis=0))
+            del in_group
+            q0, q1 = max(rows_s[0] - pad_c, 0), min(rows_s[-1] + 1 + pad_c, shape[0])
+            w0, w1 = max(cols_s[0] - pad_c, 0), min(cols_s[-1] + 1 + pad_c, shape[1])
+            crop = (slice(q0, q1), slice(w0, w1))
+            gt_c = (gt[0] + w0 * res, res, 0.0, gt[3] - q0 * res, 0.0, -res)
+            shape_c = (q1 - q0, w1 - w0)
+            seeds_g = seeds[crop] & (river_group[crop] == value)
+            barrier_c = barrier[crop]
             hand_g, ref_g, _ = gis.Hydro.hand_above_streams(
-                dtm_undef,
+                dtm_undef[crop],
                 seeds_g,
                 p["stream_burn_m"],
                 p["stream_burn_buffer_m"] / res,
-                valid,
+                valid[crop],
             )
             surface = hand_g.copy()
-            surface[barrier] = np.maximum(
-                crest[barrier] - ref_g[barrier], hand_g[barrier]
+            surface[barrier_c] = np.maximum(
+                crest[crop][barrier_c] - ref_g[barrier_c], hand_g[barrier_c]
             )
             spill_u, _, _ = gis.Hydro.priority_flood(hand_g, seeds_g)
             spill_d, seed_g, order_g = gis.Hydro.priority_flood(surface, seeds_g)
@@ -1058,14 +1072,17 @@ def process_unit(task):
                     "order_def": order_g,
                     "seed_def": seed_g,
                 },
-                barrier,
-                domain,
-                dtm,
-                gt,
+                barrier_c,
+                domain[crop],
+                dtm[crop],
+                gt_c,
                 wkt,
                 p,
             )
             del spill_u, spill_d, ref_g, seed_g, order_g
+            counts["group_cells"] = counts.get("group_cells", 0) + int(
+                shape_c[0] * shape_c[1]
+            )
             gdf_g["group_id"] = int(value) - 1
             if len(gdf_g):
                 # labels and HAND of the group for the later steps (file B), cropped to its protected areas and
@@ -1073,12 +1090,12 @@ def process_unit(task):
                 rows_any = np.flatnonzero((labels_g > 0).any(axis=1))
                 cols_any = np.flatnonzero((labels_g > 0).any(axis=0))
                 r0, r1 = max(rows_any[0] - pad_g, 0), min(
-                    rows_any[-1] + 1 + pad_g, shape[0]
+                    rows_any[-1] + 1 + pad_g, shape_c[0]
                 )
                 c0, c1 = max(cols_any[0] - pad_g, 0), min(
-                    cols_any[-1] + 1 + pad_g, shape[1]
+                    cols_any[-1] + 1 + pad_g, shape_c[1]
                 )
-                gt_g = (gt[0] + c0 * res, res, 0.0, gt[3] - r0 * res, 0.0, -res)
+                gt_g = (gt_c[0] + c0 * res, res, 0.0, gt_c[3] - r0 * res, 0.0, -res)
                 gid = int(value) - 1
                 gis.Raster.write_array(
                     gis.Run.unit_layer_path(unit_dir, "labels.tif", gid),
@@ -1211,6 +1228,7 @@ if __name__ == "__main__":
             "keep_intermediate": country["keep_intermediate"],
             "leak_spacing_m": cfg["leaks"]["sample_spacing_m"],
             "comparison_distance_m": cfg["evidence"]["comparison_distance_m"],
+            "crop_margin_m": cfg["river_groups"]["crop_margin_m"],
             "id_rounding_m": country["id_rounding_m"],
         }
     )
@@ -1388,11 +1406,15 @@ if __name__ == "__main__":
                     axis=1,
                 )
             )
-            end_low, along_min = gis.Hydro.bridge_profile(
-                segs, str(vrt_path), snap["max_shift_m"]
+            # a levee body along the whole gap: the crest holds the height of the ends and stands at least
+            # min_height_m above the terrain on both sides (high ground alone is not a levee)
+            end_low, along_min, ridge_min = gis.Hydro.bridge_profile(
+                segs, str(vrt_path), snap["max_shift_m"], snap["side_m"]
             )
-            passed = np.isfinite(end_low) & (
-                along_min >= end_low - lg["crest_tolerance_m"]
+            passed = (
+                np.isfinite(end_low)
+                & (along_min >= end_low - lg["crest_tolerance_m"])
+                & (ridge_min >= snap["min_height_m"])
             )
             n_long_cand = int(df_long.point.nunique())
             first_ok = (
