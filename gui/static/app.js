@@ -40,6 +40,64 @@ const OPTION_TEXT = {
   DATE_TO: ["text", "To", "YYYY-MM-DD"],
   LAYER: ["choice", "File", ["A", "B"]],
 };
+// help texts, only where a label alone is not clear
+const HELP = {
+  FORCE: "Recompute what this step has already finished. Off: units with a finished checkpoint are skipped, so a rerun only does what is missing. Turn it on after changing levees, rivers or parameters.",
+  UNITS: "Unit ids separated by commas, e.g. 012_034,012_035; empty = all units. The ids are in units.csv and units_core.gpkg (Build units). Run two units first to check the time and the results.",
+  LAYER: "A: protected areas with all rivers as water sources at once (protected_areas.gpkg). B: per river group, only the rivers of the group are water sources (protected_areas_by_group.gpkg); the outputs get the suffix _b.",
+  RUN_ID: "Name of the folder of this run's plots and results. A new name keeps an earlier run for comparison.",
+  HINTS: "Also look for places that stay dry in flood scenes behind no mapped levee (missing barriers). Reads the whole unit window per scene, so it is slower. File A only.",
+  "processing.protected_areas": "Finds the areas behind levees that river water reaches only at a higher level than without the levees. Writes file A (all rivers at once), file B (per river group) and leaks.gpkg: where levees protect nothing, and why.",
+  "processing.transport_embankments": "Optional. Needs a file of road and railway lines in transport_lines (Configuration, Raw TOML). The lines only show where to look; the DTM decides what is an embankment and where its openings are. Not yet part of the barriers.",
+  "processing.rp_index": "Estimates the return period of protection of every protected area from the value exposed behind the levees and the size of the river. Needs the damage tables (Configuration) and the GHSL building volume.",
+  "processing.rp_bounds": "Narrows the return period with observations: GFM flood scenes held or flooded, at the discharge of GloFAS or EFAS that day. Needs GFM evidence and the prepared discharge.",
+  workers: "Units computed at the same time. Each needs about the RAM of one unit window (Build units log); workers × that must fit in the memory. More workers than CPU cores do not help.",
+  upstream: "The NAME of the column of the river file with the upstream area in km² (e.g. uparea in MERIT), not a value. Needed for file B (river groups) and the return period index.",
+  river_guides: "Optional lines of the real river channels (e.g. waterways). The river network (e.g. MERIT, about 90 m) is moved onto them and then into the lowest DTM cells. Without them the rivers stay where they are.",
+  tile_b: "Areas of different river groups overlap: one place can be protected against the main river and against a tributary. This area counts every group; the report gives the union, every place once.",
+  tile_leaks: "Places where water gets behind levees that protect nothing (leaks.gpkg): an open river crossing, a low crest, a free line end, a stream behind the levee, or terrain behind higher than the crest (no levee there, or its crest underestimated).",
+  tile_speed: "Computing time per cell of the processing domain, measured on the finished units, and what it means for the whole country with the configured workers.",
+};
+const help = (key) => (HELP[key] ? `<button type="button" class="help" data-help="${esc(key)}" aria-label="Help">?</button>` : "");
+function showHelp(btn) {
+  let pop = $("#helpPop");
+  if (!pop) {
+    pop = document.createElement("div");
+    pop.id = "helpPop";
+    pop.className = "help-pop";
+    document.body.appendChild(pop);
+  }
+  if (pop.dataset.key === btn.dataset.help && pop.classList.contains("show")) return hideHelp();
+  pop.textContent = HELP[btn.dataset.help];
+  pop.dataset.key = btn.dataset.help;
+  pop.classList.add("show");
+  S.helpOpened = Date.now();
+  const r = btn.getBoundingClientRect();
+  const w = Math.min(340, window.innerWidth - 32);
+  pop.style.width = `${w}px`;
+  pop.style.left = `${Math.max(16, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 16))}px`;
+  const below = r.bottom + 10 + pop.offsetHeight < window.innerHeight;
+  pop.style.top = `${below ? r.bottom + 8 : r.top - pop.offsetHeight - 8}px`;
+}
+function hideHelp() {
+  const pop = $("#helpPop");
+  if (pop) {
+    pop.classList.remove("show");
+    pop.dataset.key = "";
+  }
+}
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".help");
+  if (btn) {
+    e.preventDefault();
+    e.stopPropagation();
+    showHelp(btn);
+  } else if (!e.target.closest("#helpPop")) hideHelp();
+}, true);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideHelp(); });
+// scrolling closes the bubble, except the scroll that the click itself causes
+window.addEventListener("scroll", () => { if (Date.now() - (S.helpOpened || 0) > 400) hideHelp(); }, true);
+
 const PAGES = {
   pipeline: ["Pipeline", "Run the steps in order. Every card shows what the step has written."],
   results: ["Results", "Protected areas, leaks of the levees, units and performance of the country."],
@@ -175,12 +233,12 @@ function optionsHtml(step) {
     const id = `${step.module}|${opt.name}`;
     if (kind === "choice") {
       const titles = { A: "A · all rivers", B: "B · per river group" };
-      return `<label class="opt-text">${esc(label)}<div class="select-wrap"><select class="input small" data-opt="${esc(id)}">${ph.map((o) => `<option value="${esc(o)}" ${String(value) === o ? "selected" : ""}>${esc(titles[o] || o)}</option>`).join("")}</select></div></label>`;
+      return `<span class="opt-pair"><label class="opt-text">${esc(label)}<div class="select-wrap"><select class="input small" data-opt="${esc(id)}">${ph.map((o) => `<option value="${esc(o)}" ${String(value) === o ? "selected" : ""}>${esc(titles[o] || o)}</option>`).join("")}</select></div></label>${help(opt.name)}</span>`;
     }
     if (kind === "switch") {
-      return `<label class="switch" title="${esc(opt.name)}"><input type="checkbox" data-opt="${esc(id)}" ${value ? "checked" : ""}><span class="track"></span>${esc(label)}</label>`;
+      return `<span class="opt-pair"><label class="switch" title="${esc(opt.name)}"><input type="checkbox" data-opt="${esc(id)}" ${value ? "checked" : ""}><span class="track"></span>${esc(label)}</label>${help(opt.name)}</span>`;
     }
-    return `<label class="opt-text">${esc(label)}<input class="input small mono" data-opt="${esc(id)}" value="${esc(value)}" placeholder="${esc(ph)}"></label>`;
+    return `<span class="opt-pair"><label class="opt-text">${esc(label)}<input class="input small mono" data-opt="${esc(id)}" value="${esc(value)}" placeholder="${esc(ph)}"></label>${help(opt.name)}</span>`;
   }).join("");
 }
 function variablesOf(step) {
@@ -244,7 +302,7 @@ async function renderPipeline() {
       n += 1;
       const outs = s.outputs.map((o) => `<span class="out ${o.found ? "found" : ""}">${esc(o.name)}</span>`).join("");
       return `<article class="step ${s.status} ${s.status === "running" ? "is-running" : ""}" data-module="${esc(s.module)}">
-        <div class="step-head"><div class="step-num">${n}</div><div><div class="step-title">${esc(s.title)}</div><div class="step-about">${esc(s.about)}</div></div>${chip(s.status)}</div>
+        <div class="step-head"><div class="step-num">${n}</div><div><div class="step-title">${esc(s.title)}${HELP[s.module] ? "&nbsp;" + help(s.module) : ""}</div><div class="step-about">${esc(s.about)}</div></div>${chip(s.status)}</div>
         <div class="card-progress" hidden><div class="pbar"><span></span></div><span class="ptext"></span></div>
         ${outs ? `<div class="outputs">${outs}</div>` : ""}
         ${s.options.length ? `<div class="options">${optionsHtml(s)}</div>` : ""}
@@ -473,12 +531,12 @@ async function renderResults() {
   const perf = r.performance || {};
   const tiles = [
     ["shield", "Protected areas · A", r.protected ? num(r.protected.count) : "–", r.protected ? `${num(r.protected.area_km2, 1)} km² · median level ${num(r.protected.level_median_m, 2)} m` : "not computed yet", "#e2f5f1"],
-    ["wave", "Per river group · B", r.by_group ? num(r.by_group.count) : "–", r.by_group ? `${num(r.by_group.groups)} groups · ${num(r.by_group.area_km2, 1)} km²` : "needs the upstream area column", "#e7f1fc"],
-    ["alert", "Leaking places", r.leaks ? num(r.leaks.count) : "–", r.leaks ? `${num(r.leaks.by_cause.reduce((a, b) => a + b.km, 0), 1)} km of levee protect nothing` : "not computed yet", "#fcf3e2"],
+    ["wave", "Per river group · B", r.by_group ? num(r.by_group.count) : "–", r.by_group ? `${num(r.by_group.groups)} groups · ${num(r.by_group.area_km2, 1)} km²` : "needs the upstream area column", "#e7f1fc", "tile_b"],
+    ["alert", "Leaking places", r.leaks ? num(r.leaks.count) : "–", r.leaks ? `${num(r.leaks.by_cause.reduce((a, b) => a + b.km, 0), 1)} km of levee protect nothing` : "not computed yet", "#fcf3e2", "tile_leaks"],
     ["layers", "Levee lines", r.levees ? num(r.levees.lines) : "–", r.levees ? `${num(r.levees.moved)} moved onto the crest · ${num(r.levees.no_ridge)} without a ridge` : "not computed yet", "#efecfc"],
     ["grid", "Units", r.units ? `${num(r.units.done)}<small>/ ${num(r.units.total)}</small>` : "–", r.units ? (r.units.done === r.units.total ? "all finished" : `${num(r.units.total - r.units.done)} remaining`) : "run Build units", "#e7f1fc"],
-    ["gauge", "Speed", perf.seconds_per_domain_cell ? `${num(perf.seconds_per_domain_cell * 1e6, 2)}<small>µs/cell</small>` : "–", perf.country_seconds ? `whole country about ${duration(perf.country_seconds)}` : "after the first units", "#e2f5f1"],
-  ].map(([ic, k, v, d, tone]) => `<div class="tile" style="--tone:${tone}"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="d">${esc(d)}</div></div>`).join("");
+    ["gauge", "Speed", perf.seconds_per_domain_cell ? `${num(perf.seconds_per_domain_cell * 1e6, 2)}<small>µs/cell</small>` : "–", perf.country_seconds ? `whole country about ${duration(perf.country_seconds)}` : "after the first units", "#e2f5f1", "tile_speed"],
+  ].map(([ic, k, v, d, tone, hk]) => `<div class="tile" style="--tone:${tone}"><div class="k">${esc(k)}${help(hk)}</div><div class="v">${v}</div><div class="d">${esc(d)}</div></div>`).join("");
   const maxKm = r.leaks ? Math.max(...r.leaks.by_cause.map((c) => c.km), 0.001) : 1;
   const bars = r.leaks && r.leaks.by_cause.length
     ? r.leaks.by_cause.map((c) => `<div class="bar-row"><div class="name"><b>${esc(c.text)}</b><span class="mono">${esc(c.cause)}</span></div><div class="track-h"><span style="width:${(100 * c.km) / maxKm}%"></span></div><div class="num">${num(c.km, 1)} km · ${num(c.places)} places</div></div>`).join("")
@@ -547,7 +605,7 @@ function pathList(table, key, label, kind, multiple, hint) {
   const rows = (list.length ? list : [""]).map((p, i) => `<div class="path-row"><span class="dot" data-path="${esc(p)}"></span>
     <input class="input mono" value="${esc(p)}" data-pl="${esc(table)}|${esc(key)}|${i}" placeholder="D:/data/…">
     ${multiple ? `<button class="icon-btn" title="Remove" data-del="${esc(table)}|${esc(key)}|${i}">${ico("trash")}</button>` : ""}</div>`).join("");
-  return `<div class="field"><label>${esc(label)}</label><div class="path-list">${rows}</div>
+  return `<div class="field"><label>${esc(label)}${help(key)}</label><div class="path-list">${rows}</div>
     <div class="path-actions"><button class="btn ghost small" data-browse="${esc(table)}|${esc(key)}|${kind}|${multiple ? 1 : 0}">${ico("folder")}Browse…</button>
     ${multiple ? `<button class="btn ghost small" data-add="${esc(table)}|${esc(key)}">${ico("plus")}Add path</button>` : ""}</div>
     <span class="hint">${esc(hint)}</span></div>`;
@@ -585,7 +643,7 @@ async function renderConfig() {
     <section class="card card-pad"><div class="section-head"><div><h2>General</h2><p>Folders, the default country and the parallel workers.</p></div></div>
       <div class="grid-3">
         <div class="field"><label>Default country</label><div class="select-wrap"><select data-gen="country">${countries.map((x) => `<option ${x === g("country") ? "selected" : ""}>${esc(x)}</option>`).join("")}</select></div><span class="hint">Used when DEFENSES_COUNTRY is not set</span></div>
-        <div class="field"><label>Workers</label><input class="input" type="number" min="1" data-gen="n_workers" value="${esc(g("n_workers") ?? "")}"><span class="hint">RAM need = workers × unit RAM</span></div>
+        <div class="field"><label>Workers${help("workers")}</label><input class="input" type="number" min="1" data-gen="n_workers" value="${esc(g("n_workers") ?? "")}"><span class="hint">RAM need = workers × unit RAM</span></div>
         <div class="field"><label>RAM per worker (GB)</label><input class="input" type="number" min="1" step="0.5" data-gen="max_ram_gb_per_worker" value="${esc(g("max_ram_gb_per_worker") ?? "")}"><span class="hint">build_units stops above it</span></div>
       </div>
       <div class="grid-2" style="margin-top:18px">
@@ -597,7 +655,7 @@ async function renderConfig() {
       <button class="btn ghost small" id="addCountry">${ico("plus")}Add country</button></div></div>
       ${c ? `<div class="grid-2">${PATH_FIELDS.map(([k, label, kind, multi, hint]) => pathList(t, k, label, kind, multi, hint)).join("")}</div>
       <div class="grid-2" style="margin-top:18px">
-        <div class="field"><label>Upstream area column of the rivers</label>
+        <div class="field"><label>Upstream area column of the rivers${help("upstream")}</label>
           <div class="select-wrap"><select id="upField"><option value="">– none –</option></select></div>
           <span class="hint" id="upHint">The NAME of the column with the upstream area in km² (needed for the river groups and the return period)</span></div>
       </div>` : `<div class="empty">${ico("plus")}<h3>No country yet</h3><p>Add the first country of your runs.</p></div>`}

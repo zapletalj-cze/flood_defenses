@@ -358,3 +358,22 @@ body.console-open .main { padding-bottom: calc(44vh + 30px); }
   .hero-actions { grid-column: 1 / -1; flex-direction: row; }
   .bar-row { grid-template-columns: 170px 1fr 90px; }
 }
+
+/* help: a small "?" next to labels that need an explanation, and its bubble */
+.help {
+  display: inline-flex; align-items: center; justify-content: center; vertical-align: 1px;
+  width: 17px; height: 17px; margin-left: 6px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-3);
+  font-size: 11px; font-weight: 700; line-height: 1; cursor: pointer; flex: none;
+}
+.help:hover, .help:focus-visible { color: var(--accent); border-color: #9cc4ef; background: var(--accent-soft); outline: none; }
+.tile .k .help { text-transform: none; letter-spacing: 0; }
+.step-title .help { margin-left: 2px; }
+.opt-pair { display: inline-flex; align-items: center; }
+.help-pop {
+  position: fixed; z-index: 30; padding: 12px 14px; border-radius: 12px;
+  background: #1f2a37; color: #f2f5f9; font-size: 12.5px; line-height: 1.5;
+  box-shadow: 0 10px 30px rgba(16, 24, 40, 0.18); opacity: 0; pointer-events: none;
+  transform: translateY(4px); transition: opacity 0.15s, transform 0.15s;
+}
+.help-pop.show { opacity: 1; pointer-events: auto; transform: none; }

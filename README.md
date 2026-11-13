@@ -103,6 +103,8 @@ by `pixi run make-figures` (`docs/make_figures.py`) from synthetic data.
 | **Configuration** | Form for the short `defenses.toml`: folders, workers, input files of each country with a check that they exist and a Browse dialog. The upstream area column is picked from the numeric columns of the rivers file. A Raw TOML tab edits the whole file. Saving keeps comments and layout (`gis.Config.set_toml_value`) and checks the TOML first |
 | **Logs** | Run logs of the scripts with filters for warnings and errors, and search |
 
+**Help.** A small **?** next to the items that need an explanation (run variables FORCE, Units, File, Run id, Hints; some steps; workers, the upstream area column and the river guide lines; three result tiles) opens a short bubble; a click elsewhere or Esc closes it.
+
 **How it works.**
 - **Standard library only.** `gui/app.py` is a small HTTP server; the page (`gui/static/`)
   opens in an app window of Edge or Chrome, or in the default browser. No new dependency.
