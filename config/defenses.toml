@@ -3,7 +3,7 @@
 # Paths: forward slashes, e.g. "D:/data/dtm.tif". Check the inputs before a run: pixi run check
 
 [general]
-country = "NOR"                 # country of the runs (DEFENSES_COUNTRY overrides it)
+country = "POL"                 # country of the runs (DEFENSES_COUNTRY overrides it)
 work_dir = "D:/01_Projects/997_SmallProjects/99_DEFENSES/01_MD/work"        # intermediates (fast local disk)
 output_dir = "D:/01_Projects/997_SmallProjects/99_DEFENSES/01_MD/outputs"   # results and logs
 n_workers = 16                  # parallel unit processes; RAM need = n_workers x unit RAM
