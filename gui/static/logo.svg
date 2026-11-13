@@ -2,8 +2,8 @@
   <!-- Defenses logo: water, levee, protected house -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#5AA6EE"/>
-      <stop offset="1" stop-color="#3FBFAE"/>
+      <stop offset="0" stop-color="#f4313f"/>
+      <stop offset="1" stop-color="#c40014"/>
     </linearGradient>
   </defs>
   <rect width="64" height="64" rx="16" fill="url(#bg)"/>

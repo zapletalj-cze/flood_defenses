@@ -284,9 +284,9 @@ async function runCore() {
 }
 function ring(done, total) {
   const r = 46, c = 2 * Math.PI * r, frac = total ? done / total : 0;
-  return `<div class="ring"><svg viewBox="0 0 104 104"><circle cx="52" cy="52" r="${r}" fill="none" stroke="#e9eef5" stroke-width="9"/>
+  return `<div class="ring"><svg viewBox="0 0 104 104"><circle cx="52" cy="52" r="${r}" fill="none" stroke="#ececec" stroke-width="9"/>
     <circle cx="52" cy="52" r="${r}" fill="none" stroke="url(#rg)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - frac)}"/>
-    <defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5aa6ee"/><stop offset="1" stop-color="#3fbfae"/></linearGradient></defs></svg>
+    <defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f4636f"/><stop offset="1" stop-color="#eb0017"/></linearGradient></defs></svg>
     <div class="val"><b>${total ? Math.round(100 * frac) : 0}%</b><span>${total ? `${done} / ${total} units` : "no units yet"}</span></div></div>`;
 }
 async function renderPipeline() {
@@ -531,10 +531,10 @@ async function renderResults() {
   const perf = r.performance || {};
   const tiles = [
     ["shield", "Protected areas · A", r.protected ? num(r.protected.count) : "–", r.protected ? `${num(r.protected.area_km2, 1)} km² · median level ${num(r.protected.level_median_m, 2)} m` : "not computed yet", "#e2f5f1"],
-    ["wave", "Per river group · B", r.by_group ? num(r.by_group.count) : "–", r.by_group ? `${num(r.by_group.groups)} groups · ${num(r.by_group.area_km2, 1)} km²` : "needs the upstream area column", "#e7f1fc", "tile_b"],
+    ["wave", "Per river group · B", r.by_group ? num(r.by_group.count) : "–", r.by_group ? `${num(r.by_group.groups)} groups · ${num(r.by_group.area_km2, 1)} km²` : "needs the upstream area column", "#fdecee", "tile_b"],
     ["alert", "Leaking places", r.leaks ? num(r.leaks.count) : "–", r.leaks ? `${num(r.leaks.by_cause.reduce((a, b) => a + b.km, 0), 1)} km of levee protect nothing` : "not computed yet", "#fcf3e2", "tile_leaks"],
-    ["layers", "Levee lines", r.levees ? num(r.levees.lines) : "–", r.levees ? `${num(r.levees.moved)} moved onto the crest · ${num(r.levees.no_ridge)} without a ridge` : "not computed yet", "#efecfc"],
-    ["grid", "Units", r.units ? `${num(r.units.done)}<small>/ ${num(r.units.total)}</small>` : "–", r.units ? (r.units.done === r.units.total ? "all finished" : `${num(r.units.total - r.units.done)} remaining`) : "run Build units", "#e7f1fc"],
+    ["layers", "Levee lines", r.levees ? num(r.levees.lines) : "–", r.levees ? `${num(r.levees.moved)} moved onto the crest · ${num(r.levees.no_ridge)} without a ridge` : "not computed yet", "#efefef"],
+    ["grid", "Units", r.units ? `${num(r.units.done)}<small>/ ${num(r.units.total)}</small>` : "–", r.units ? (r.units.done === r.units.total ? "all finished" : `${num(r.units.total - r.units.done)} remaining`) : "run Build units", "#fdecee"],
     ["gauge", "Speed", perf.seconds_per_domain_cell ? `${num(perf.seconds_per_domain_cell * 1e6, 2)}<small>µs/cell</small>` : "–", perf.country_seconds ? `whole country about ${duration(perf.country_seconds)}` : "after the first units", "#e2f5f1", "tile_speed"],
   ].map(([ic, k, v, d, tone, hk]) => `<div class="tile" style="--tone:${tone}"><div class="k">${esc(k)}${help(hk)}</div><div class="v">${v}</div><div class="d">${esc(d)}</div></div>`).join("");
   const maxKm = r.leaks ? Math.max(...r.leaks.by_cause.map((c) => c.km), 0.001) : 1;
