@@ -180,6 +180,15 @@ STEPS = [
         "rp_bounds",
     ),
     (
+        "processing.flood_events",
+        "observations",
+        "Flood events",
+        "Events per river group from the discharge peaks (Stage H)",
+        ["RUN_ID"],
+        ["events.gpkg"],
+        "flood_events",
+    ),
+    (
         "processing.validate",
         "observations",
         "Validation",

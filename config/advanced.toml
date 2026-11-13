@@ -6,6 +6,9 @@
 # once its value is confirmed.
 
 placeholders = [
+    "events.min_peak_rp",
+    "events.days_before",
+    "events.days_after",
     "country.bytes_per_cell",
     "country.rp.distribution_classes",
     "country.rp.distribution_shares",
@@ -445,6 +448,14 @@ plot_all_in_units = []
 # Request parameters, data formats, years, the EFAS variable and the EFAS upstream area source are copied from the
 # EWDS download form ("Show API request") and never guessed: entries marked "from the form" stay empty until then.
 # The personal EWDS key goes into ~/.cdsapirc (url and key) or CDSAPI_KEY, never into this file.
+# Flood events from the prepared discharge series (flood_events.py, Stage H): per river group, peaks of at least
+# min_peak_rp at the discharge cell matched to the group; window from days_before before the peak to days_after
+# after it; overlapping windows are merged. Placeholders: confirm on the pilot events.
+[events]
+min_peak_rp = 2.0               # smallest return period (years) of a peak that starts an event
+days_before = 5                 # window start before the peak
+days_after = 21                 # window end after the peak (water behind a levee stays visible)
+
 [discharge]
 sources = ["efas", "glofas"]
 source_mode = "conservative_both"          # prefer_efas, prefer_glofas or conservative_both

@@ -4217,6 +4217,46 @@ class Discharge:
         return tuple(out)
 
     @staticmethod
+    def detect_events(days, values, rp, min_rp, days_before, days_after):
+        """
+        Flood events of one daily series: runs of days with a return period of at least min_rp give one peak
+        each (the day of the highest value); the window of a peak runs from days_before before it to days_after
+        after it; peaks whose windows overlap are merged into one event with the highest peak
+        :param days: sorted days (datetime64[D])
+        :param values: daily discharge, NaN = missing
+        :param rp: return period of every day
+        :param min_rp: smallest return period of a peak
+        :param days_before: window start before the peak, in days
+        :param days_after: window end after the peak, in days
+        :return: list of dicts peak_date, peak_value, peak_rp, start, end (datetime64[D]), n_peaks, in time order
+        """
+        values = np.asarray(values, dtype=float)
+        above = np.nan_to_num(np.asarray(rp, dtype=float), nan=0.0) >= min_rp
+        list_event = []
+        for s, e, on in Stats.runs(above.tolist(), 1):
+            if not on:
+                continue
+            k = s + int(np.nanargmax(values[s:e]))
+            peak = {
+                "peak_date": days[k],
+                "peak_value": float(values[k]),
+                "peak_rp": float(rp[k]),
+                "start": days[k] - np.timedelta64(int(days_before), "D"),
+                "end": days[k] + np.timedelta64(int(days_after), "D"),
+                "n_peaks": 1,
+            }
+            last = list_event[-1] if list_event else None
+            if last is not None and peak["start"] <= last["end"]:
+                if peak["peak_value"] > last["peak_value"]:
+                    for key in ("peak_date", "peak_value", "peak_rp"):
+                        last[key] = peak[key]
+                last["end"] = max(last["end"], peak["end"])
+                last["n_peaks"] += 1
+            else:
+                list_event.append(peak)
+        return list_event
+
+    @staticmethod
     def match(
         lon,
         lat,
@@ -4572,6 +4612,9 @@ class Config:
         "sources.gfm_advisory_values": "int_list",
         "evidence.use_advisory_flags": "bool",
         "evidence.max_extent_files": "opt_paths",
+        "events.min_peak_rp": "float",
+        "events.days_before": "int",
+        "events.days_after": "int",
         "sources.glofas_enabled": "bool",
         "sources.glofas_dataset_id": "str",
         "sources.glofas_request": "table",
@@ -4801,6 +4844,10 @@ class Config:
         "sources.gfm_advisory_values": [1, 2, 3],
         "evidence.use_advisory_flags": False,
         "evidence.max_extent_files": [],
+        # flood events from discharge (Stage H), also in config/advanced.toml
+        "events.min_peak_rp": 2.0,
+        "events.days_before": 5,
+        "events.days_after": 21,
         # transport embankments from the DTM (Stage G step 3; also in config/advanced.toml)
         "country.transport_lines": [],
         "transport.station_spacing_m": 10.0,

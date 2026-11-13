@@ -227,6 +227,7 @@ processing/
   rp_bounds.py             matching to discharge cells, event return periods, source combination, bounds
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
   transport_embankments.py road and railway embankments from the DTM, their openings (Stage G step 3)
+  flood_events.py          flood events per river group from the discharge series (Stage H step 2)
 tests/
   test_kernels.py          numba kernels on small grids (22 checks)
   test_pipeline.py         end-to-end synthetic countries for Stage A and G (45 checks)
@@ -238,6 +239,7 @@ tests/
   test_stage_f.py          Stage F on its own synthetic country T6 (16 checks)
   test_gui.py              server of the GUI on a synthetic setup (15 checks)
   test_transport.py        transport embankments on a synthetic country T7 (15 checks)
+  test_stage_h.py          Stage H: event catalogue on synthetic series (9 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -437,6 +439,7 @@ Keys beyond the original schema, with the reason for each:
 | 11 | `download_discharge.py` | raw files in `work/<c>/discharge/raw/<source>/`, `download_log.csv`, `discharge_sources.json` |
 | 12 | `discharge_prepare.py` | `discharge_<source>.npz`, `discharge_cells_<source>.gpkg`, `plots/discharge/prepare/` |
 | 13 | `rp_bounds.py` | `event_rp.csv`, `event_rp_combined.csv`, `discharge_matches.gpkg`; `protected_areas_rp.gpkg` updated: matches per source, observed bounds, combined `rp`, `*_prior` model values; `plots/discharge/<RUN_ID>/` |
+| 13a (Stage H) | `flood_events.py` | `events.gpkg`, `event_groups.csv`, `plots/events/<RUN_ID>/` |
 | 14 | `validate.py` | `validation.json`, `validation_coverage.gpkg`, `validation_rp_confusion.csv` |
 
 Run logs go to `output_dir/<country>/logs/<script>_<timestamp>.log`.
@@ -1568,6 +1571,55 @@ into evidence.
      protected area.
    - **Better level, not implemented.** A level per drainage target would need the
      `breach_to_streams` target index stored per unit, which `protected_areas.py` does not keep.
+
+### 10.4 Flood events (Stage H, in progress)
+
+Stage H adds an event level to the scene-by-scene evidence of §10.2: flood events are
+defined from discharge, the GFM scenes of an event are combined, and a protected area gets
+one outcome per event. Steps: access check (done, §10.0), event catalogue (done, below),
+event composites, event evidence, integration into `rp_bounds.py`.
+
+**Event catalogue (`flood_events.py`, `pixi run flood-events`).** Needs `river_groups.gpkg`
+(§8.3) and the prepared discharge (§11.3).
+
+1. **Discharge cell per river group.** The largest reach of a group (by upstream area) is
+   matched at its mid point to a discharge cell, with the rules of §11.5 (search radius,
+   upstream area ratio, same river). The sources are tried in the order of
+   `discharge.sources`; the first with a match is the source of the group.
+2. **Peaks.** Every run of days with a return period of at least `events.min_peak_rp`
+   (Gumbel fit of the cell, §11.4) gives one peak, the day of its highest discharge.
+3. **Window.** From `events.days_before` before the peak to `events.days_after` after it.
+   The long tail is deliberate: water behind an overtopped levee stays visible after the
+   peak.
+4. **Merging.** Peaks whose windows overlap form one event with the highest peak;
+   `n_peaks` counts them.
+
+**Not covered.**
+- **Group 0** (minor reaches below 100 km²) has no single river and gets no events.
+- **Groups without a discharge cell** get none either; `event_groups.csv` lists the match
+  of every group.
+
+**Outputs.**
+- **`events.gpkg`**, one feature per event with the lines of its group: `event_id`
+  (`<country>_E<group>_<peak date>`), `group_id`, `source`, `cell_id`, `peak_date`,
+  `peak_discharge`, `peak_rp` (capped at `discharge.max_rp_extrapolation`, then
+  `extrapolated`), `window_start`, `window_end`, `n_peaks`, `match_quality`,
+  `upstream_area_km2`.
+- **`event_groups.csv`:** group, source, cell and number of events.
+- **Plots** in `plots/events/<RUN_ID>/index.html`: hydrographs of the groups with the
+  largest peaks (windows shaded, the threshold dashed) and events per year.
+
+**Parameters** (`[events]`, placeholders): `min_peak_rp = 2.0`, `days_before = 5`,
+`days_after = 21`. At RP 2 a river has about one event in two years, so a country has
+thousands of events; only those since the first GFM scenes (2015) can get evidence.
+
+**Measured.** 3 400 groups and cells with 44 years of daily values: 15 s in total
+(matching 12.7 s), peak memory 1.5 GB, of which the series take 0.2 GB per 1 000 cells.
+
+**Test** (`pixi run test-stage-h`, 9 checks): one peak with its window and Gumbel RP; two
+peaks 18 days apart merged into one event; two events years apart; a series without a
+flood (about one event in five years at RP 5); the source order; a group without a
+matching cell; ids and geometry; plots.
 
 ## 11. Observed bounds of the return period: GloFAS and EFAS (Stage F)
 
