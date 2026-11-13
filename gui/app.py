@@ -189,6 +189,15 @@ STEPS = [
         "flood_events",
     ),
     (
+        "processing.event_composites",
+        "observations",
+        "Event composites",
+        "GFM scenes of every event combined per unit (run GFM scenes again after Flood events)",
+        ["UNITS", "FORCE", "RUN_ID"],
+        ["event_composites.csv"],
+        "event_composites",
+    ),
+    (
         "processing.validate",
         "observations",
         "Validation",

@@ -4376,6 +4376,46 @@ class Evidence:
         return valid, valid & np.isin(flood, params["flood_values"]), reference
 
     @staticmethod
+    def select_dry_scenes(df_scenes, df_events, max_dry):
+        """
+        Dry scene windows worth keeping for the event evidence. Only a unit in which an event has a wet scene
+        can show that a levee held; there, the first max_dry acquisition days after the peak with a dry scene
+        are kept (water behind an overtopped levee would still be visible then).
+        :param df_scenes: screened pairs with unit_id, item_id, datetime (ISO), kept (wet scene window)
+        :param df_events: events per unit with event_id, unit_id, peak_date, window_start, window_end
+        :param max_dry: dry acquisition days kept per event and unit
+        :return: DataFrame unit_id, item_id, event_id of the dry scene windows to keep
+        """
+        columns = ["unit_id", "item_id", "event_id"]
+        if not len(df_scenes) or not len(df_events) or max_dry < 1:
+            return pd.DataFrame(columns=columns)
+        s = df_scenes[["unit_id", "item_id", "datetime", "kept"]].copy()
+        s["day"] = (
+            pd.to_datetime(s["datetime"], utc=True, format="ISO8601")
+            .dt.tz_localize(None)
+            .dt.normalize()
+        )
+        s["kept"] = s["kept"].astype(str).str.lower().isin(["true", "1"])
+        e = df_events[
+            ["event_id", "unit_id", "peak_date", "window_start", "window_end"]
+        ].copy()
+        for c in ("peak_date", "window_start", "window_end"):
+            e[c] = pd.to_datetime(e[c])
+        m = s.merge(e, on="unit_id")
+        m = m[(m["day"] >= m["window_start"]) & (m["day"] <= m["window_end"])]
+        wet = m[m["kept"]].groupby(["event_id", "unit_id"]).size()
+        dry = m[~m["kept"] & (m["day"] > m["peak_date"])]
+        dry = dry[
+            pd.MultiIndex.from_frame(dry[["event_id", "unit_id"]]).isin(wet.index)
+        ]
+        if not len(dry):
+            return pd.DataFrame(columns=columns)
+        rank = dry.groupby(["event_id", "unit_id"])["day"].rank(method="dense")
+        return (
+            dry.loc[rank <= max_dry, columns].drop_duplicates().reset_index(drop=True)
+        )
+
+    @staticmethod
     def comparison_zones(labels, hand, regions, reach, max_level_m, outside=None):
         """
         Comparison zone per region: cells outside all regions (labels == 0, and inside
@@ -4615,6 +4655,7 @@ class Config:
         "events.min_peak_rp": "float",
         "events.days_before": "int",
         "events.days_after": "int",
+        "events.max_dry_scenes": "int",
         "sources.glofas_enabled": "bool",
         "sources.glofas_dataset_id": "str",
         "sources.glofas_request": "table",
@@ -4848,6 +4889,7 @@ class Config:
         "events.min_peak_rp": 2.0,
         "events.days_before": 5,
         "events.days_after": 21,
+        "events.max_dry_scenes": 3,
         # transport embankments from the DTM (Stage G step 3; also in config/advanced.toml)
         "country.transport_lines": [],
         "transport.station_spacing_m": 10.0,

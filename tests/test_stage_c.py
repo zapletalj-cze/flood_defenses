@@ -999,6 +999,47 @@ list_res.append(
         ),
     )
 )
+
+# --- Stage H: dry scene windows for the event evidence. An event whose window holds the wet scene D and, after its
+# peak, the dry scene C: download_gfm.py copies C for the units with protected areas; scene tests stay as they are ---
+n_tests_before = len(pd.read_csv(out / "gfm_evidence.csv"))
+gdf_line = gpd.read_file(out / "river_groups.gpkg")
+gpd.GeoDataFrame(
+    {
+        "event_id": ["T4_E1_20180303"],
+        "group_id": [1],
+        "peak_date": ["2018-03-03"],
+        "window_start": ["2018-02-26"],
+        "window_end": ["2019-05-31"],
+    },
+    geometry=[gdf_line.geometry.union_all()],
+    crs=gdf_line.crs,
+).to_file(out / "events.gpkg")
+proc = run("download.download_gfm", "download_gfm_events")
+df_idx_h = pd.read_csv(
+    out / "gfm_index.csv", dtype={"unit_id": str}, keep_default_na=False
+)
+dry_rows = df_idx_h[df_idx_h["event_dry"].astype(str).str.lower() == "true"]
+units_pa = set(gpd.read_file(out / "protected_areas.gpkg")["unit_id"]) | set(
+    gpd.read_file(out / "protected_areas_by_group.gpkg")["unit_id"]
+)
+proc_e = run("processing.gfm_evidence", "gfm_evidence_after_events")
+list_res.append(
+    (
+        f"Stage H: the dry scene C after the peak is copied for the {len(units_pa)} units with protected areas "
+        f"({len(dry_rows)} dry windows, items {sorted(set(dry_rows.item_id))}); a rerun copies nothing more; the "
+        "scene-level tests ignore them",
+        proc.returncode == 0
+        and set(dry_rows.item_id) == {"GFM_TEST_C"}
+        and set(dry_rows.unit_id) == units_pa
+        and all(Path(x).exists() for x in dry_rows.flood_path)
+        and run("download.download_gfm", "download_gfm_events_2").returncode == 0
+        and len(pd.read_csv(out / "gfm_index.csv")) == len(df_idx_h)
+        and proc_e.returncode == 0
+        and len(pd.read_csv(out / "gfm_evidence.csv")) == n_tests_before,
+    )
+)
+(out / "events.gpkg").unlink()
 server.shutdown()
 
 print("Timings (s): " + ", ".join(f"{k} {v:.1f}" for k, v in timings.items()))

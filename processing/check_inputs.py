@@ -36,6 +36,7 @@ OPTIONAL = [
     "processing.validate",
     "processing.transport_embankments",
     "processing.flood_events",
+    "processing.event_composites",
 ]
 
 if __name__ == "__main__":

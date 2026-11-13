@@ -111,6 +111,8 @@ OUTPUTS = {
 TABLES = [
     "units.csv",
     "event_evidence.csv",
+    "event_composites.csv",
+    "max_extent_comparison.csv",
     "gfm_evidence.csv",
     "event_rp.csv",
     "validation_rp_confusion.csv",

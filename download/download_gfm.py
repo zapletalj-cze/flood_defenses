@@ -47,12 +47,16 @@ KEYS = [
     "sources.request_pause_s",
     "sources.max_retries",
     "evidence.min_valid_pixels",
+    "events.max_dry_scenes",
+    "country.corridor_buffer_m",
 ]
 REQUIRED_ASSETS = ["flood", "exclusion", "reference_water"]
 OPTIONAL_ASSETS = ["likelihood", "advisory"]
-COLUMNS = ["unit_id", "item_id", "datetime", "flooded_pixels", "kept"] + [
-    f"{role}_path" for role in REQUIRED_ASSETS + OPTIONAL_ASSETS
-]
+COLUMNS = (
+    ["unit_id", "item_id", "datetime", "flooded_pixels", "kept"]
+    + [f"{role}_path" for role in REQUIRED_ASSETS + OPTIONAL_ASSETS]
+    + ["event_dry"]  # a dry window kept for the event evidence (Stage H)
+)
 
 
 def gdal_path(href):
@@ -111,10 +115,11 @@ def screen_item(job):
                 "datetime": job["datetime"],
                 "flooded_pixels": round(flooded),
                 "kept": flooded > p["min_valid_pixels"],
+                "event_dry": bool(job.get("copy_dry")),
             }
             for role in REQUIRED_ASSETS + OPTIONAL_ASSETS:
                 row[f"{role}_path"] = ""
-                if not row["kept"] or role not in job["assets"]:
+                if not (row["kept"] or row["event_dry"]) or role not in job["assets"]:
                     continue
                 target = Path(p["gfm_dir"]) / unit_id / f"{safe_id}_{role}.tif"
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -361,13 +366,89 @@ if __name__ == "__main__":
                     kept,
                 )
 
-    # --- Index of the kept unit windows (all runs, all units) ---
+    # --- Dry windows for the event evidence (Stage H): in units with protected areas where an event has a wet
+    # scene, the first max_dry_scenes dry acquisition days after its peak ---
     df_scr = (
         pd.read_csv(scr_path, dtype={"unit_id": str}, keep_default_na=False)
         if scr_path.exists()
         else pd.DataFrame(columns=COLUMNS)
     )
-    keep = df_scr["kept"].astype(str).str.lower().isin(["true", "1"])
+    if (out_dir / "events.gpkg").exists() and len(df_scr):
+        gdf_ev = gpd.read_file(out_dir / "events.gpkg").to_crs(wkt)
+        list_pa = [
+            gpd.read_file(out_dir / name, columns=["unit_id"], ignore_geometry=True)
+            for name in ("protected_areas.gpkg", "protected_areas_by_group.gpkg")
+            if (out_dir / name).exists()
+        ]
+        with_pa = set(pd.concat(list_pa)["unit_id"]) if list_pa else set()
+        gdf_cu = gpd.GeoDataFrame(
+            {"unit_id": cores.index}, geometry=cores.to_crs(wkt).values, crs=wkt
+        )
+        gdf_cu = gdf_cu[gdf_cu["unit_id"].isin(with_pa)]
+        gdf_ev = gdf_ev.set_geometry(
+            gdf_ev.geometry.buffer(country["corridor_buffer_m"])
+        )
+        df_eu = gpd.sjoin(
+            gdf_ev[["event_id", "peak_date", "window_start", "window_end", "geometry"]],
+            gdf_cu,
+            predicate="intersects",
+        )
+        done_dry = df_scr["event_dry"].astype(str).str.lower().isin(["true", "1"])
+        df_dry = gis.Evidence.select_dry_scenes(
+            df_scr[~done_dry], df_eu, cfg["events"]["max_dry_scenes"]
+        )
+        have = set(
+            zip(df_scr.loc[done_dry, "item_id"], df_scr.loc[done_dry, "unit_id"])
+        )
+        df_dry = df_dry[
+            [(i, u) not in have for i, u in zip(df_dry["item_id"], df_dry["unit_id"])]
+        ].drop_duplicates(["item_id", "unit_id"])
+        list_dry = []
+        for item_id, df_one in df_dry.groupby("item_id"):
+            item = items.get(item_id)
+            if item is None:
+                continue  # outside the period of this run
+            available = item.get("assets", {})
+            list_dry.append(
+                {
+                    "item_id": item_id,
+                    "datetime": item["properties"].get("datetime")
+                    or item["properties"].get("start_datetime"),
+                    "units": list(df_one["unit_id"]),
+                    "grids": {u: grids[u] for u in df_one["unit_id"] if u in grids},
+                    "assets": {
+                        role: available[assets[role]]["href"]
+                        for role in REQUIRED_ASSETS + OPTIONAL_ASSETS
+                        if assets.get(role) and assets[role] in available
+                    },
+                    "params": params,
+                    "copy_dry": True,
+                }
+            )
+        list_dry = [j for j in list_dry if len(j["grids"]) == len(j["units"])]
+        n_dry = 0
+        with ThreadPoolExecutor(max_workers=sources["gfm_download_threads"]) as pool:
+            for list_rows in pool.map(screen_item, list_dry):
+                if list_rows:
+                    pd.DataFrame(list_rows, columns=COLUMNS).to_csv(
+                        scr_path, mode="a", header=False, index=False
+                    )
+                    n_dry += len(list_rows)
+        log.info(
+            "Event evidence: %d events touch %d units with protected areas; %d dry scene windows copied (first %d "
+            "dry acquisition days after the peak where the event has a wet scene in the unit).",
+            df_eu["event_id"].nunique(),
+            df_eu["unit_id"].nunique(),
+            n_dry,
+            cfg["events"]["max_dry_scenes"],
+        )
+        df_scr = pd.read_csv(scr_path, dtype={"unit_id": str}, keep_default_na=False)
+
+    # --- Index of the kept unit windows (all runs, all units); a dry copy replaces the screening row of its pair ---
+    df_scr = df_scr.drop_duplicates(["item_id", "unit_id"], keep="last")
+    keep = df_scr["kept"].astype(str).str.lower().isin(["true", "1"]) | df_scr[
+        "event_dry"
+    ].astype(str).str.lower().isin(["true", "1"])
     df_idx = df_scr[keep & df_scr["unit_id"].isin(df_all["unit_id"])]
     df_idx = df_idx.drop(columns="kept").sort_values(["unit_id", "datetime"])
     df_idx.to_csv(out_dir / "gfm_index.csv", index=False)

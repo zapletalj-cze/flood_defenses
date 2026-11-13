@@ -228,18 +228,19 @@ processing/
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
   transport_embankments.py road and railway embankments from the DTM, their openings (Stage G step 3)
   flood_events.py          flood events per river group from the discharge series (Stage H step 2)
+  event_composites.py      GFM scenes of every event combined per unit (Stage H step 3)
 tests/
   test_kernels.py          numba kernels on small grids (22 checks)
   test_pipeline.py         end-to-end synthetic countries for Stage A and G (45 checks)
   test_stage_b.py          end-to-end synthetic country for Stage B (18 checks)
-  test_stage_c.py          end-to-end Stage C on the Stage B country (27 checks)
+  test_stage_c.py          end-to-end Stage C on the Stage B country (28 checks)
   test_hand_yz.py          land cover exposure on the Stage B country (8 checks)
   test_stage_d.py          Stage D on the Stage B country, country code T4D (D1: 10 checks)
   test_stage_e.py          Stage E on its own synthetic country T5 (E1: 16, E2: 6, E3: 7, E4: 8, E5: 7 checks)
   test_stage_f.py          Stage F on its own synthetic country T6 (16 checks)
   test_gui.py              server of the GUI on a synthetic setup (15 checks)
   test_transport.py        transport embankments on a synthetic country T7 (15 checks)
-  test_stage_h.py          Stage H: event catalogue on synthetic series (9 checks)
+  test_stage_h.py          Stage H: event catalogue and event composites on synthetic data (16 checks)
   make_benchmark_world.py  24 x 24 km synthetic DTM for performance runs
 download_nld.py            US National Levee Database download (optional)
 ```
@@ -446,6 +447,7 @@ Keys beyond the original schema, with the reason for each:
 | 12 | `discharge_prepare.py` | `discharge_<source>.npz`, `discharge_cells_<source>.gpkg`, `plots/discharge/prepare/` |
 | 13 | `rp_bounds.py` | `event_rp.csv`, `event_rp_combined.csv`, `discharge_matches.gpkg`; `protected_areas_rp.gpkg` updated: matches per source, observed bounds, combined `rp`, `*_prior` model values; `plots/discharge/<RUN_ID>/` |
 | 13a (Stage H) | `flood_events.py` | `events.gpkg`, `event_groups.csv`, `plots/events/<RUN_ID>/` |
+| 13b (Stage H) | `download_gfm.py` again, then `event_composites.py` | dry scene windows (`event_dry`); `work/<c>/events/<event_id>/`, `event_composites.csv`, `max_extent_comparison.csv` |
 | 14 | `validate.py` | `validation.json`, `validation_coverage.gpkg`, `validation_rp_confusion.csv` |
 
 Run logs go to `output_dir/<country>/logs/<script>_<timestamp>.log`.
@@ -1582,8 +1584,8 @@ into evidence.
 
 Stage H adds an event level to the scene-by-scene evidence of §10.2: flood events are
 defined from discharge, the GFM scenes of an event are combined, and a protected area gets
-one outcome per event. Steps: access check (done, §10.0), event catalogue (done, below),
-event composites, event evidence, integration into `rp_bounds.py`.
+one outcome per event. Steps: access check (done, §10.0), event catalogue and event
+composites (done, below), event evidence, integration into `rp_bounds.py`.
 
 **Event catalogue (`flood_events.py`, `pixi run flood-events`).** Needs `river_groups.gpkg`
 (§8.3) and the prepared discharge (§11.3).
@@ -1616,16 +1618,60 @@ event composites, event evidence, integration into `rp_bounds.py`.
   largest peaks (windows shaded, the threshold dashed) and events per year.
 
 **Parameters** (`[events]`, placeholders): `min_peak_rp = 2.0`, `days_before = 5`,
-`days_after = 21`. At RP 2 a river has about one event in two years, so a country has
+`days_after = 21`, `max_dry_scenes = 3`. At RP 2 a river has about one event in two years, so a country has
 thousands of events; only those since the first GFM scenes (2015) can get evidence.
 
 **Measured.** 3 400 groups and cells with 44 years of daily values: 15 s in total
 (matching 12.7 s), peak memory 1.5 GB, of which the series take 0.2 GB per 1 000 cells.
 
-**Test** (`pixi run test-stage-h`, 9 checks): one peak with its window and Gumbel RP; two
+**Test of the catalogue** (`pixi run test-stage-h`): one peak with its window and Gumbel RP; two
 peaks 18 days apart merged into one event; two events years apart; a series without a
 flood (about one event in five years at RP 5); the source order; a group without a
 matching cell; ids and geometry; plots.
+
+**Dry scenes for events (`download_gfm.py`).** Scene windows are kept only when they show
+flood in the unit. "Held" needs dry observations after the peak, so, when `events.gpkg`
+exists, a second pass copies a few dry windows, and only where they can decide an outcome:
+- **Units:** only units with protected areas (file A or B) that the buffered lines of the
+  event's river group cross (`corridor_buffer_m`).
+- **Events:** only where the event has a wet scene in that unit: without water outside,
+  no levee is tested.
+- **Scenes:** the first `events.max_dry_scenes` (3) acquisition days with a dry scene
+  **after the peak**.
+- **Bookkeeping:** the windows are marked `event_dry` in `screening.csv` and
+  `gfm_index.csv`. The scene-level tests of `gfm_evidence.py` ignore them, so their results
+  do not change. A rerun copies only what is missing.
+- Run order: `flood-events`, then `download-gfm` (again).
+
+**Event composites (`event_composites.py`, `pixi run event-composites`).**
+1. **Scenes of an event:** for every unit the buffered lines of the group cross, the
+   scene windows of `gfm_index.csv` inside the event window.
+2. **Common grid:** every scene is brought to the unit grid (the grid of `hand_undef.tif`)
+   by nearest neighbour; the CRS of the scene is read from its file. Valid = observed, not
+   excluded, not reference water (and without an advisory flag when the switch is on).
+3. **Per cell:** `max_extent` (1 wet at least once, 0 observed dry, 255 never valid),
+   `n_valid`, `n_wet`, `first_wet` and `last_wet` (days from the window start, −1 never).
+4. **Per-scene masks** are not stored again: they are the clipped scene layers.
+
+- **Outputs:** rasters `work/<c>/events/<event_id>/<unit>_<layer>.tif`;
+  `event_composites.csv` per event and unit (scenes, acquisition days, first and last day
+  relative to the peak, days after the peak, wet and observed area); maps in
+  `plots/events/<RUN_ID>/composite_maps` (maximum extent, first wet day, valid
+  observations, protected areas).
+- **Run variables:** `EVENTS` and `UNITS` select the pilot; `FORCE` recomputes.
+- **Official maximum flood extent** (`evidence.max_extent_files`, §10.0): every file is
+  compared with the composites it overlaps, on their grid: area in both, only in the
+  composite, only in the official product, and how much of the latter lies on cells the
+  composite never saw valid (`max_extent_comparison.csv`, the log gives the IoU per event).
+  The period of the file is not known to the package: compare it with the event you
+  ordered it for.
+- **Measured:** 20 scenes on a 2600 x 2600 cell unit (10 m) take 9 s (0.45 s per scene),
+  peak memory 0.6 GB, 7.6 MB of rasters.
+
+**Test** (Stage H, 16 checks; Stage C, 28): the dry scene selection; a composite from
+scenes in another CRS with an excluded strip and reference water; counts, first and last
+wet day; a scene outside the window ignored; the comparison with an "official" extent;
+the second download pass on the mock GFM server.
 
 ## 11. Observed bounds of the return period: GloFAS and EFAS (Stage F)
 
@@ -2193,7 +2239,7 @@ protected areas take seconds.
     - `include_implied`: `defenses_clip.gpkg` features unchanged, implied parts added outside them only;
     - `include_in_review`: `review_implied.gpkg` with reasons;
     - `FORCE`: `protected_areas.py` snaps the rivers again (`rivers_channel.gpkg`) and recomputes all units.
-- **`pixi run test-stage-c`, 27 checks,** on the Stage B country. The Stage B test runs
+- **`pixi run test-stage-c`, 28 checks,** on the Stage B country. The Stage B test runs
   first in the same folder if its outputs are missing.
   - **Synthetic inputs:**
     - **GFM:** five scenes at 20 m in EPSG:3035, with flood extents drawn from the

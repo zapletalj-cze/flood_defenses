@@ -9,6 +9,7 @@ placeholders = [
     "events.min_peak_rp",
     "events.days_before",
     "events.days_after",
+    "events.max_dry_scenes",
     "country.bytes_per_cell",
     "country.rp.distribution_classes",
     "country.rp.distribution_shares",
@@ -455,6 +456,7 @@ plot_all_in_units = []
 min_peak_rp = 2.0               # smallest return period (years) of a peak that starts an event
 days_before = 5                 # window start before the peak
 days_after = 21                 # window end after the peak (water behind a levee stays visible)
+max_dry_scenes = 3              # dry GFM acquisition days kept after the peak, per event and unit with a wet scene
 
 [discharge]
 sources = ["efas", "glofas"]

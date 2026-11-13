@@ -240,6 +240,11 @@ if __name__ == "__main__":
         )
         run["HINTS"] = False
     df_idx = pd.read_csv(out_dir / "gfm_index.csv", dtype={"unit_id": str}).fillna("")
+    if "event_dry" in df_idx.columns:
+        # dry windows kept for the event evidence (Stage H) are not part of the scene-level tests
+        df_idx = df_idx[
+            ~df_idx["event_dry"].astype(str).str.lower().isin(["true", "1"])
+        ]
     if len(df_idx):
         dates = pd.to_datetime(df_idx["datetime"], utc=True, format="ISO8601").dt.date
         for bound, compare in [
