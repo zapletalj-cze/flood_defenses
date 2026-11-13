@@ -52,6 +52,8 @@ KEYS = [
     "sources.gfm_exclusion_values",
     "sources.gfm_reference_water_values",
     "sources.gfm_nodata_values",
+    "sources.gfm_advisory_values",
+    "evidence.use_advisory_flags",
 ]
 COLUMNS = [
     "protected_area_id",
@@ -271,7 +273,23 @@ if __name__ == "__main__":
         "exclusion_values": sources["gfm_exclusion_values"],
         "reference_water_values": sources["gfm_reference_water_values"],
         "nodata_values": sources["gfm_nodata_values"],
+        # switch: cells with an advisory flag (frost, dry soil, wind) are not valid observations
+        "advisory_values": (
+            sources["gfm_advisory_values"] if evidence["use_advisory_flags"] else []
+        ),
     }
+    if evidence["use_advisory_flags"]:
+        n_adv = (
+            int((df_idx["advisory_path"] != "").sum())
+            if "advisory_path" in df_idx.columns
+            else 0
+        )
+        log.info(
+            "use_advisory_flags: %d of %d scene windows have the advisory layer; the others are tested without it "
+            "(run download_gfm.py with gfm_assets.advisory set to get it).",
+            n_adv,
+            len(df_idx),
+        )
     list_task = []
     for unit_id, df_scn in df_idx.groupby("unit_id"):
         unit_dir = work_dir / "units" / unit_id

@@ -49,7 +49,7 @@ KEYS = [
     "evidence.min_valid_pixels",
 ]
 REQUIRED_ASSETS = ["flood", "exclusion", "reference_water"]
-OPTIONAL_ASSETS = ["likelihood"]
+OPTIONAL_ASSETS = ["likelihood", "advisory"]
 COLUMNS = ["unit_id", "item_id", "datetime", "flooded_pixels", "kept"] + [
     f"{role}_path" for role in REQUIRED_ASSETS + OPTIONAL_ASSETS
 ]
@@ -200,6 +200,10 @@ if __name__ == "__main__":
         if scr_path.exists()
         else pd.DataFrame(columns=COLUMNS)
     )
+    if scr_path.exists() and list(df_scr.columns) != COLUMNS:
+        # a checkpoint of an earlier version (fewer layers): its columns are brought to the current ones
+        df_scr = df_scr.reindex(columns=COLUMNS, fill_value="")
+        df_scr.to_csv(scr_path, index=False)
     if run["FORCE"]:
         df_scr = df_scr[~df_scr["unit_id"].isin(df_units["unit_id"])]
         df_scr.to_csv(scr_path, index=False)

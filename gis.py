@@ -4290,13 +4290,14 @@ class Evidence:
     def scene_masks(scene, bounds, resolution, wkt, hand, params, warp_memory_mb):
         """
         Valid and wet cells of one scene on a grid
-        :param scene: dict with flood_path, exclusion_path, reference_water_path
+        :param scene: dict with flood_path, exclusion_path, reference_water_path and, optionally, advisory_path
         :param bounds: grid bounds in wkt
         :param resolution: cell size
         :param wkt: grid CRS
         :param hand: HAND on the grid (nodata cells are not valid)
         :param params: dict with nodata_values, exclusion_values, reference_water_values,
-                       flood_values
+                       flood_values; advisory_values (optional, non-empty = cells with these
+                       advisory flags are not valid, where the scene has an advisory layer)
         :param warp_memory_mb: warp memory in MB
         :return: (valid, wet, reference water) bool arrays
         """
@@ -4321,6 +4322,17 @@ class Evidence:
             & ~reference
             & np.isfinite(hand)
         )
+        if params.get("advisory_values") and scene.get("advisory_path"):
+            advisory, _ = Raster.read_window(
+                scene["advisory_path"],
+                bounds,
+                resolution,
+                "near",
+                warp_memory_mb,
+                dst_wkt=wkt,
+                src_nodata=nodata,
+            )
+            valid &= ~np.isin(advisory, params["advisory_values"])
         return valid, valid & np.isin(flood, params["flood_values"]), reference
 
     @staticmethod
@@ -4557,6 +4569,9 @@ class Config:
         "sources.gfm_exclusion_values": "int_list",
         "sources.gfm_reference_water_values": "int_list",
         "sources.gfm_nodata_values": "int_list",
+        "sources.gfm_advisory_values": "int_list",
+        "evidence.use_advisory_flags": "bool",
+        "evidence.max_extent_files": "opt_paths",
         "sources.glofas_enabled": "bool",
         "sources.glofas_dataset_id": "str",
         "sources.glofas_request": "table",
@@ -4782,6 +4797,10 @@ class Config:
         "levee_gaps.max_gap_m": 200.0,
         "levee_gaps.crest_tolerance_m": 0.5,
         "leaks.sample_spacing_m": 50.0,
+        # GFM advisory flags (Stage H): switch and values, also in config/advanced.toml
+        "sources.gfm_advisory_values": [1, 2, 3],
+        "evidence.use_advisory_flags": False,
+        "evidence.max_extent_files": [],
         # transport embankments from the DTM (Stage G step 3; also in config/advanced.toml)
         "country.transport_lines": [],
         "transport.station_spacing_m": 10.0,

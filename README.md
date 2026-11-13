@@ -20,7 +20,7 @@ explicitly.
 | A | `gis.py` additions, `prepare_dtm.py`, `build_units.py`, `protected_areas.py` | done, tested, benchmarked |
 | A+ | faster kernels; fixes B1–B4; gap filling for water surfaces | done, tested, benchmarked |
 | B | `download_ghsl.py`, `rp_index.py` | done, tested on synthetic data; download URLs not verified. The OSM steps (`download_osm.py`, `osm_hydraulics.py`) were removed in Stage G |
-| C | `download_gfm.py`, `gfm_evidence.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes not verified; the GloFAS part is replaced by Stage F |
+| C | `download_gfm.py`, `gfm_evidence.py`, `rp_bounds.py`, `validate.py` | done, tested on synthetic data (26 checks); GFM endpoint, asset names and pixel codes verified on the service on 2026-11-13 (§10.0); the GloFAS part is replaced by Stage F |
 | HAND_YZ | `download_worldcover.py`, `HAND_YZ.py`: land cover exposure supplementing GHSL | done, tested on synthetic data (7 checks); WorldCover source verified, Urban Atlas field and codes not verified |
 | D | industrial sites, dense urban areas, large systems ([plan](docs/stage_d_plan.md)) | **D1 done** (DSM inspection, GHSL extensions, `download_clms.py`, `context_zones.py`; 8 checks); D2–D5 pending |
 | E | implied protection in dense built-up reaches, experimental ([plan](docs/stage_e_plan.md)) | **E1–E5 done** (`snap_rivers.py`, `plots.py`, `implied_segments.py`, `implied_protection.py`, `implied_evaluate.py`; 44 checks); integration with D4 outputs once they exist |
@@ -228,7 +228,7 @@ processing/
   validate.py              area recall and precision; RP confusion matrix (was validate_defenses.py)
   transport_embankments.py road and railway embankments from the DTM, their openings (Stage G step 3)
 tests/
-  test_kernels.py          numba kernels on small grids (21 checks)
+  test_kernels.py          numba kernels on small grids (22 checks)
   test_pipeline.py         end-to-end synthetic countries for Stage A and G (45 checks)
   test_stage_b.py          end-to-end synthetic country for Stage B (18 checks)
   test_stage_c.py          end-to-end Stage C on the Stage B country (27 checks)
@@ -1344,6 +1344,80 @@ were flooded (Global Flood Monitoring, GFM, Sentinel-1 SAR flood extents since 2
 how rare the discharge was on that day (GloFAS and EFAS, §11). Observations bound the RP; they never
 create, move or delete a protected area.
 
+### 10.0 GFM access, layers and the maximum flood extent
+
+Verified on the service on 2026-11-13; details in `docs/stage_h_gfm_access.md`.
+
+**Access (no account needed).**
+- **Search:** STAC API `https://stac.eodc.eu/api/v1`, collection `GFM`, scenes since 2015,
+  all processed with one version (v3.1.0).
+- **Files:** cloud-optimised GeoTIFFs on `https://data.eodc.eu`, read directly by GDAL;
+  20 m pixels on Equi7 tiles of 300 km.
+- **CRS:** the Equi7 grid of the continent (azimuthal equidistant), given as WKT **without
+  an EPSG code**. The package reads the CRS from every file and assumes none.
+- **Licence:** CEMS terms of service, free and open. Publications need the notice
+  "Generated using Copernicus Emergency Management Service information [Year]", or
+  "Contains modified …" for adapted data.
+
+**Layers used** (observations only; `[sources] gfm_assets`):
+
+| Role | Asset | Values |
+|---|---|---|
+| flood | `ensemble_flood_extent` | 1 flood, 0 none, 255 no data |
+| exclusion | `exclusion_mask` | 1 = no reliable observation (forest, built-up, topography, radar shadow) |
+| reference water | `reference_water_mask` | 1, 2 = permanent and seasonal water (monthly mask) |
+| likelihood (optional) | `ensemble_likelihood` | 0–100; flood pixels 50–100 |
+| advisory (optional) | `advisory_flags` | 1 low regional backscatter (frost, snow, dry soil), 2 rough water (wind), 3 both |
+
+- **Excluded share.** In the scene checked for southern Poland, 66 % of the observed pixels
+  were excluded. Valid observations inside protected areas are scarcer than the swath
+  suggests.
+- **Never used:** terrain-extended extents or depths, GFM "Affected population" and
+  "Affected land cover".
+
+**Switch `[evidence] use_advisory_flags`** (default `false`). With `true`, cells with an
+advisory flag are not valid observations, neither wet nor dry: under frost, dry soil or
+wind the contrast between water and land is unreliable. It needs the advisory layer of
+the scenes: `download_gfm.py` copies it from now on; scenes downloaded earlier are tested
+without it (the log gives the count).
+
+**Maximum flood extent: how to get the official product.** It is generated on demand for
+a registered user and is not part of the STAC archive, so the package cannot fetch it. It
+is only needed for the comparison with the event composite (Stage H). Step by step:
+
+1. **Register.** Open `https://portal.gfm.eodc.eu`. With a GloFAS or EFAS account, log in;
+   otherwise choose **Register**, fill in the form and confirm the e-mail.
+2. **Create the area of interest.** Choose **AOI** in the main banner, enter a name and a
+   description, **Next Step**. Then one of:
+   - **AOI Coordinates:** enter the upper-left and lower-right latitude and longitude;
+   - **Draw AOI:** draw a rectangle on the map;
+   - **Regions:** pick a country and an administrative region.
+
+   **Save AOI.** At most 25 AOIs per user. For the pilot event (September 2024, southern
+   Poland) the search of step 1 used 16.0–18.5° E, 50.0–51.2° N.
+3. **Load the products.** Choose **Products** in the main banner, select the AOI under
+   **Select AOI**, set the **Start** and **End** date (do not tick "Latest"), **Load
+   products**.
+   - The period can be **at most two months**. For a longer event window, order two
+     periods.
+4. **Order.** Choose **Download maximum flood extent**. In the window, tick the format
+   **raster (tiff)** and check the AOI and the dates, then **Generate extent**.
+5. **Wait for two e-mails:** a confirmation, then the link to the file when it is ready.
+   Download it.
+6. **Give it to the package:** put the GeoTIFF anywhere and list its path in
+   `defenses.toml`:
+
+   ```toml
+   [evidence]
+   max_extent_files = ["D:/data/gfm/max_extent_2024-09_PL.tif"]
+   ```
+
+   Several files (periods, areas) can be listed. Their CRS is read from the files.
+
+The same order is possible through the REST API `https://api.gfm.eodc.eu/v2`
+(`/auth/get_bearer_token`, then `/download/max_flood_extent/{aoi_id}/{start}/{end}` and
+`/download/max_flood_extent/{order_id}`); it needs the same account.
+
 ### 10.1 Scene search and screening (`download_gfm.py`)
 
 1. **One search for all units.** The densified unit cores are transformed to WGS84. Their
@@ -1951,7 +2025,7 @@ protected areas take seconds.
 
 ## 14. Tests
 
-- **`pixi run test-kernels`, 21 checks:**
+- **`pixi run test-kernels`, 22 checks:**
   - closed ring, gap, diagonal barrier;
   - nested rings in both crest orders;
   - seed and order propagation, entry cell;
@@ -2270,15 +2344,11 @@ from outside.**
 4. **`rp_source`.** `"cap"` covers both `rp_cap` and `max_rp` lowering the model value.
 5. **Maximum damage table format:** columns `country`, `residential`,
    `non_residential`, matched on the country code.
-6. **GFM source.** The STAC endpoint, collection and asset keys are **not verified**, and
-   the host was not reachable from this environment.
-   - **What a search showed.** EODC documentation names `https://stac.eodc.eu/api/v1`,
-     collection `GFM` and the assets `ensemble_flood_extent`, `reference_water_mask` and
-     `ensemble_likelihood`.
-   - **Missing.** No asset name for the exclusion mask was found.
-   - The configuration entries are empty; please confirm them.
-7. **GFM pixel codes.** Flood 1, exclusion 1, reference water 1 and nodata 255 are
-   placeholders.
+6. **GFM source.** Resolved: endpoint, collection and asset keys were verified on the
+   service on 2026-11-13 and are set in `config/advanced.toml` (§10.0).
+7. **GFM pixel codes.** Resolved: flood 1, exclusion 1, reference water 1 and 2, nodata 255
+   were read from the files. Open: which of the reference water values is permanent and
+   which seasonal (both count as water).
 8. **Stage F (discharge), §11:**
    - **From the EWDS forms (F1):** request values, `data_format`, the years, and the EFAS
      discharge variable.
@@ -2335,7 +2405,7 @@ from outside.**
 |---|---|---|---|
 | GHSL built-up volume, total and non-residential, R2023A, 100 m | Exposure value | JRC GHSL data package 2023 | to be confirmed from the data package |
 | JRC global depth-damage functions | Maximum damage and damage curves | provided by the user as CSV | per the JRC publication |
-| Copernicus Emergency Management Service, Global Flood Monitoring (GFM) | held / flooded tests, missing-barrier hints | STAC API, endpoint to be confirmed (§15.4) | Copernicus data policy (free and open); confirm the attribution text on the product page |
+| Copernicus Emergency Management Service, Global Flood Monitoring (GFM) | held / flooded tests, missing-barrier hints | STAC API `https://stac.eodc.eu/api/v1`, collection `GFM`, no login (§10.0) | CEMS terms of service: free and open; notice "Generated using (or: Contains modified) Copernicus Emergency Management Service information [Year]" |
 | GloFAS historical river discharge, `cems-glofas-historical` (v4.0, consolidated) | event return periods (§11) | CEMS Early Warning Data Store, API `https://ewds.climate.copernicus.eu/api` (verified) | CEMS-FLOODS datasets licence (rev. 1), accepted on the download form; notice "Contains modified Copernicus Emergency Management Service information [year]"; dataset citation on the dataset page (§11.1) |
 | EFAS historical river discharge, `efas-historical` (v5.0) | event return periods (§11) | CEMS Early Warning Data Store; access with your account to verify (the near-real-time part is reserved for EFAS partners) | CEMS-FLOODS datasets licence (rev. 1); the same notice (§11.1) |
 | ESA WorldCover 10 m 2021 v200 | land cover exposure (§9.3) | public bucket `esa-worldcover` (eu-central-1), verified | CC BY 4.0; attribution from the file: "ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium" |

@@ -328,6 +328,60 @@ list_res.append(
     )
 )
 
+# GFM scene masks: reference water values 1 and 2 are not valid; the advisory switch removes flagged cells.
+scene = {}
+grid = np.zeros((10, 10), np.uint8)
+layers_gfm = {
+    "flood": grid.copy(),
+    "exclusion": grid.copy(),
+    "reference_water": grid.copy(),
+    "advisory": grid.copy(),
+}
+layers_gfm["flood"][2:5, :] = 1
+layers_gfm["flood"][9, :] = 255
+layers_gfm["exclusion"][:, 0] = 1
+layers_gfm["reference_water"][0, :] = 1
+layers_gfm["reference_water"][1, :] = 2
+layers_gfm["advisory"][:, 5:] = 2
+for role, array in layers_gfm.items():
+    gis.Raster.write_array(
+        tmp / f"gfm_{role}.tif",
+        array,
+        (0, 20.0, 0, 200, 0, -20.0),
+        srs.ExportToWkt(),
+        nodata=255,
+    )
+    scene[f"{role}_path"] = str(tmp / f"gfm_{role}.tif")
+gfm_p = {
+    "nodata_values": [255],
+    "exclusion_values": [1],
+    "reference_water_values": [1, 2],
+    "flood_values": [1],
+}
+args = (
+    scene,
+    (0, 0, 200, 200),
+    20.0,
+    srs.ExportToWkt(),
+    np.zeros((10, 10), np.float32),
+)
+valid_off, wet_off, ref = gis.Evidence.scene_masks(*args, gfm_p, 64)
+valid_on, wet_on, _ = gis.Evidence.scene_masks(
+    *args, gfm_p | {"advisory_values": [1, 2, 3]}, 64
+)
+list_res.append(
+    (
+        f"scene_masks: nodata, excluded and reference water (values 1 and 2) are not valid ({int(valid_off.sum())} "
+        f"valid, {int(wet_off.sum())} wet, {int(ref.sum())} reference water); with the advisory switch flagged cells "
+        f"drop out ({int(valid_on.sum())} valid, {int(wet_on.sum())} wet)",
+        valid_off.sum() == 7 * 9
+        and wet_off.sum() == 3 * 9
+        and ref.sum() == 20
+        and valid_on.sum() == 7 * 4
+        and wet_on.sum() == 3 * 4,
+    )
+)
+
 # River groups: a main stem of five 10 km reaches, two tributaries and a minor stream.
 reaches = [
     shapely.linestrings(c)

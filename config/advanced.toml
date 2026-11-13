@@ -19,10 +19,6 @@ placeholders = [
     "evidence.hint_dry_share",
     "evidence.hint_min_scenes",
     "evidence.hint_exclusion_m",
-    "sources.gfm_flood_values",
-    "sources.gfm_exclusion_values",
-    "sources.gfm_reference_water_values",
-    "sources.gfm_nodata_values",
     "country.lulc.worldcover_categories",
     "country.context.urban_atlas_industrial_codes",
     "country.context.urban_atlas_dense_urban_codes",
@@ -307,24 +303,25 @@ ghsl_tile_schema = "https://ghsl.jrc.ec.europa.eu/download/GHSL_data_54009_shape
 ghsl_tile_field = "tile_id"
 ghsl_epoch = 0                  # 0 = latest available observed epoch; 2030 is modelled
 ghsl_nodata_as_zero = true      # GHSL nodata (ocean, outside coverage) counts as no building volume
-# Copernicus GFM through its STAC API (plain HTTP + JSON). NOT VERIFIED: the EODC documentation found by search
-# names https://stac.eodc.eu/api/v1 and the collection "GFM", and assets such as "ensemble_flood_extent",
-# "reference_water_mask", "ensemble_likelihood"; the exclusion-mask asset name was not confirmed. The service
-# could not be reached from the development session; confirm all names before filling them in.
-gfm_stac_url = ""
-gfm_collection = ""
-gfm_assets = { flood = "", exclusion = "", reference_water = "", likelihood = "" }
+# Copernicus GFM through its STAC API (plain HTTP + JSON). Verified on 2026-11-13 against the service (search, files
+# read without a login, values and CRS read from the files): docs/stage_h_gfm_access.md. Observed layers only.
+# Licence: CEMS terms of service; notice "Generated using (or: Contains modified) Copernicus Emergency Management
+# Service information [Year]".
+gfm_stac_url = "https://stac.eodc.eu/api/v1"
+gfm_collection = "GFM"
+gfm_assets = { flood = "ensemble_flood_extent", exclusion = "exclusion_mask", reference_water = "reference_water_mask", likelihood = "ensemble_likelihood", advisory = "advisory_flags" }
 gfm_date_from = "2015-01-01"
 gfm_date_to = ""                # empty = until today
 gfm_page_limit = 100            # items per STAC page
 gfm_token_env = ""              # environment variable holding a bearer token, if the service requires one
 gfm_screen_resolution_m = 100.0 # flood extent screened at this resolution before a scene is downloaded
 gfm_download_threads = 4        # scenes screened and copied at the same time (network-bound)
-# Pixel conventions of the GFM layers (placeholders: confirm in the GFM Product User Manual).
+# Pixel conventions of the GFM layers, read from the files and the Product User Manual (V20251201).
 gfm_flood_values = [1]
 gfm_exclusion_values = [1]
-gfm_reference_water_values = [1]
+gfm_reference_water_values = [1, 2]   # permanent and seasonal water of the monthly mask
 gfm_nodata_values = [255]
+gfm_advisory_values = [1, 2, 3]       # 1 low regional backscatter (frost, snow, dry soil), 2 rough water (wind), 3 both
 # ESA WorldCover 10 m (CC BY 4.0). Verified: URL pattern and grid from the official ESA-WorldCover download script,
 # a tile request (HTTP 200) and the legend in the tile metadata.
 worldcover_url_template = "https://esa-worldcover.s3.eu-central-1.amazonaws.com/{version}/{year}/map/ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif"
@@ -343,6 +340,8 @@ river_level_percentile = 90.0   # scene water level in HAND for missing-barrier 
 hint_margin_m = 0.5             # placeholder: a cell is clearly below the scene level by this margin
 hint_dry_share = 0.8            # placeholder: share of tested scenes in which a hint cell stays dry
 hint_min_scenes = 3             # placeholder: minimum number of tested scenes per hint cell
+max_extent_files = []           # optional: official GFM maximum flood extent rasters ordered in the portal (README 10.0)
+use_advisory_flags = false      # true: cells with a GFM advisory flag are not valid observations (needs the advisory layer)
 hint_exclusion_m = 40.0         # placeholder: cells this close to a barrier line or protected area are not tested
 
 # --- Stage D ---
